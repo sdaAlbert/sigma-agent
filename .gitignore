@@ -1,0 +1,13 @@
+# Local credentials and per-repository memory
+.secrets/
+.sigma-agent/
+pat.txt
+
+# Local notes, sessions, run output, and generated evaluation artifacts
+.learnings/
+var/
+evals/results/
+
+# Local build output and Python cache
+*.exe
+__pycache__/
