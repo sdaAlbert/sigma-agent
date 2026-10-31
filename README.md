@@ -1,8 +1,8 @@
 # Sigma Agent
 
-Sigma Agent is an experimental coding-agent runtime written in Go. It gives a model a bounded set of repository tools and runs coding tasks against a local Git worktree.
+Sigma Agent is an experimental coding-agent runtime written in Go, inspired by ideas from Pi Agent. It gives a model a bounded set of repository tools and runs coding tasks against a local Git worktree.
 
-Current capabilities include persistent sessions, context compaction, BM25 code retrieval with optional embedding and Qdrant hybrid search, project Skills and memory, and a read-only investigation subagent. Sigma Agent is an independent project inspired by ideas from Pi Agent; it is not a full Pi Agent clone.
+Current capabilities include persistent sessions, context compaction, BM25 code retrieval with optional embedding and Qdrant hybrid search, project Skills and memory, and a read-only investigation subagent.
 
 ## Quick start
 
