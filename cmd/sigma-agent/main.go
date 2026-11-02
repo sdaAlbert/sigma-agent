@@ -19,11 +19,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
-	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
 	"github.com/sdaAlbert/sigma-agent/internal/server"
+	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
 )
 
 func main() {
@@ -44,6 +45,10 @@ func main() {
 	jsonOutput := flag.Bool("json", false, "write Agent lifecycle events and the final run result as JSONL to stdout")
 	resumeID := flag.String("resume", "", "resume a persisted session by ID; omit --task to continue it")
 	githubMCP := flag.Bool("github-mcp", true, "enable read-only GitHub MCP tools when credentials are configured (default true)")
+	githubWrite := flag.Bool("github-write", false, "push the completed task branch and open a pull request; requires --push-branch and --github-mcp")
+	pushBranch := flag.String("push-branch", "", "feature branch to push and open a pull request from; required with --github-write")
+	baseBranch := flag.String("base-branch", "main", "branch that a pull request is opened against")
+	allowContainerNetwork := flag.Bool("allow-container-network", false, "allow outbound network in the test container so package managers can download dependencies")
 	keep := flag.Bool("keep-workspace", true, "keep the session worktree after a successful run")
 	maxTurns := flag.Int("max-turns", 0, "override config: maximum assistant turns")
 	maxToolCalls := flag.Int("max-tool-calls", 0, "override config: maximum tool calls per task")
@@ -72,6 +77,13 @@ func main() {
 	}
 	if err := runtimeConfig.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent: invalid runtime config:", err)
+		os.Exit(2)
+	}
+	if *allowContainerNetwork {
+		runtimeConfig.AllowContainerNetwork = true
+	}
+	if err := validateGitHubWrite(*githubWrite, *githubMCP, *pushBranch); err != nil {
+		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(2)
 	}
 	if *index || *indexMemory {
@@ -157,17 +169,43 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --json requires a one-shot --task or --resume invocation; interactive mode is not supported")
 		os.Exit(2)
 	}
+	if *githubWrite && interactiveMode {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --github-write requires a one-shot --task or --resume run")
+		os.Exit(2)
+	}
 	if strings.TrimSpace(*repoArg) == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput); err != nil {
+	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, *githubWrite, *pushBranch, *baseBranch); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
 }
 
-func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool) error {
+// validateGitHubWrite checks that an explicitly authorized GitHub write scope
+// is complete. GitHub write access is only granted together with a named
+// feature branch and with the GitHub MCP server enabled.
+func validateGitHubWrite(githubWrite, githubMCP bool, pushBranch string) error {
+	if !githubWrite {
+		if strings.TrimSpace(pushBranch) != "" {
+			return errors.New("--push-branch requires --github-write")
+		}
+		return nil
+	}
+	if !githubMCP {
+		return errors.New("--github-write requires --github-mcp")
+	}
+	if strings.TrimSpace(pushBranch) == "" {
+		return errors.New("--github-write requires --push-branch")
+	}
+	return nil
+}
+
+func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, githubWrite bool, pushBranch, baseBranch string) error {
+	if githubWrite && !agent.GitHubMCPConfigured() {
+		return errors.New("--github-write requires GITHUB_PERSONAL_ACCESS_TOKEN or .secrets/github-pat")
+	}
 	repo, err := gitOutput(repoArg, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("resolve Git repository: %w", err)
@@ -316,7 +354,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	model.MaxRetries = runtimeConfig.MaxRetries
 	model.MaxOutputTokens = runtimeConfig.ModelOutputTokens
 	model.Client.Timeout = time.Duration(runtimeConfig.ModelTimeoutMS) * time.Millisecond
-	tools, err := sigmaagent.BuiltinTools(workspace, runtimeConfig.GoTestImage, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore)
+	tools, err := sigmaagent.BuiltinTools(workspace, runtimeConfig.GoTestImage, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, runtimeConfig.AllowContainerNetwork)
 	if err != nil {
 		return err
 	}
@@ -345,8 +383,21 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		tools = append(tools, sigmaagent.WebSearchTool(model.WebSearch))
 	}
 	githubMCPEnabled := githubMCP && agent.GitHubMCPConfigured()
+	githubWriteOptions := agent.GitHubWriteOptions{}
+	var githubClient *agent.GitHubMCP
+	if githubWrite {
+		repository, err := agent.OriginRepository(repo, "origin")
+		if err != nil {
+			return fmt.Errorf("resolve origin repository for --github-write: %w", err)
+		}
+		githubWriteOptions = agent.GitHubWriteOptions{
+			Repository: repository,
+			HeadBranch: strings.TrimSpace(pushBranch),
+			BaseBranch: strings.TrimSpace(baseBranch),
+		}
+	}
 	if githubMCPEnabled {
-		client, err := agent.StartGitHubMCP(context.Background())
+		client, err := agent.StartGitHubMCPWithWrite(context.Background(), githubWriteOptions)
 		if err != nil {
 			return err
 		}
@@ -355,6 +406,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 				fmt.Fprintln(os.Stderr, "warning: close GitHub MCP server:", err)
 			}
 		}()
+		githubClient = client
 		githubTools, err := client.Tools(context.Background())
 		if err != nil {
 			return err
@@ -471,7 +523,75 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if runErr != nil {
 		return runErr
 	}
+	if githubWrite {
+		// The branch push is performed by the runtime, not by the model, so the
+		// authorized branch is the only branch that can be published.
+		pushOptions := agent.PushBranchOptions{
+			Branch:     strings.TrimSpace(pushBranch),
+			Remote:     "origin",
+			BaseBranch: strings.TrimSpace(baseBranch),
+		}
+		if err := agent.PushBranch(repo, workspace, pushOptions); err != nil {
+			return fmt.Errorf("push feature branch: %w", err)
+		}
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Pushed feature branch: %s\n", pushOptions.Branch)
+		}
+		if githubClient == nil {
+			return errors.New("GitHub MCP client is unavailable after the feature branch was pushed")
+		}
+		title := pullRequestTitle(task, result.Text)
+		body := pullRequestBody(task, result.Text)
+		pr, err := githubClient.CreatePullRequest(context.Background(), githubWriteOptions, title, body)
+		if err != nil {
+			return fmt.Errorf("feature branch was pushed but pull request creation failed: %w", err)
+		}
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Created pull request: %s\n", pr)
+		}
+	}
 	return nil
+}
+
+func pullRequestTitle(task, summary string) string {
+	text := strings.TrimSpace(task)
+	if text == "" {
+		text = strings.TrimSpace(summary)
+	}
+	text = strings.Join(strings.Fields(strings.SplitN(text, "\n", 2)[0]), " ")
+	if text == "" {
+		text = "Apply Sigma Agent changes"
+	}
+	if !strings.HasPrefix(strings.ToLower(text), "sigma agent:") {
+		text = "Sigma Agent: " + text
+	}
+	return truncateUTF8(text, 256)
+}
+
+func pullRequestBody(task, summary string) string {
+	const maxSection = 24000
+	truncate := func(value string) string {
+		if len(value) > maxSection {
+			return truncateUTF8(value, maxSection) + "\n\n[truncated]"
+		}
+		return value
+	}
+	return "## Task\n\n" + truncate(strings.TrimSpace(task)) + "\n\n## Sigma Agent summary\n\n" + truncate(strings.TrimSpace(summary)) + "\n\nCreated by Sigma Agent. Review the changes and run the repository's checks before merging."
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	var result strings.Builder
+	result.Grow(maxBytes)
+	for _, r := range value {
+		if result.Len()+utf8.RuneLen(r) > maxBytes {
+			break
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
 }
 
 func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool) (agent.Result, error) {

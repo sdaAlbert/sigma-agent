@@ -40,6 +40,7 @@ defaults. A file can contain only the settings that need changing.
 | `model_timeout_ms` | 120000 | 1000–1800000 | HTTP timeout for a model request |
 | `max_retries` | 2 | 0–10 | Retries for retryable transport/server failures, including HTTP 429 and 529 |
 | `go_test_image` | `golang:1.26` | Docker image reference | Image used by offline `run_tests`; it must include the repository's Go module dependencies |
+| `allow_container_network` | `false` | boolean | Permit outbound network from the Docker test container. The CLI flag `--allow-container-network` also enables this for one run; `run_tests` then runs `go mod download` before Go tests or vet. This does not enable a general shell tool. |
 | `skills_enabled` | `true` | boolean | Discover project `.agents/skills/**/SKILL.md` files. Set to `false` for a matched no-Skill evaluation; repository memory stays enabled |
 | `memory_enabled` | `true` | boolean | Enable repository memory context and `search_memory`. Set to `false` for a matched no-memory comparison; code retrieval and indexing remain unchanged |
 | `web_search_enabled` | `false` | boolean | Add MiniMax's hosted `web_search` as an explicit Agent tool. Uses provider credentials and quota. |
@@ -52,15 +53,39 @@ For quick one-run adjustments, `--max-turns`, `--max-tool-calls`,
 `--context-tokens`, and `--model-output-tokens` override the file. The HTTP
 service passes the same config path to each task worker.
 
-`run_tests` disables network access inside Docker. For benchmark or repository
-workspaces, set `go_test_image` to a pinned image with the matching Go version
-and module cache already populated. For example, the local Multi-SWE-bench
+By default, `run_tests` disables network access inside Docker. For benchmark or
+repository workspaces, set `go_test_image` to a pinned image with the matching
+Go version and module cache already populated. For example, the local Multi-SWE-bench
 `go-zero#2537` task image is `mswebench/zeromicro_m_go-zero:pr-2537`; select it
 in a task-specific config so `go test ./...` uses that image's preloaded Go
 1.24.1 toolchain and dependencies without exposing test execution to network.
 Go commands use `GOMAXPROCS=2` and `-p 2` to fit the test container's CPU and
 process limits. `go-test-package` runs a focused package such as
 `./core/mapping`; `go-test` and `go-vet` run across the module.
+
+For a one-run network opt-in, pass `--allow-container-network`. Sigma then runs
+`go mod download` followed by the requested Go test or vet command in the
+container. Network access remains disabled unless this flag is supplied or
+`allow_container_network` is set in the config. This feature does not provide a
+general Bash tool and does not install system packages.
+
+## GitHub publishing
+
+GitHub MCP runs in Docker. Provide a token with repository read and pull-request
+write permission using `GITHUB_PERSONAL_ACCESS_TOKEN` or the local
+`.secrets/github-pat` file. By default the MCP server is read-only. To publish a
+completed one-shot task, pass both `--github-write` and a new `--push-branch`
+name; after the Agent run completes normally, Sigma pushes that branch with a
+normal, non-forced Git push and opens a PR against `main` (or `--base-branch`).
+It refuses to reuse an existing local or remote branch and never merges. Review
+the pull request and verify its test results before merging; normal completion
+does not guarantee that every test passed.
+
+The GitHub MCP tool list is explicitly allowlisted. Read tools are available in
+the default mode; write mode adds only `create_pull_request`. The runtime opens
+the PR after the branch push, so the model cannot call the PR tool before the
+branch exists. Docker, Git credentials, and repository permissions are host
+requirements; Sigma does not provision them.
 
 Set `web_search_enabled` to `true` to expose an explicit `web_search` tool to
 the Agent. MiniMax performs the search server-side through its Anthropic

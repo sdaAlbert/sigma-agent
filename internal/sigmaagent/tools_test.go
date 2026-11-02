@@ -32,3 +32,41 @@ func TestGoTestArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestNetworkArgsAreOffByDefault(t *testing.T) {
+	got := networkArgs(false)
+	want := []string{"--network", "none"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("networkArgs(false) = %#v, want %#v", got, want)
+	}
+}
+
+func TestNetworkArgsEnableOutboundNetworkWhenOptedIn(t *testing.T) {
+	got := networkArgs(true)
+	want := []string{"--network", "bridge"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("networkArgs(true) = %#v, want %#v", got, want)
+	}
+}
+
+func TestContainerCommandDownloadsModulesOnlyWhenNetworkIsEnabled(t *testing.T) {
+	goArgs := []string{"go", "test", "./core/mapping"}
+	off := containerCommand(false, goArgs)
+	if !reflect.DeepEqual(off, goArgs) {
+		t.Fatalf("containerCommand(false) = %#v, want %#v", off, goArgs)
+	}
+	on := containerCommand(true, goArgs)
+	want := []string{"sh", "-c", `go mod download && exec "$@"`, "sigma-test-command", "go", "test", "./core/mapping"}
+	if !reflect.DeepEqual(on, want) {
+		t.Fatalf("containerCommand(true) = %#v, want %#v", on, want)
+	}
+}
+
+func TestNetworkModeLabelReflectsTheConfiguredMode(t *testing.T) {
+	if label := networkModeLabel(false); label != "networking disabled" {
+		t.Fatalf("networkModeLabel(false) = %q, want %q", label, "networking disabled")
+	}
+	if label := networkModeLabel(true); label != "outbound network enabled" {
+		t.Fatalf("networkModeLabel(true) = %q, want %q", label, "outbound network enabled")
+	}
+}

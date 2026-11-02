@@ -9,9 +9,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 )
+
+func TestPullRequestTitleIsSingleLineAndBounded(t *testing.T) {
+	title := pullRequestTitle(" 修复一个非常长的 issue 标题\nignored details", "summary")
+	if strings.ContainsAny(title, "\r\n") || len(title) > 256 {
+		t.Fatalf("pullRequestTitle() = %q (%d bytes), want a bounded single line", title, len(title))
+	}
+	if !strings.HasPrefix(title, "Sigma Agent:") {
+		t.Fatalf("pullRequestTitle() = %q, want Sigma Agent prefix", title)
+	}
+}
+
+func TestTruncateUTF8KeepsValidBoundedText(t *testing.T) {
+	got := truncateUTF8(strings.Repeat("修", 100), 10)
+	if len(got) > 10 || !utf8.ValidString(got) || got != "修修修" {
+		t.Fatalf("truncateUTF8() = %q (%d bytes), want three valid UTF-8 runes", got, len(got))
+	}
+}
 
 type interactiveSteerModel struct {
 	call     int
