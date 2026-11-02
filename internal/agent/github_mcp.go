@@ -420,7 +420,10 @@ func (c *GitHubMCP) callTool(ctx context.Context, name string, arguments json.Ra
 	}
 	text := strings.Join(output, "\n")
 	if response.IsError {
-		return text, errors.New("MCP tool returned isError=true")
+		if text == "" {
+			return text, errors.New("MCP tool returned isError=true with no diagnostic content")
+		}
+		return text, fmt.Errorf("MCP tool returned isError=true: %s", text)
 	}
 	return text, nil
 }
