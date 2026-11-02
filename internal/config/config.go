@@ -26,6 +26,7 @@ type Runtime struct {
 	SkillsEnabled          bool              `json:"skills_enabled"`
 	MemoryEnabled          bool              `json:"memory_enabled"`
 	WebSearchEnabled       bool              `json:"web_search_enabled"`
+	AllowContainerNetwork  bool              `json:"allow_container_network"`
 	DefaultToolPermission  string            `json:"default_tool_permission"`
 	ToolPermissions        map[string]string `json:"tool_permissions,omitempty"`
 }

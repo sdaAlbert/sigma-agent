@@ -59,3 +59,35 @@ func TestLoadRejectsUnknownKeysAndOutOfRangeValues(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowContainerNetworkDefaultsOffAndLoadsFromFile(t *testing.T) {
+	defaults := Defaults()
+	if defaults.AllowContainerNetwork {
+		t.Fatal("Defaults().AllowContainerNetwork = true, want false")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"allow_container_network":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.AllowContainerNetwork {
+		t.Fatal("Load().AllowContainerNetwork = false, want true")
+	}
+}
+
+func TestAllowContainerNetworkStaysOffWithoutOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"max_turns":48}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.AllowContainerNetwork {
+		t.Fatal("Load().AllowContainerNetwork = true, want false")
+	}
+}

@@ -43,7 +43,7 @@ var ignoredRetrievalFiles = map[string]bool{
 
 type workspace struct{ root string }
 
-func BuiltinTools(root, goTestImage string, maxRetrievalQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore) ([]agent.Tool, error) {
+func BuiltinTools(root, goTestImage string, maxRetrievalQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, allowContainerNetwork bool) ([]agent.Tool, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -60,7 +60,7 @@ func BuiltinTools(root, goTestImage string, maxRetrievalQueryBytes int, model ag
 	vector := newVectorConfig()
 	tools := []agent.Tool{
 		ws.listFilesTool(), ws.searchCodeTool(), ws.retrieveCodeTool(vector, maxRetrievalQueryBytes), ws.readFileTool(),
-		ws.createFileTool(), ws.editFileTool(), ws.applyPatchTool(), ws.runTestsTool(goTestImage), ws.gitDiffTool(),
+		ws.createFileTool(), ws.editFileTool(), ws.applyPatchTool(), ws.runTestsTool(goTestImage, allowContainerNetwork), ws.gitDiffTool(),
 	}
 	if model != nil {
 		tools = append(tools, ws.delegateInvestigationTool(model, tools, toolOutputs))
@@ -549,8 +549,8 @@ func (w workspace) editFileTool() agent.Tool {
 	})
 }
 
-func (w workspace) runTestsTool(image string) agent.Tool {
-	description := fmt.Sprintf("Run Go tests or vet with GOMAXPROCS=2 and package parallelism limited to 2, in Docker image %s with networking disabled and resource caps. The image must contain the repository's Go dependencies. Use go-test-package with a workspace-relative package such as ./core/mapping for focused feedback. If output reports a missing module/network error, do not repeat unchanged; the configured image needs a prewarmed module cache.", image)
+func (w workspace) runTestsTool(image string, allowContainerNetwork bool) agent.Tool {
+	description := fmt.Sprintf("Run Go tests or vet with GOMAXPROCS=2 and package parallelism limited to 2, in Docker image %s with %s and resource caps. %s Use go-test-package with a workspace-relative package such as ./core/mapping for focused feedback. If output reports a missing module/network error, do not repeat unchanged; the configured image needs a prewarmed module cache.", image, networkModeLabel(allowContainerNetwork), networkHint(allowContainerNetwork))
 	return tool("run_tests", description, `{"type":"object","properties":{"profile":{"type":"string","enum":["go-test","go-test-package","go-vet"]},"package":{"type":"string","maxLength":160,"description":"Required for go-test-package; workspace-relative Go package, e.g. ./core/mapping"}},"required":["profile"],"additionalProperties":false}`, "sequential", func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args struct {
 			Profile string `json:"profile"`
@@ -564,14 +564,16 @@ func (w workspace) runTestsTool(image string) agent.Tool {
 			return "", err
 		}
 		volume := filepath.ToSlash(w.root) + ":/workspace"
-		containerArgs := []string{"run", "--rm", "--network", "none", "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--env", "GOMAXPROCS=2", "--volume", volume, "--workdir", "/workspace", image}
-		containerArgs = append(containerArgs, goArgs...)
+		containerArgs := []string{"run", "--rm", "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--env", "GOMAXPROCS=2", "--volume", volume, "--workdir", "/workspace"}
+		containerArgs = append(containerArgs, networkArgs(allowContainerNetwork)...)
+		containerArgs = append(containerArgs, image)
+		containerArgs = append(containerArgs, containerCommand(allowContainerNetwork, goArgs)...)
 		testCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 		defer cancel()
 		command := exec.CommandContext(testCtx, "docker", containerArgs...)
 		command.Dir = w.root
 		output, err := command.CombinedOutput()
-		result := map[string]any{"profile": args.Profile, "image": image, "network": "disabled", "command": goArgs, "output": string(output)}
+		result := map[string]any{"profile": args.Profile, "image": image, "network": networkModeLabel(allowContainerNetwork), "command": containerCommand(allowContainerNetwork, goArgs), "output": string(output)}
 		if err != nil {
 			result["exit_code"] = -1
 			var exitErr *exec.ExitError
@@ -581,11 +583,58 @@ func (w workspace) runTestsTool(image string) agent.Tool {
 			result["error"] = err.Error()
 			lowerOutput := strings.ToLower(string(output))
 			if strings.Contains(lowerOutput, "network is unreachable") || strings.Contains(lowerOutput, "no such host") {
-				result["diagnostic"] = "the offline test image is missing a Go module dependency; configure go_test_image to an image with this repository's module cache preloaded"
+				result["diagnostic"] = missingModuleDiagnostic(allowContainerNetwork)
 			}
 		}
 		return encode(result)
 	})
+}
+
+// networkArgs returns the Docker networking arguments for the test container.
+// Outbound network stays off unless the run explicitly opts in, so an
+// unconfigured run can never reach a package registry.
+func networkArgs(allowContainerNetwork bool) []string {
+	if allowContainerNetwork {
+		return []string{"--network", "bridge"}
+	}
+	return []string{"--network", "none"}
+}
+
+// networkModeLabel names the container network mode for tool descriptions and
+// tool results.
+func networkModeLabel(allowContainerNetwork bool) string {
+	if allowContainerNetwork {
+		return "outbound network enabled"
+	}
+	return "networking disabled"
+}
+
+// networkHint explains the consequence of the current network mode to the model.
+func networkHint(allowContainerNetwork bool) string {
+	if allowContainerNetwork {
+		return "Outbound network is enabled for this run, so the container can download Go module dependencies; go mod download runs before the test command."
+	}
+	return "Networking is disabled for this run, so the image must already contain the repository's Go dependencies."
+}
+
+func missingModuleDiagnostic(allowContainerNetwork bool) string {
+	if allowContainerNetwork {
+		return "outbound networking is enabled but dependency download could not reach a Go module proxy; check the container's DNS, proxy, or firewall configuration"
+	}
+	return "the offline test image may be missing a Go module dependency; configure go_test_image with a preloaded module cache or rerun with --allow-container-network"
+}
+
+// containerCommand builds the command executed inside the test container. When
+// outbound network is enabled, go mod download runs first so the module cache is
+// populated before the tests execute.
+func containerCommand(allowContainerNetwork bool, goArgs []string) []string {
+	if !allowContainerNetwork {
+		return goArgs
+	}
+	// Pass the validated command as positional arguments so package paths are
+	// never interpolated into the shell program.
+	command := []string{"sh", "-c", `go mod download && exec "$@"`, "sigma-test-command"}
+	return append(command, goArgs...)
 }
 
 func goTestArgs(profile, packagePath string) ([]string, error) {

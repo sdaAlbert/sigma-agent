@@ -25,9 +25,35 @@ const maxMCPFrameBytes = 4 * 1024 * 1024
 const githubMCPImage = "ghcr.io/github/github-mcp-server@sha256:250bc6ce70788207608ef74cef4397230ff2e8481218da74d6093e4bd9101132"
 
 // StartGitHubMCP starts the pinned official GitHub MCP server in Docker with
-// only read-oriented toolsets enabled. Credentials come from the environment
+// only an explicit read-tool allowlist enabled. Credentials come from the environment
 // first, then from .secrets/github-pat in the current working directory.
 func StartGitHubMCP(ctx context.Context) (*GitHubMCP, error) {
+	return StartGitHubMCPWithWrite(ctx, GitHubWriteOptions{})
+}
+
+// GitHubWriteOptions describes an explicitly authorized write scope. The zero
+// value keeps the GitHub MCP server strictly read-only, which is the default for
+// every run that does not opt in to GitHub write access.
+type GitHubWriteOptions struct {
+	// Repository is the checkout origin repository, in "owner/name" form. A
+	// pull request can only be created against this repository.
+	Repository string
+	// HeadBranch is the feature branch the pull request head may point at. A
+	// pull request can only be created for this branch.
+	HeadBranch string
+	// BaseBranch is the branch a pull request is opened against.
+	BaseBranch string
+}
+
+// Enabled reports whether write access was explicitly authorized.
+func (o GitHubWriteOptions) Enabled() bool {
+	return strings.TrimSpace(o.Repository) != "" && strings.TrimSpace(o.HeadBranch) != ""
+}
+
+// StartGitHubMCPWithWrite starts the pinned official GitHub MCP server. Without
+// write options the server runs read-only, exactly as StartGitHubMCP does. With
+// write options the server additionally allows only create_pull_request.
+func StartGitHubMCPWithWrite(ctx context.Context, write GitHubWriteOptions) (*GitHubMCP, error) {
 	token := strings.TrimSpace(os.Getenv("GITHUB_PERSONAL_ACCESS_TOKEN"))
 	if token == "" {
 		data, err := os.ReadFile(filepath.Join(".secrets", "github-pat"))
@@ -42,7 +68,7 @@ func StartGitHubMCP(ctx context.Context) (*GitHubMCP, error) {
 	if token == "" {
 		return nil, errors.New("GitHub token is empty; set GITHUB_PERSONAL_ACCESS_TOKEN or fill .secrets/github-pat")
 	}
-	return startGitHubMCP(ctx, token)
+	return startGitHubMCP(ctx, token, write)
 }
 
 // GitHubMCPConfigured reports whether a non-empty GitHub token is available
@@ -100,17 +126,26 @@ func (b *tailBuffer) String() string {
 	return strings.TrimSpace(string(b.data))
 }
 
-func startGitHubMCP(ctx context.Context, token string) (*GitHubMCP, error) {
+func startGitHubMCP(ctx context.Context, token string, write GitHubWriteOptions) (*GitHubMCP, error) {
+	tools := githubReadTools
+	readOnly := "1"
+	if write.Enabled() {
+		// The MCP server receives an exact tool allowlist. It can read repository
+		// context and create one PR, but has no merge, issue-write, or other write
+		// tool registered.
+		tools += ",create_pull_request"
+		readOnly = "0"
+	}
 	command := exec.Command("docker", "run", "--rm", "-i",
 		"-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
 		"-e", "GITHUB_READ_ONLY",
-		"-e", "GITHUB_TOOLSETS",
+		"-e", "GITHUB_TOOLS",
 		githubMCPImage,
 	)
 	command.Env = replaceEnv(os.Environ(), map[string]string{
 		"GITHUB_PERSONAL_ACCESS_TOKEN": token,
-		"GITHUB_READ_ONLY":             "1",
-		"GITHUB_TOOLSETS":              "issues,repos,pull_requests",
+		"GITHUB_READ_ONLY":             readOnly,
+		"GITHUB_TOOLS":                 tools,
 	})
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -254,6 +289,11 @@ func (c *GitHubMCP) Tools(ctx context.Context) ([]Tool, error) {
 		if strings.TrimSpace(remote.Name) == "" {
 			continue
 		}
+		// Defense in depth: only the explicit read allowlist is exposed to the
+		// model. The write tool is wrapped separately with a fixed repo/branch.
+		if !isGitHubReadTool(remote.Name) {
+			continue
+		}
 		if !json.Valid(remote.InputSchema) {
 			remote.InputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
@@ -269,6 +309,89 @@ func (c *GitHubMCP) Tools(ctx context.Context) ([]Tool, error) {
 		})
 	}
 	return tools, nil
+}
+
+// CreatePullRequest opens a PR after the runtime has pushed the authorized
+// feature branch. Keeping this as a runtime action guarantees the branch exists
+// before GitHub receives the request.
+func (c *GitHubMCP) CreatePullRequest(ctx context.Context, write GitHubWriteOptions, title, body string) (string, error) {
+	arguments, err := json.Marshal(map[string]string{"title": title, "body": body})
+	if err != nil {
+		return "", fmt.Errorf("encode pull request details: %w", err)
+	}
+	return c.createPullRequest(ctx, write, arguments)
+}
+
+// createPullRequest validates the request against the authorized write scope
+// before forwarding it to the GitHub MCP server.
+func (c *GitHubMCP) createPullRequest(ctx context.Context, write GitHubWriteOptions, arguments json.RawMessage) (string, error) {
+	if !write.Enabled() {
+		return "", errors.New("GitHub write access is not enabled for this run")
+	}
+	var args struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return "", fmt.Errorf("decode create_pull_request arguments: %w", err)
+	}
+	args.Title = strings.TrimSpace(args.Title)
+	if args.Title == "" {
+		return "", errors.New("create_pull_request requires a non-empty title")
+	}
+	if len(args.Title) > 256 {
+		return "", errors.New("create_pull_request title must be at most 256 characters")
+	}
+	if len(args.Body) > 65536 {
+		return "", errors.New("create_pull_request body must be at most 65536 characters")
+	}
+	request := createPullRequestRequest(write, args.Title, args.Body)
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("encode create_pull_request request: %w", err)
+	}
+	return c.callTool(ctx, "create_pull_request", json.RawMessage(payload))
+}
+
+func createPullRequestRequest(write GitHubWriteOptions, title, body string) map[string]any {
+	base := strings.TrimSpace(write.BaseBranch)
+	if base == "" {
+		base = "main"
+	}
+	return map[string]any{
+		"owner": repositoryOwner(write.Repository),
+		"repo":  repositoryName(write.Repository),
+		"title": strings.TrimSpace(title),
+		"body":  body,
+		"head":  strings.TrimSpace(write.HeadBranch),
+		"base":  base,
+	}
+}
+
+const githubReadTools = "get_file_contents,issue_read,list_issues,search_issues,pull_request_read,list_pull_requests,search_pull_requests,search_code,search_repositories,get_commit,list_commits,list_branches"
+
+func isGitHubReadTool(name string) bool {
+	for _, allowed := range strings.Split(githubReadTools, ",") {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// repositoryOwner returns the owner segment of an "owner/name" repository.
+func repositoryOwner(repository string) string {
+	owner, _, _ := strings.Cut(strings.TrimSpace(repository), "/")
+	return owner
+}
+
+// repositoryName returns the name segment of an "owner/name" repository.
+func repositoryName(repository string) string {
+	_, name, found := strings.Cut(strings.TrimSpace(repository), "/")
+	if !found {
+		return strings.TrimSpace(repository)
+	}
+	return name
 }
 
 func (c *GitHubMCP) callTool(ctx context.Context, name string, arguments json.RawMessage) (string, error) {
@@ -297,7 +420,10 @@ func (c *GitHubMCP) callTool(ctx context.Context, name string, arguments json.Ra
 	}
 	text := strings.Join(output, "\n")
 	if response.IsError {
-		return text, errors.New("MCP tool returned isError=true")
+		if text == "" {
+			return text, errors.New("MCP tool returned isError=true with no diagnostic content")
+		}
+		return text, fmt.Errorf("MCP tool returned isError=true: %s", text)
 	}
 	return text, nil
 }

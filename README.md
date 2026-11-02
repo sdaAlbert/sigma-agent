@@ -15,6 +15,39 @@ go run ./cmd/sigma-agent --repo C:\path\to\your\repository --interactive
 
 For configuration, credentials, optional Qdrant setup, and CLI options, see [CONFIGURATION.md](CONFIGURATION.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Run an issue task and open a pull request
+
+Sigma Agent can work from a clean local clone in a separate Git worktree. With
+Docker running and a GitHub token available in `.secrets/github-pat` (or
+`GITHUB_PERSONAL_ACCESS_TOKEN`), a one-shot task can download missing Go modules
+for tests, push a new feature branch, and open a pull request:
+
+```powershell
+$env:MINIMAX_API_KEY = "your-api-key"
+go run ./cmd/sigma-agent `
+  --repo C:\path\to\your\repository `
+  --task "Fix issue #123: describe the requested change" `
+  --allow-container-network `
+  --push-branch sigma/issue-123 `
+  --github-write
+```
+
+The source checkout must be clean before starting. Sigma edits a detached task
+worktree, runs its Go test tool in Docker, then commits and pushes the selected
+new branch and opens a pull request against `main` (override with
+`--base-branch`) after the Agent run completes normally. Review the pull request
+and confirm its test results before merging; a completed run does not guarantee
+that every test passed.
+Existing local or remote branches are rejected; pushes are never forced, and
+Sigma does not merge the pull request.
+
+Outbound access from the test container is off by default. The explicit
+`--allow-container-network` option enables outbound networking for `run_tests`
+so it can run `go mod download` before tests. This does not add a general Bash
+tool or install operating-system packages. Docker and GitHub credentials must
+already be configured on the host. See [CONFIGURATION.md](CONFIGURATION.md) for
+the narrower default mode and credential setup.
+
 ## Project notes
 
 - Local credentials, session data, run artifacts, and `.sigma-agent/MEMORY.md` are excluded from Git.

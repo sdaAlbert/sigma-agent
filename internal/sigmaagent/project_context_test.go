@@ -64,7 +64,7 @@ func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 		t.Fatal("empty skill registry should reject lookup")
 	}
 
-	tools, err := BuiltinTools(root, "", 0, nil, nil)
+	tools, err := BuiltinTools(root, "", 0, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestWritingToolsRejectProjectGuidance(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256Hex(data)
-	tools, err := BuiltinTools(root, "", 0, nil, nil)
+	tools, err := BuiltinTools(root, "", 0, nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
