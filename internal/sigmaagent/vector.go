@@ -246,3 +246,28 @@ func IndexRepositoryMemory(root string) (int, error) {
 	defer cancel()
 	return vector.indexMemory(ctx, filepath.Clean(absolute))
 }
+
+// IndexProjectMemoryFile indexes an external, reviewed Markdown source under a
+// stable repository scope. It is used when benchmark tasks run in independent
+// clones that must share one upstream repository's memory without modifying
+// those checkouts.
+func IndexProjectMemoryFile(path, repoID string) (int, error) {
+	vector := newVectorConfig()
+	if vector == nil {
+		return 0, errors.New("set SIGMA_AGENT_EMBEDDING_MODEL to enable memory vector indexing")
+	}
+	if strings.TrimSpace(repoID) == "" {
+		return 0, errors.New("a stable repository ID is required for external memory indexing")
+	}
+	_, data, _, err := readExternalContextFile(path, maxMemoryBytes)
+	if err != nil {
+		return 0, fmt.Errorf("read external project memory: %w", err)
+	}
+	entries, err := parseMemoryEntries(repoID, data)
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	return vector.indexMemoryEntries(ctx, repoID, entries)
+}

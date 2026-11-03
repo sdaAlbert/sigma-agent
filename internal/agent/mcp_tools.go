@@ -23,6 +23,9 @@ type MCPToolOptions struct {
 	// Allow selects which server tools are exposed. An empty map exposes
 	// every tool the server lists.
 	Allow map[string]bool
+	// CallTool optionally wraps remote calls with server-specific policy.
+	// When nil, calls are forwarded directly to the connected MCP client.
+	CallTool func(context.Context, string, json.RawMessage) (string, error)
 }
 
 // MCPTools converts the tools of a connected MCP server into Agent tools.
@@ -58,6 +61,9 @@ func MCPTools(ctx context.Context, client *mcp.Client, options MCPToolOptions) (
 			},
 			ExecutionMode: mode,
 			Handle: func(callCtx context.Context, arguments json.RawMessage) (string, error) {
+				if options.CallTool != nil {
+					return options.CallTool(callCtx, remoteName, arguments)
+				}
 				return client.CallTool(callCtx, remoteName, arguments)
 			},
 		})

@@ -79,20 +79,20 @@ func (m *scriptedToolModel) Stream(_ context.Context, _ string, _ []agent.Messag
 		return response(use("edit_file", `{"path":"main.go","old_text":"const value = 2","new_text":"const value = 5"}`))
 	case 7:
 		if m.separateChecks {
-			return response(use("run_tests", `{"profile":"go-test-package","package":"."}`))
+			return response(use("run_command", `{"command":"go test ./...","purpose":"test"}`))
 		}
-		return response(use("run_tests", `{"profile":"go-test-package","package":"."}`), use("git_diff", `{}`))
+		return response(use("run_command", `{"command":"go test ./...","purpose":"test"}`), use("git_diff", `{}`))
 	case 8:
 		if m.separateChecks {
 			return response(use("git_diff", `{}`))
 		}
 		if m.repeatCheck {
-			return response(use("run_tests", `{"profile":"go-test-package","package":"."}`))
+			return response(use("run_command", `{"command":"go test ./...","purpose":"test"}`))
 		}
 		return agent.ModelResponse{Content: []agent.ContentBlock{{Type: "text", Text: "done"}}, StopReason: "end_turn"}, nil
 	case 9:
 		if m.repeatCheck {
-			return response(use("run_tests", `{"profile":"go-test-package","package":"."}`))
+			return response(use("run_command", `{"command":"go test ./...","purpose":"test"}`))
 		}
 		if m.separateChecks {
 			return agent.ModelResponse{Content: []agent.ContentBlock{{Type: "text", Text: "done"}}, StopReason: "end_turn"}, nil
@@ -145,8 +145,8 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 				checks = append(checks, name)
 				turn, _ := agent.ToolTurn(ctx)
 				checkTurns = append(checkTurns, turn)
-				if name == "run_tests" {
-					return "run_tests status=passed exit_code=0", nil
+				if name == "run_command" {
+					return "SIGMA_RUN_COMMAND run_command purpose=test status=passed exit_code=0 workspace_changed=false action=run", nil
 				}
 				return "ok", nil
 			},
@@ -156,7 +156,7 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 		ws.readFileTool(),
 		ws.recordChangeContractTool(),
 		ws.editFileTool(),
-		checkTool("run_tests"),
+		checkTool("run_command"),
 		checkTool("git_diff"),
 	})
 	if err != nil {
@@ -185,15 +185,15 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 	if !strings.Contains(string(updated), "const value = 2") {
 		t.Fatalf("successful edit was not applied: %s", updated)
 	}
-	if len(checks) != 2 || checks[0] != "run_tests" || checks[1] != "git_diff" {
-		t.Fatalf("checks after final edit = %#v, want run_tests then git_diff", checks)
+	if len(checks) != 2 || checks[0] != "run_command" || checks[1] != "git_diff" {
+		t.Fatalf("checks after final edit = %#v, want run_command then git_diff", checks)
 	}
-	if !model.visibleTools[6]["run_tests"] || !model.visibleTools[6]["git_diff"] || model.visibleTools[6]["edit_file"] {
-		t.Fatalf("wrong tools exposed when both checks were missing: %#v", model.visibleTools[6])
+	if !model.visibleTools[6]["run_command"] || !model.visibleTools[6]["git_diff"] || !model.visibleTools[6]["read_file"] || !model.visibleTools[6]["edit_file"] {
+		t.Fatalf("missing checks or targeted correction tools were hidden during review: %#v", model.visibleTools[6])
 	}
 	if separateChecks {
-		if model.visibleTools[8]["run_tests"] || !model.visibleTools[8]["git_diff"] || model.visibleTools[8]["edit_file"] {
-			t.Fatalf("wrong tools exposed after tests passed and only diff remained: %#v", model.visibleTools[8])
+		if model.visibleTools[8]["run_command"] || !model.visibleTools[8]["git_diff"] || !model.visibleTools[8]["edit_file"] || !model.visibleTools[8]["read_file"] {
+			t.Fatalf("missing diff or targeted correction tools after tests passed: %#v", model.visibleTools[8])
 		}
 		if checkTurns[0] == checkTurns[1] {
 			t.Fatalf("separate checks unexpectedly ran in the same turn: %#v", checkTurns)
@@ -202,13 +202,13 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 		t.Fatalf("checks requested in one model response ran in different turns: %#v", checkTurns)
 	}
 	if repeatCheck {
-		if model.visibleTools[8]["run_tests"] || model.visibleTools[8]["git_diff"] {
+		if model.visibleTools[8]["run_command"] || model.visibleTools[8]["git_diff"] {
 			t.Fatalf("verification tools remained exposed after a successful review: %#v", model.visibleTools[8])
 		}
 		if !model.visibleTools[8]["edit_file"] {
 			t.Fatalf("targeted correction tools were hidden after verification: %#v", model.visibleTools[8])
 		}
-		if model.visibleTools[9]["run_tests"] || model.visibleTools[9]["git_diff"] {
+		if model.visibleTools[9]["run_command"] || model.visibleTools[9]["git_diff"] {
 			t.Fatalf("a rejected duplicate check reopened verification tools: %#v", model.visibleTools[9])
 		}
 		if !strings.Contains(strings.Join(toolErrors, "\n"), "verification is complete") {
@@ -219,7 +219,7 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 	if !strings.Contains(joinedErrors, "changed since it was read") {
 		t.Fatalf("stale read was not rejected using the server-side snapshot: %s", joinedErrors)
 	}
-	if !strings.Contains(joinedErrors, "verification") {
-		t.Fatalf("late write was not rejected by the verification reserve: %s", joinedErrors)
+	if strings.Contains(joinedErrors, "verification phase only allows checks still outstanding") {
+		t.Fatalf("targeted correction was rejected solely because verification was pending: %s", joinedErrors)
 	}
 }

@@ -42,7 +42,7 @@ func StartGitHubMCP(ctx context.Context, options ...GitHubMCPOptions) (*GitHubMC
 }
 
 // GitHubMCPConfigured reports whether a non-empty GitHub token is available
-// from the environment or project-local secret file.
+// from saved user configuration, the environment, or a project-local secret file.
 func GitHubMCPConfigured() bool {
 	token, err := GitHubMCPToken()
 	return err == nil && token != ""
@@ -90,7 +90,8 @@ func (c *GitHubMCP) Tools(ctx context.Context) ([]Tool, error) {
 		return nil, errors.New("GitHub MCP server is not connected")
 	}
 	return MCPTools(ctx, c.Client, MCPToolOptions{
-		Server: "github",
+		Server:   "github",
+		CallTool: c.callTool,
 		Describe: func(toolName, description string) string {
 			return fmt.Sprintf("GitHub MCP tool %q: %s", toolName, description)
 		},

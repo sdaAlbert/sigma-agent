@@ -50,11 +50,74 @@ directories. Manifest entries accept glob patterns and `!` exclusions.
 | Resource | What Sigma Agent does with it |
 | --- | --- |
 | `skills` | `SKILL.md` files are discovered and loaded on demand with `read_skill`, the same way project Skills are |
-| `extensions` | Listed by `--install`; running extension code is not implemented yet |
+| `extensions` | JavaScript modules are loaded into the workflow host; TypeScript must be compiled to JavaScript first |
 | `prompts`, `themes` | Listed by `--install`; not wired into the runtime yet |
 
 Skills contributed by a package are bounded by the package directory, so a
 Skill can only read reference files that ship with its own package.
+
+## Workflow extensions
+
+Sigma loads `.js`, `.mjs`, and `.cjs` files discovered under each installed
+package's `extensions/` directory (or the `pi.extensions` manifest paths) at
+the start of each run. Slash commands are available in interactive sessions.
+Node.js must be installed. Modules can export a default activation function or
+a named `activate` function:
+
+```js
+export default (sigma) => {
+  sigma.registerCommand("review", { description: "Review the current task" }, async (args, ui) => {
+    ui.notify(`Review requested: ${args || "current changes"}`);
+    if (await ui.confirm("Start the review workflow?")) {
+      ui.notify("Review approved.");
+    }
+  });
+
+  sigma.on("tool_complete", (event) => {
+    if (event.status === "failed") sigma.notify(`${event.tool} failed`);
+  });
+};
+```
+
+Available lifecycle events are `session_start`, `turn_start`, `turn_end`,
+`tool_complete`, and `session_end`. Their frozen payload contains only
+`type`, `session_id`, `turn`, `tool`, `status`, and `error`. Commands are
+invoked as `/review [arguments]`, appear in `/help`, and are available in TUI
+command completion. Command names must be lowercase letters, digits, and
+hyphens; Sigma's built-in command names are reserved. `ui.confirm` is currently
+available in TUI mode; `notify` also works in the text interface.
+
+Extensions can also register Agent tools with a JSON Schema and a handler that
+returns text:
+
+```js
+sigma.registerTool(
+  "issue_summary",
+  {
+    description: "Summarize a GitHub issue",
+    inputSchema: {
+      type: "object",
+      properties: { issue: { type: "string" } },
+      required: ["issue"],
+      additionalProperties: false,
+    },
+  },
+  async ({ issue }, ui) => `Issue requested: ${issue}`,
+);
+```
+
+Registered tools go through Sigma's normal Agent tool policy and execution
+loop. They run sequentially by default. Set `modifiesWorkspace: true` when a
+handler changes the task worktree so Sigma applies its normal test and diff
+review gate. Tool names in the `mcp__` namespace are reserved for MCP adapters.
+The built-in GitHub MCP tools and configured `mcp.json` server tools are
+registered through this same host tool path; GitHub's server startup and
+repository/branch write restrictions remain enforced by Sigma.
+
+Extensions run as the current user with the same operating-system permissions
+as Sigma and can import packages installed alongside their module. Install and
+run only extensions you trust. Sigma does not expose mutable session objects,
+tool registration, or custom TUI rendering through this first workflow host.
 
 ## Configure an MCP server
 
@@ -137,6 +200,6 @@ configured tool policy, so a tool can be denied with `tool_permissions`.
 ## Current limits
 
 - Only stdio MCP servers are supported. HTTP servers and OAuth sign-in are not.
-- Extension modules from a package are listed but not executed.
+- Workflow extensions require Node.js and run with Sigma's operating-system permissions. TypeScript sources must be compiled to JavaScript; custom TUI rendering and mutable session APIs are not exposed.
 - The package registry records the source of each package; `--uninstall`
   removes the record and leaves the installed files on disk.

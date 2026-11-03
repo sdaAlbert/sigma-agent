@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-type MiniMaxMessagesModel struct {
+type AnthropicMessagesModel struct {
 	Provider        string
 	Model           string
 	BaseURL         string
@@ -28,10 +28,10 @@ type MiniMaxMessagesModel struct {
 	MaxOutputTokens int
 }
 
-func NewMiniMaxMessagesModelFromEnv() (*MiniMaxMessagesModel, error) {
+func NewMiniMaxMessagesModelFromEnv() (*AnthropicMessagesModel, error) {
 	model := strings.TrimSpace(os.Getenv("SIGMA_AGENT_MODEL"))
 	if model == "" {
-		model = "MiniMax-M3"
+		model = "MiniMax-M3.1-Flash"
 	}
 	baseURL := strings.TrimSpace(os.Getenv("SIGMA_AGENT_BASE_URL"))
 	if baseURL == "" {
@@ -58,7 +58,7 @@ func NewMiniMaxMessagesModelFromEnv() (*MiniMaxMessagesModel, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or MINIMAX_API_KEY, or save the key in .secrets/minimax-api-key")
 	}
-	return &MiniMaxMessagesModel{
+	return &AnthropicMessagesModel{
 		Provider:        "minimax",
 		Model:           model,
 		BaseURL:         baseURL,
@@ -69,14 +69,14 @@ func NewMiniMaxMessagesModelFromEnv() (*MiniMaxMessagesModel, error) {
 	}, nil
 }
 
-func (m *MiniMaxMessagesModel) ModelID() string {
+func (m *AnthropicMessagesModel) ModelID() string {
 	if m.Provider != "" {
 		return m.Provider + "/" + m.Model
 	}
 	return m.Model
 }
 
-func (m *MiniMaxMessagesModel) ConfigureRuntime(maxRetries, maxOutputTokens int, timeout time.Duration) {
+func (m *AnthropicMessagesModel) ConfigureRuntime(maxRetries, maxOutputTokens int, timeout time.Duration) {
 	m.MaxRetries = maxRetries
 	m.MaxOutputTokens = maxOutputTokens
 	m.Client = &http.Client{Timeout: timeout}
@@ -84,7 +84,7 @@ func (m *MiniMaxMessagesModel) ConfigureRuntime(maxRetries, maxOutputTokens int,
 
 // WebSearch runs MiniMax's hosted web_search server tool and returns the
 // final answer with source metadata for the agent to inspect.
-func (m *MiniMaxMessagesModel) WebSearch(ctx context.Context, query string) (string, error) {
+func (m *AnthropicMessagesModel) WebSearch(ctx context.Context, query string) (string, error) {
 	if m.Client == nil {
 		m.Client = &http.Client{Timeout: 2 * time.Minute}
 	}
@@ -200,7 +200,7 @@ func (m *MiniMaxMessagesModel) WebSearch(ctx context.Context, query string) (str
 	return string(output), nil
 }
 
-func (m *MiniMaxMessagesModel) Stream(ctx context.Context, system string, messages []Message, tools []ToolDefinition, onEvent func(ModelEvent)) (ModelResponse, error) {
+func (m *AnthropicMessagesModel) Stream(ctx context.Context, system string, messages []Message, tools []ToolDefinition, onEvent func(ModelEvent)) (ModelResponse, error) {
 	if m.Client == nil {
 		m.Client = &http.Client{Timeout: 2 * time.Minute}
 	}
@@ -288,16 +288,18 @@ func (m *MiniMaxMessagesModel) Stream(ctx context.Context, system string, messag
 	}
 }
 
-func (m *MiniMaxMessagesModel) providerName() string {
+func (m *AnthropicMessagesModel) providerName() string {
 	if strings.TrimSpace(m.Provider) == "" {
 		return "MiniMax"
 	}
-	for _, provider := range supportedModelProviders {
-		if provider.ID == m.Provider {
-			return provider.Name
-		}
+	switch m.Provider {
+	case "minimax":
+		return "MiniMax"
+	case "anthropic":
+		return "Anthropic"
+	default:
+		return m.Provider
 	}
-	return m.Provider
 }
 
 func isPromptTooLong(status int, message string) bool {

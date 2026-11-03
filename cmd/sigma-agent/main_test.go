@@ -13,6 +13,7 @@ import (
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
 	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
+	"github.com/sdaAlbert/sigma-agent/internal/workflow"
 )
 
 type interactiveSteerModel struct {
@@ -89,7 +90,7 @@ func TestInteractiveSessionSteersActiveRunAtSafeTurn(t *testing.T) {
 	workspace := t.TempDir()
 	finished := make(chan error, 1)
 	go func() {
-		_, runErr := interactiveSession(ctx, session, workspace, "start the task", false, "", config.Runtime{}, sigmaagent.ProjectGuidance{})
+		_, runErr := interactiveSession(ctx, session, workspace, "start the task", false, "", config.Runtime{}, sigmaagent.ProjectGuidance{}, workflow.NewHost(consoleWorkflowHandler{}))
 		finished <- runErr
 	}()
 	steeringQueued := make(chan struct{}, 2)

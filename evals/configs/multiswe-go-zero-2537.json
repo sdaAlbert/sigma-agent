@@ -9,5 +9,5 @@
   "tool_timeout_ms": 180000,
   "model_timeout_ms": 120000,
   "max_retries": 2,
-  "go_test_image": "mswebench/zeromicro_m_go-zero:pr-2537"
+  "command_execution_image": "mswebench/zeromicro_m_go-zero:pr-2537"
 }

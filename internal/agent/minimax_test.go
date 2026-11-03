@@ -63,7 +63,7 @@ func TestMiniMaxDoesNotRetryExhaustedBalance(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model := &MiniMaxMessagesModel{Model: "test", BaseURL: server.URL, APIKey: "test", Client: server.Client(), MaxRetries: 4}
+	model := &AnthropicMessagesModel{Model: "test", BaseURL: server.URL, APIKey: "test", Client: server.Client(), MaxRetries: 4}
 	_, err := model.Stream(context.Background(), "system", nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "quota or balance is exhausted") {
 		t.Fatalf("Stream() error = %v, want an exhausted-balance error", err)
@@ -83,7 +83,7 @@ func TestMiniMaxRetriesTransientRateLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	model := &MiniMaxMessagesModel{Model: "test", BaseURL: server.URL, APIKey: "test", Client: server.Client(), MaxRetries: 2}
+	model := &AnthropicMessagesModel{Model: "test", BaseURL: server.URL, APIKey: "test", Client: server.Client(), MaxRetries: 2}
 	_, err := model.Stream(context.Background(), "system", nil, nil, nil)
 	if err == nil {
 		t.Fatal("Stream() succeeded, want rate-limit error")

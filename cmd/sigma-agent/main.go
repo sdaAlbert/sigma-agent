@@ -23,8 +23,10 @@ import (
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
+	modelconfig "github.com/sdaAlbert/sigma-agent/internal/model"
 	"github.com/sdaAlbert/sigma-agent/internal/server"
 	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
+	"github.com/sdaAlbert/sigma-agent/internal/workflow"
 )
 
 func main() {
@@ -39,6 +41,7 @@ func main() {
 	repoArg := flag.String("repo", "", "Git repository to work on (defaults to the current directory in interactive setup)")
 	task := flag.String("task", "", "coding task for the agent, or an additional instruction when resuming")
 	interactive := flag.Bool("interactive", false, "start a persistent terminal conversation (default when no task or resume is given)")
+	tui := flag.Bool("tui", false, "start the integrated terminal UI for setup and Agent interaction")
 	jsonOutput := flag.Bool("json", false, "write Agent lifecycle events and the final run result as JSONL to stdout")
 	resumeID := flag.String("resume", "", "resume a persisted session by ID; omit --task to continue it")
 	githubMCP := flag.Bool("github-mcp", true, "enable read-only GitHub MCP tools when credentials are configured (default true)")
@@ -51,6 +54,7 @@ func main() {
 	contextTokens := flag.Int("context-tokens", 0, "override config: maximum estimated context tokens")
 	contextCompactionTokens := flag.Int("context-compaction-tokens", 0, "override config: proactively compact context above this estimated token count")
 	modelOutputTokens := flag.Int("model-output-tokens", 0, "override config: maximum model output tokens")
+	modelArg := flag.String("model", "", "override saved/session model using provider/model-id syntax")
 	sessionID := flag.String("session-id", "", "use this id for a new session")
 	eventFile := flag.String("event-file", "", "append agent lifecycle events to this JSONL file")
 	messageFile := flag.String("message-file", "", "read durable task messages from this JSONL file")
@@ -92,6 +96,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(2)
 	}
+	requestedModel := modelconfig.Selection{}
+	modelExplicit := false
+	if strings.TrimSpace(*modelArg) != "" {
+		selection, action, modelErr := parseModelCommand(*modelArg, nil)
+		if modelErr != nil || action != "switch" {
+			if modelErr == nil {
+				modelErr = errors.New("--model requires provider/model-id syntax")
+			}
+			fmt.Fprintln(os.Stderr, "sigma-agent:", modelErr)
+			os.Exit(2)
+		}
+		requestedModel = selection
+		modelExplicit = true
+	}
 	if *maxTurns > 0 {
 		runtimeConfig.MaxTurns = *maxTurns
 	}
@@ -119,7 +137,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "sigma-agent: --index-memory requires --repo")
 			os.Exit(2)
 		}
-		memoryCount, err := sigmaagent.IndexRepositoryMemory(*repoArg)
+		var memoryCount int
+		if runtimeConfig.MemoryFile != "" {
+			memoryCount, err = sigmaagent.IndexProjectMemoryFile(runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID)
+		} else {
+			memoryCount, err = sigmaagent.IndexRepositoryMemory(*repoArg)
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
@@ -165,6 +188,10 @@ func main() {
 		}
 		return
 	}
+	if *tui && *serve {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --tui cannot be combined with --serve")
+		os.Exit(2)
+	}
 	if *serve {
 		if *pushBranch != "" {
 			fmt.Fprintln(os.Stderr, "sigma-agent: --push-branch is available only for direct CLI sessions, not --serve")
@@ -176,7 +203,7 @@ func main() {
 		}
 		return
 	}
-	interactiveMode := *interactive || (strings.TrimSpace(*task) == "" && strings.TrimSpace(*resumeID) == "")
+	interactiveMode := *tui || *interactive || (strings.TrimSpace(*task) == "" && strings.TrimSpace(*resumeID) == "")
 	if *jsonOutput && interactiveMode {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --json requires a one-shot --task or --resume invocation; interactive mode is not supported")
 		os.Exit(2)
@@ -184,10 +211,7 @@ func main() {
 	if *allowContainerNetwork {
 		runtimeConfig.AllowContainerNetwork = true
 	}
-	var setupInput *bufio.Scanner
-	modelSelection := agent.ModelSelection{}
-	modelSelectionExplicit := false
-	if interactiveMode && strings.TrimSpace(*task) == "" {
+	if interactiveMode {
 		defaultRepo := strings.TrimSpace(*repoArg)
 		if defaultRepo == "" {
 			defaultRepo, err = os.Getwd()
@@ -196,41 +220,43 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		setup, start, input, setupErr := interactiveSetup(interactiveSetupOptions{
+		selection := requestedModel
+		if !modelExplicit {
+			selection, err = modelconfig.LoadDefaultSelection()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+				os.Exit(1)
+			}
+		}
+		if selection.Provider == "" {
+			selection = modelconfig.Selection{Provider: "minimax", Model: modelconfig.DefaultModel("minimax")}
+		}
+		setup := interactiveSetupOptions{
 			repo: defaultRepo, sessionID: *sessionID, resumeID: *resumeID,
 			pushBranch: *pushBranch, githubWrite: *githubWrite,
 			allowNetwork: runtimeConfig.AllowContainerNetwork,
-			githubMCP:    *githubMCP,
-		})
-		if setupErr != nil {
-			fmt.Fprintln(os.Stderr, "sigma-agent:", setupErr)
+			githubMCP:    *githubMCP, model: selection, modelExplicit: modelExplicit,
+			initialPrompt: *task,
+		}
+		if err := startTUI(setup, func(options interactiveSetupOptions, bridge *tuiBridge) error {
+			return run(options.repo, options.initialPrompt, *keep, runtimeConfig, options.resumeID, options.githubMCP, options.githubWrite, options.sessionID, options.pushBranch, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge)
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
 		}
-		if !start {
-			return
-		}
-		setupInput = input
-		modelSelection = setup.model
-		modelSelectionExplicit = setup.modelExplicit
-		*repoArg = setup.repo
-		*sessionID = setup.sessionID
-		*resumeID = setup.resumeID
-		*pushBranch = setup.pushBranch
-		*githubWrite = setup.githubWrite
-		runtimeConfig.AllowContainerNetwork = setup.allowNetwork
-		*task = setup.initialPrompt
+		return
 	}
 	if strings.TrimSpace(*repoArg) == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *githubWrite, *sessionID, *pushBranch, *eventFile, *messageFile, interactiveMode, *jsonOutput, modelSelection, modelSelectionExplicit, setupInput); err != nil {
+	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *githubWrite, *sessionID, *pushBranch, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
 }
 
-func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP, githubWrite bool, requestedSessionID, requestedPushBranch, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel agent.ModelSelection, modelExplicit bool, setupInput ...*bufio.Scanner) error {
+func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP, githubWrite bool, requestedSessionID, requestedPushBranch, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
 	repo, err := gitOutput(repoArg, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("resolve Git repository: %w", err)
@@ -330,8 +356,10 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 				return fmt.Errorf("create publish branch %q in task worktree: %w", activePushBranch, err)
 			}
 		}
-		if err := sigmaagent.CopyProjectMemory(repo, workspace); err != nil {
-			return fmt.Errorf("copy project memory into task worktree: %w", err)
+		if runtimeConfig.MemoryFile == "" {
+			if err := sigmaagent.CopyProjectMemory(repo, workspace); err != nil {
+				return fmt.Errorf("copy project memory into task worktree: %w", err)
+			}
 		}
 		metadata, _ := json.MarshalIndent(map[string]string{
 			"repo": repo, "starting_commit": startingCommit, "push_branch": activePushBranch,
@@ -359,12 +387,12 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 			return errors.New("resume repository does not match the session's original repository")
 		}
 		if !modelExplicit && metadata.ModelProvider != "" && metadata.ModelID != "" {
-			activeModelSelection = agent.ModelSelection{Provider: metadata.ModelProvider, Model: metadata.ModelID}
+			activeModelSelection = modelconfig.Selection{Provider: metadata.ModelProvider, Model: metadata.ModelID}
 		}
 		if !modelExplicit && restoredSnapshot != nil {
 			if providerText, modelID, ok := strings.Cut(restoredSnapshot.ModelID, "/"); ok {
-				if provider, valid := agent.NormalizeModelProvider(providerText); valid && modelID != "" {
-					activeModelSelection = agent.ModelSelection{Provider: provider, Model: modelID}
+				if provider, valid := modelconfig.NormalizeProvider(providerText); valid && modelID != "" {
+					activeModelSelection = modelconfig.Selection{Provider: provider, Model: modelID}
 				}
 			}
 		}
@@ -392,6 +420,13 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if !newSession {
 		worktreeCreated = true
 	}
+	memorySourceHash := ""
+	if runtimeConfig.MemoryFile != "" {
+		memorySourceHash, err = sigmaagent.CopyProjectMemoryFromFile(runtimeConfig.MemoryFile, workspace, runtimeConfig.MemoryRepositoryID)
+		if err != nil {
+			return fmt.Errorf("load configured shared memory into task worktree: %w", err)
+		}
+	}
 	toolOutputStore, err := agent.NewFileToolOutputStore(filepath.Join(sessionDir, "tool_outputs"))
 	if err != nil {
 		return err
@@ -411,14 +446,24 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	defer traceFile.Close()
 	var traceMu sync.Mutex
 	var stdoutMu sync.Mutex
+	var workflowHost *workflow.Host
 	eventSink := func(event agent.Event) {
 		traceMu.Lock()
 		_ = json.NewEncoder(traceFile).Encode(event)
 		traceMu.Unlock()
 		if jsonOutput {
 			stdoutMu.Lock()
-			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"protocol_version": 1, "type": "agent_event", "event": event})
+			protocolEvent := event
+			protocolEvent.Args = nil
+			protocolEvent.ResultSummary = ""
+			protocolEvent.ResultOutput = ""
+			protocolEvent.ToolCallID = ""
+			protocolEvent.Status = ""
+			protocolEvent.CompactionSummary = ""
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"protocol_version": 1, "type": "agent_event", "event": protocolEvent})
 			stdoutMu.Unlock()
+		} else if tui != nil {
+			tui.sendEvent(event)
 		} else if event.Type == "model_text_delta" {
 			_, _ = io.WriteString(os.Stdout, event.Text)
 		} else if event.Type == "tool_execution_start" {
@@ -428,9 +473,14 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		} else if event.Error != "" {
 			fmt.Fprintf(os.Stderr, "\n[%s] %s\n", event.Type, event.Error)
 		}
+		if workflowHost != nil {
+			if projected, ok := workflowEvent(event); ok {
+				workflowHost.Dispatch(projected)
+			}
+		}
 	}
 
-	model, err := agent.NewConfiguredModel(activeModelSelection)
+	model, err := modelconfig.NewConfigured(activeModelSelection)
 	if err != nil {
 		return err
 	}
@@ -443,7 +493,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if err != nil {
 		return fmt.Errorf("configure background task manager: %w", err)
 	}
-	tools, err := sigmaagent.BuiltinToolsWithNetwork(workspace, runtimeConfig.GoTestImage, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, startingCommit)
+	tools, err := sigmaagent.BuiltinToolsWithNetworkAndMemoryRepositoryID(workspace, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.MemoryRepositoryID, startingCommit)
 	if err != nil {
 		return err
 	}
@@ -471,6 +521,25 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if err != nil {
 		return fmt.Errorf("resolve package scopes: %w", err)
 	}
+	extensionPaths, err := packageExtensions(packageScopes)
+	if err != nil {
+		return fmt.Errorf("discover workflow extensions: %w", err)
+	}
+	var extensionHandler workflow.Handler = consoleWorkflowHandler{}
+	if tui != nil {
+		extensionHandler = tui
+	}
+	workflowHost, closeWorkflow, err := workflow.LoadJavaScript(context.Background(), extensionPaths, extensionHandler)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sigma-agent: warning: workflow extensions are unavailable:", err)
+		workflowHost = workflow.NewHost(extensionHandler)
+		closeWorkflow = func() error { return nil }
+	}
+	defer func() {
+		if err := closeWorkflow(); err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent: warning: close workflow extensions:", err)
+		}
+	}()
 	mcpTools, shutdownMCPServers, err := startMCPServers(context.Background(), packageScopes)
 	if err != nil {
 		// A broken MCP configuration must not take the session down. The
@@ -480,12 +549,12 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		mcpTools = nil
 	}
 	defer shutdownMCPServers()
-	tools = append(tools, mcpTools...)
+	registerAgentTools(workflowHost, mcpTools)
 	contributedSkills, err := packageSkills(packageScopes)
 	if err != nil {
 		return fmt.Errorf("load package skills: %w", err)
 	}
-	projectGuidance, err := sigmaagent.LoadProjectGuidanceWithPackages(workspace, contributedSkills)
+	projectGuidance, err := sigmaagent.LoadProjectGuidanceWithProfile(workspace, contributedSkills, runtimeConfig.ProjectInstructionsFile)
 	if err != nil {
 		return fmt.Errorf("load repository skills and memory: %w", err)
 	}
@@ -541,8 +610,9 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		if err != nil {
 			return err
 		}
-		tools = append(tools, githubTools...)
+		registerAgentTools(workflowHost, githubTools)
 	}
+	tools = append(tools, workflowAgentTools(workflowHost, tools)...)
 	registry, err := agent.NewToolRegistry(tools)
 	if err != nil {
 		return err
@@ -580,15 +650,19 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	}
 	session.Model = model
 	session.Tools = registry
+	if runtimeConfig.SkillsEnabled {
+		session.RequiredSkills = projectGuidance.MatchingSkillNames(task)
+	}
 	session.ToolOutputs = toolOutputStore
 	session.BeforeTool = configuredToolPolicy(runtimeConfig)
-	session.Limits = agent.Limits{MaxTurns: runtimeConfig.MaxTurns, MaxToolCalls: runtimeConfig.MaxToolCalls, MaxToolResultBytes: runtimeConfig.MaxToolResultBytes, ToolTimeout: time.Duration(runtimeConfig.ToolTimeoutMS) * time.Millisecond}
+	session.Limits = agent.Limits{MaxTurns: runtimeConfig.MaxTurns, MaxToolCalls: runtimeConfig.MaxToolCalls, MaxRepeatedFailedCommands: runtimeConfig.MaxRepeatedFailedCommands, MaxToolResultBytes: runtimeConfig.MaxToolResultBytes, ToolTimeout: time.Duration(runtimeConfig.ToolTimeoutMS) * time.Millisecond}
 	session.Context = agent.WindowContextManager{
 		MaxTokens:                 runtimeConfig.MaxContextTokens,
 		CompactionThresholdTokens: runtimeConfig.EffectiveContextCompactionThresholdTokens(),
 		SummaryTokens:             runtimeConfig.SummaryTokens,
 	}
 	session.OnEvent = eventSink
+	workflowHost.Dispatch(workflow.Event{Type: "session_start", SessionID: session.ID})
 	ctx, cancel := signalContext()
 	defer cancel()
 	if requestedMessageFile != "" {
@@ -600,7 +674,15 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	var result agent.Result
 	if interactive {
 		var interactiveErr error
-		result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, setupInput...)
+		if tui != nil {
+			result, interactiveErr = interactiveTUISession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, workflowHost, tui)
+		} else {
+			var scanners []*bufio.Scanner
+			if setupInput != nil {
+				scanners = append(scanners, setupInput)
+			}
+			result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, workflowHost, scanners...)
+		}
 		if interactiveErr != nil {
 			runErr = interactiveErr
 		}
@@ -612,6 +694,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if runErr != nil {
 		keepWorkspaceAfterRun = true
 	}
+	workflowHost.Dispatch(workflow.Event{Type: "session_end", SessionID: session.ID, Error: errorText(runErr)})
 	patch, diffErr := sigmaagent.WorkspaceDiff(workspace, startingCommit)
 	if diffErr != nil && runErr == nil {
 		runErr = fmt.Errorf("collect patch: %w", diffErr)
@@ -631,7 +714,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		case runErr != nil:
 			memoryWrite.Status = "skipped_unsuccessful_run"
 		default:
-			memoryWrite = sigmaagent.CaptureSuccessfulRunMemory(context.Background(), model, repo, runID, task, patch, session.Messages())
+			memoryWrite = sigmaagent.CaptureSuccessfulRunMemoryWithProfile(context.Background(), model, repo, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID, runID, task, patch, session.Messages())
 			event := agent.Event{At: time.Now().UTC(), Type: "memory_write_completed", Session: sessionID}
 			if memoryWrite.Warning != "" {
 				event.Error = memoryWrite.Warning
@@ -642,10 +725,15 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	metadata, _ := json.MarshalIndent(map[string]any{
 		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": activePushBranch,
 		"github_write_enabled": githubWrite, "allow_container_network": runtimeConfig.AllowContainerNetwork,
-		"github_mcp_enabled":        githubMCPEnabled,
-		"tool_output_artifacts_dir": filepath.Join(sessionDir, "tool_outputs"),
-		"memory_write":              memoryWrite,
-		"turns":                     result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
+		"github_mcp_enabled":            githubMCPEnabled,
+		"project_instructions_file":     projectGuidance.ExternalInstructionsPath,
+		"project_instructions_sha256":   projectGuidance.ExternalInstructionsSHA256,
+		"memory_file":                   runtimeConfig.MemoryFile,
+		"memory_repository_id":          runtimeConfig.MemoryRepositoryID,
+		"memory_source_sha256_at_start": memorySourceHash,
+		"tool_output_artifacts_dir":     filepath.Join(sessionDir, "tool_outputs"),
+		"memory_write":                  memoryWrite,
+		"turns":                         result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
 		"output_tokens": result.OutputTokens, "cache_read_input_tokens": result.CacheReadInputTokens,
 		"cache_creation_input_tokens": result.CacheCreationInputTokens, "context_compactions": result.ContextCompactions,
 		"context_compaction_input_tokens":     result.ContextCompactionInputTokens,
@@ -653,6 +741,9 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		"max_context_tokens":                  runtimeConfig.MaxContextTokens,
 		"context_compaction_threshold_tokens": runtimeConfig.EffectiveContextCompactionThresholdTokens(),
 		"summary_tokens":                      runtimeConfig.SummaryTokens,
+		"max_turns":                           runtimeConfig.MaxTurns,
+		"max_tool_calls":                      runtimeConfig.MaxToolCalls,
+		"max_repeated_failed_commands":        runtimeConfig.MaxRepeatedFailedCommands,
 		"finished_at":                         time.Now().UTC(), "error": errorString(runErr),
 	}, "", "  ")
 	if writeErr := os.WriteFile(filepath.Join(runDir, "run.json"), metadata, 0o600); writeErr != nil && runErr == nil {
@@ -697,28 +788,28 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	return nil
 }
 
-func defaultModelSelection() (agent.ModelSelection, error) {
-	selection, err := agent.LoadDefaultModelSelection()
+func defaultModelSelection() (modelconfig.Selection, error) {
+	selection, err := modelconfig.LoadDefaultSelection()
 	if err != nil {
-		return agent.ModelSelection{}, err
+		return modelconfig.Selection{}, err
 	}
 	if selection.Provider == "" {
 		modelID := strings.TrimSpace(os.Getenv("SIGMA_AGENT_MODEL"))
 		if modelID == "" {
-			modelID = agent.DefaultModelForProvider("minimax")
+			modelID = modelconfig.DefaultModel("minimax")
 		}
-		selection = agent.ModelSelection{Provider: "minimax", Model: modelID}
+		selection = modelconfig.Selection{Provider: "minimax", Model: modelID}
 	}
 	return selection, nil
 }
 
-func parseModelCommand(value string, current agent.Model) (agent.ModelSelection, string, error) {
-	currentSelection := agent.ModelSelection{Provider: "minimax", Model: agent.DefaultModelForProvider("minimax")}
+func parseModelCommand(value string, current agent.Model) (modelconfig.Selection, string, error) {
+	currentSelection := modelconfig.Selection{Provider: "minimax", Model: modelconfig.DefaultModel("minimax")}
 	if current != nil {
 		modelID := current.ModelID()
 		if providerText, id, ok := strings.Cut(modelID, "/"); ok {
-			if provider, valid := agent.NormalizeModelProvider(providerText); valid && id != "" {
-				currentSelection = agent.ModelSelection{Provider: provider, Model: id}
+			if provider, valid := modelconfig.NormalizeProvider(providerText); valid && id != "" {
+				currentSelection = modelconfig.Selection{Provider: provider, Model: id}
 			}
 		} else if modelID != "" {
 			currentSelection.Model = modelID
@@ -732,18 +823,18 @@ func parseModelCommand(value string, current agent.Model) (agent.ModelSelection,
 		return currentSelection, "save", nil
 	}
 	providerText, modelID, ok := strings.Cut(value, "/")
-	provider, valid := agent.NormalizeModelProvider(providerText)
+	provider, valid := modelconfig.NormalizeProvider(providerText)
 	if !valid || !ok || strings.TrimSpace(modelID) == "" {
-		return agent.ModelSelection{}, "", errors.New("usage: /model <provider>/<model-id>, /model list, or /model save")
+		return modelconfig.Selection{}, "", errors.New("usage: /model <provider>/<model-id>, /model list, or /model save")
 	}
-	hasKey, err := agent.ModelProviderHasAPIKey(provider)
+	hasKey, err := modelconfig.ProviderHasAPIKey(provider)
 	if err != nil {
-		return agent.ModelSelection{}, "", err
+		return modelconfig.Selection{}, "", err
 	}
 	if !hasKey {
-		return agent.ModelSelection{}, "", fmt.Errorf("no %s API key is configured; restart the interactive session and use /login %s", provider, provider)
+		return modelconfig.Selection{}, "", fmt.Errorf("no %s API key is configured; restart the interactive session and use /login %s", provider, provider)
 	}
-	return agent.ModelSelection{Provider: provider, Model: strings.TrimSpace(modelID)}, "switch", nil
+	return modelconfig.Selection{Provider: provider, Model: strings.TrimSpace(modelID)}, "switch", nil
 }
 
 func onlyProjectMemoryDirty(status string) bool {
@@ -762,7 +853,7 @@ func onlyProjectMemoryDirty(status string) bool {
 	return true
 }
 
-func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance sigmaagent.ProjectGuidance, inputScanners ...*bufio.Scanner) (agent.Result, error) {
+func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance sigmaagent.ProjectGuidance, extensions *workflow.Host, inputScanners ...*bufio.Scanner) (agent.Result, error) {
 	type inputEvent struct {
 		line string
 		err  error
@@ -774,7 +865,11 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /model, /diff, /tree, /branch <entry-id>, /skill:<name> <task>, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
+	commandNames := []string{"/help", "/model", "/diff", "/tree", "/branch <entry-id>", "/skill:<name> <task>", "/abort", "/exit"}
+	for _, command := range extensions.Commands() {
+		commandNames = append(commandNames, "/"+command.Name)
+	}
+	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: %s\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID, strings.Join(commandNames, ", "))
 	input := make(chan inputEvent, 1)
 	var scanner *bufio.Scanner
 	if len(inputScanners) > 0 {
@@ -878,6 +973,15 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 			if line == "" {
 				continue
 			}
+			if strings.HasPrefix(line, "/") {
+				name, args, _ := strings.Cut(strings.TrimPrefix(line, "/"), " ")
+				if handled, commandErr := extensions.RunCommand(ctx, name, strings.TrimSpace(args)); handled {
+					if commandErr != nil {
+						fmt.Fprintf(os.Stderr, "[extension command error] %v\n", commandErr)
+					}
+					continue
+				}
+			}
 			switch {
 			case line == "/exit" || line == "/quit":
 				if activeDone != nil {
@@ -895,7 +999,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintln(os.Stderr, "\nAbort requested; session will remain open.")
 				}
 			case line == "/help":
-				fmt.Fprintln(os.Stderr, "Enter a coding instruction. Use /skill:<name> <task> to explicitly invoke a Skill. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /model shows or switches models between turns; /diff shows the patch; /tree lists conversation branches; /branch <entry-id> moves to an earlier point and starts a new branch; /abort stops the active turn; /exit saves and ends the session.")
+				fmt.Fprintf(os.Stderr, "Commands: %s. Enter text to start a task; while a turn is active, plain text or /steer <text> queues guidance.\n", strings.Join(commandNames, ", "))
 			case strings.HasPrefix(line, "/skill:"):
 				invocation := strings.TrimPrefix(line, "/skill:")
 				name, task, ok := strings.Cut(invocation, " ")
@@ -944,13 +1048,13 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 				case "show":
 					printModelOptions(selection)
 				case "save":
-					if err := agent.SaveDefaultModelSelection(selection); err != nil {
+					if err := modelconfig.SaveDefaultSelection(selection); err != nil {
 						fmt.Fprintf(os.Stderr, "Could not save default model: %v\n", err)
 					} else {
 						fmt.Fprintf(os.Stderr, "Saved default model %s/%s.\n", selection.Provider, selection.Model)
 					}
 				case "switch":
-					model, err := agent.NewConfiguredModel(selection)
+					model, err := modelconfig.NewConfigured(selection)
 					if err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						continue

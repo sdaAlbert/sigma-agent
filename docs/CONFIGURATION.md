@@ -8,8 +8,9 @@ defaults. A file can contain only the settings that need changing.
 {
   "max_turns": 128,
   "max_tool_calls": 256,
+  "max_repeated_failed_commands": 3,
   "max_context_tokens": 64000,
-  "context_compaction_threshold_tokens": 24000,
+  "context_compaction_threshold_tokens": 30000,
   "summary_tokens": 800,
   "max_tool_result_bytes": 16384,
   "max_retrieval_query_bytes": 8192,
@@ -17,24 +18,46 @@ defaults. A file can contain only the settings that need changing.
   "tool_timeout_ms": 600000,
   "model_timeout_ms": 120000,
   "max_retries": 2,
-  "go_test_image": "golang:1.26",
-  "command_execution_image": "golang:1.26",
+  "command_execution_image": "debian:trixie-slim",
+  "allow_container_network": false,
   "skills_enabled": true,
   "web_search_enabled": false,
   "default_tool_permission": "allow",
   "tool_permissions": {
     "apply_patch": "deny",
-    "run_tests": "allow"
+    "run_command": "allow"
   }
 }
 ```
+
+Optional project-context paths can be set in the same config. Relative paths are
+resolved from the config file's directory. This lets benchmark runs load a
+shared profile outside a target checkout without editing that checkout:
+
+```json
+{
+  "project_instructions_file": "../../AGENTS.md",
+  "memory_file": "../../.sigma-agent/profiles/my-benchmark/MEMORY.md",
+  "memory_repository_id": "benchmark:owner/repository"
+}
+```
+
+The external instructions file is added alongside any root `AGENTS.md` in the
+task workspace. An external memory file is copied into the isolated session
+worktree's `.sigma-agent/MEMORY.md`; BM25 and Qdrant search use the configured
+stable `memory_repository_id`, so separate clones of the same upstream repo can
+share one memory namespace. The target checkout itself is not changed. If
+`memory_auto_write` is enabled, successful runs append reviewed-format facts to
+the configured external file and refresh its Qdrant index. Run metadata records
+the external paths, instruction hash, memory scope, and starting memory hash.
 
 | Setting | Default | Allowed range | Purpose |
 | --- | ---: | ---: | --- |
 | `max_turns` | 128 | 1–512 | Assistant/model turns allowed in one run |
 | `max_tool_calls` | 256 | 1–4096 | Tool calls allowed in one run |
+| `max_repeated_failed_commands` | 0 (disabled) | 0–20 | Pause the run after this many identical failed `run_command` calls without a workspace change; benchmark configs can set 3 to limit command loops |
 | `max_context_tokens` | 64000 | 512–1000000 | Hard estimated context ceiling; proactive compaction normally uses the lower threshold below. If MiniMax explicitly rejects an oversized prompt, Sigma Agent compacts the request and retries up to three times |
-| `context_compaction_threshold_tokens` | `min(24000, max_context_tokens)` | 0–`max_context_tokens` | Proactively compact older conversation history when estimated input exceeds this threshold. `0` selects the automatic default. Compaction keeps recent complete turns, adds a bounded extractive summary, and records before/after estimates in the event log. |
+| `context_compaction_threshold_tokens` | `min(30000, max_context_tokens)` | 0–`max_context_tokens` | Proactively compact older conversation history when estimated input exceeds this soft threshold. The context manager permits up to 256 estimated tokens above the threshold, capped by `max_context_tokens`; if the newest complete turn still cannot fit the soft budget, it can retain that turn up to the hard context ceiling after shrinking tool output. `0` selects the automatic default. |
 | `summary_tokens` | 800 | 0 to less than compaction threshold | Maximum estimated size of summaries produced by automatic or model-requested context compaction |
 | `max_tool_result_bytes` | 16384 | 1024–4194304 | Inline limit for each tool result. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. If artifact storage fails or reaches its cap, the inline result is truncated. |
 | `max_retrieval_query_bytes` | 8192 | 500–65536 | Maximum UTF-8 bytes accepted by `search_memory` (legacy setting name) |
@@ -42,12 +65,14 @@ defaults. A file can contain only the settings that need changing.
 | `tool_timeout_ms` | 600000 | 1000–1800000 | Timeout for each tool execution, including Docker environment image preparation |
 | `model_timeout_ms` | 120000 | 1000–1800000 | HTTP timeout for a model request |
 | `max_retries` | 2 | 0–10 | Retries for retryable transport/server failures, including HTTP 429 and 529 |
-| `go_test_image` | `golang:1.26` | Docker image reference | Image used by `run_tests`; when outbound network is disabled it should include the repository's Go module dependencies |
-| `command_execution_image` | `golang:1.26` | Linux Docker image reference | Fallback image used by `run_command` until the Agent prepares an environment or chooses an image for a command |
-| `allow_container_network` | `false` | boolean | Give test and command containers outbound internet access. Enable it per interactive session with `/network on` or at startup with `--allow-container-network`; useful for downloading project dependencies, but commands and package install scripts can then contact external services |
+| `command_execution_image` | `debian:trixie-slim` | Linux Docker image reference | Fallback image used by `run_command` until the Agent prepares an environment or chooses an image for a command |
+| `allow_container_network` | `false` | boolean | Allow command containers outbound internet access so project dependencies can be downloaded. Set it to `true` or use `/network on` to enable it; commands and package install scripts can contact external services while it is enabled |
 | `skills_enabled` | `true` | boolean | Discover project `.agents/skills/` and `.pi/skills/`, plus user `~/.agents/skills/` and `~/.pi/agent/skills/`. Set to `false` for a matched no-Skill evaluation; repository memory stays enabled |
 | `memory_enabled` | `true` | boolean | Enable repository memory context and `search_memory`. Set to `false` for a matched no-memory comparison; code browsing tools remain available |
-| `memory_auto_write` | `false` | boolean | After a successful non-interactive run, use one bounded model call to extract up to three durable facts into `.sigma-agent/MEMORY.md`, then refresh Qdrant when configured. Requires `memory_enabled`; generated notes and extra tokens are recorded in `run.json`. |
+| `memory_auto_write` | `false` | boolean | After a successful non-interactive run, use one bounded model call to extract up to three durable repository facts into `.sigma-agent/MEMORY.md`, then refresh Qdrant when configured. Requires `memory_enabled`; generated notes and extra tokens are recorded in `run.json`. Set it to `true` to opt in. |
+| `project_instructions_file` | unset | absolute path after config resolution | Add an external Markdown instruction file to the session prompt without copying it into the target checkout. Maximum 16 KiB; `run.json` records its path and SHA-256. |
+| `memory_file` | unset | absolute path after config resolution | Use an external reviewed memory source instead of the target checkout's `.sigma-agent/MEMORY.md`; it is copied into the isolated session worktree and can receive automatic memory writes. Maximum 16 KiB. |
+| `memory_repository_id` | unset | 1–128 letters, digits, `.`, `_`, `:`, `/`, or `-` | Required with `memory_file`; stable Qdrant/BM25 scope shared by independent clones of one upstream repository. |
 | `web_search_enabled` | `false` | boolean | Add MiniMax's hosted `web_search` as an explicit Agent tool. Uses provider credentials and quota. |
 | `default_tool_permission` | `allow` | `allow` or `deny` | Permission applied to every registered tool unless overridden below. Set to `deny` to use an allowlist. |
 | `tool_permissions` | `{}` | tool name → `allow` or `deny` | Exact per-tool overrides. Tool names match the names exposed to the model, including namespaced MCP tools. |
@@ -194,43 +219,37 @@ image from a generated Dockerfile and remembers it for subsequent commands and
 session resumes. The build context contains only that generated Dockerfile;
 Docker pulls a missing base image on first use and caches the resulting image.
 `command_execution_image` remains the fallback before an environment is
-prepared. `run_tests` remains a Go-specific convenience; other languages use
-their project-native commands through `run_command`.
+prepared. All languages use their project-native build, lint, and test commands
+through `run_command`; Sigma does not hardcode language-specific test profiles.
 
-Set `allow_container_network` to `true`, use `/network on` before starting a
-task, or pass `--allow-container-network` for one scripted CLI session to let
-test and command containers use Docker's bridge network. This lets the Agent attempt project dependency setup, such as
-`npm ci`, `pip install`, `mvn test`, or `cargo test`. In this mode `run_tests`
-downloads Go modules before running the selected Go test/vet command. The
-mounted task worktree persists between commands. Package-manager home caches
+Set `allow_container_network` to `true` or use `/network on` before starting
+a task when outbound access is needed. By default, command containers use a
+Docker internal network, so the Agent cannot download project dependencies such as
+`npm ci`, `pip install`, `mvn test`, or `cargo test`. The mounted task worktree persists between commands. Package-manager home caches
 also persist under `.sigma-agent/container-home`, so Maven, Cargo, pip, npm,
 and Go dependencies need not be downloaded again on every invocation. The mode
 does not install host software, expose the Docker socket to the container,
 start sibling service containers, or guarantee that arbitrary setup
 instructions will work. Each command gets a fresh container, but images built
 with `prepare_environment` preserve system package manager changes between
-commands. The default remains offline; network access can expose repository
-data to package registries or other endpoints contacted by install scripts.
+commands. Networking is opt-in; package managers or install scripts can send
+requests to external services while it is enabled.
 
-By default, `run_tests` attaches each test container to a temporary Docker
-internal network. This gives tests a virtual network interface while blocking
-external egress; loopback remains available. With `allow_container_network`, it
-uses Docker's bridge network. For benchmark or repository workspaces, set
-`go_test_image` to a pinned image with the matching Go version and module cache
-already populated. For example, the local Multi-SWE-bench
-`go-zero#2537` task image is `mswebench/zeromicro_m_go-zero:pr-2537`; select it
-in a task-specific config so `go test ./...` uses that image's preloaded Go
-1.24.1 toolchain and dependencies without exposing test execution to the internet.
-Go commands use `GOMAXPROCS=2` and `-p 2` to fit the test container's CPU and
-process limits. `go-test-package` runs a focused package such as
-`./core/mapping`; `go-test` and `go-vet` run across the module.
+Command containers use a temporary Docker internal network by default, giving
+tests a virtual network interface while blocking external egress; loopback
+remains available. Setting `allow_container_network` to `true` switches them to
+Docker's bridge network. Select a task-appropriate image with `command_execution_image`, the
+`run_command` image argument, or `prepare_environment`; for example, an
+evaluation task may use its own preloaded image and dependencies. Go, Python,
+JavaScript, Rust, and other test commands all run through the same tool and
+resource limits.
 
 `prepare_environment` accepts any valid Docker base image and a shell setup
 command. When network is enabled, that command can install OS packages, headers,
 and compilers into a derived image; those changes persist across test/build
 commands. Its generated build context contains no repository files. When
 network is disabled, Docker build steps have no network, so choose a base image
-that already contains needed packages or enable `--allow-container-network`.
+that already contains needed packages or re-enable networking for the session.
 `run_command` executes one Linux shell command in the active prepared image (or
 the configured fallback), and an optional `image` can override the image for a
 single command. It mounts only the isolated task worktree as writable and is
@@ -276,7 +295,7 @@ ago as `revalidation_required`. The Agent is instructed to verify applicable
 facts against the current checkout and tests before using them. Current source,
 repository instructions, and the user's request take precedence over memory.
 
-`memory_auto_write` is an optional post-task capture step. It runs only after a
+`memory_auto_write` is an opt-in post-task capture step. It runs only after a
 non-interactive run returns successfully; failed, cancelled, or interrupted
 runs do not write. The same model receives a bounded evidence bundle containing
 the task, patch, test output, and final notes, and may return up to three short

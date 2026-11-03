@@ -43,13 +43,17 @@ Then inspect provider/key status and choose a model:
 
 ```text
 /model list
-/model minimax/MiniMax-M3
+/model minimax/MiniMax-M3.1-Flash
 /model save
 ```
 
-`/model list` lists supported providers and whether a key is configured; it does not fetch a live model catalog. Enter the model ID accepted by your provider. `/model save` makes the current selection the default for new sessions. Without an explicit model selection, Sigma uses its saved default; on a fresh configuration its built-in default is `minimax/MiniMax-M3`.
+`/model list` lists supported providers and whether a key is configured; it does not fetch a live model catalog. Enter the model ID accepted by your provider. `/model save` makes the current selection the default for new sessions. Without an explicit model selection, Sigma uses its saved default; on a fresh configuration its built-in default is `minimax/MiniMax-M3.1-Flash`.
 
 During an interactive coding session, `/model` displays the current selection and provider/key status. `/model <provider>/<model-id>` switches models between turns; `/model save` saves that selection as the default for new sessions.
+
+For a one-shot task or a resumed session, pass `--model <provider>/<model-id>`
+to override the saved selection and the model recorded in the session. This is
+useful when continuing a session after a provider quota interruption.
 
 ## 3. Select a repository and start a task
 
@@ -73,13 +77,13 @@ Run `go run ./cmd/sigma-agent --tui` to configure and use Sigma in one Bubble Te
 
 TUI shortcuts: `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and file paths (`@path` in prompts and paths after `/repo`), `Up`/`Down` browse prompt history at the start/end of the input, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
-If the task requires downloading project dependencies, Docker networking is off by default. In setup, opt in for the session with:
+Docker command containers have outbound networking disabled by default. Use this in setup to enable it for project dependencies:
 
 ```text
 /network on
 ```
 
-Use `/network off` to disable it. Enabling network access allows container commands and package install scripts to contact external services; see [configuration](CONFIGURATION.md) for details.
+Use `/network off` to disable it again. With networking on, container commands and package install scripts can contact external services; see [configuration](CONFIGURATION.md) for details.
 
 ## 4. Setup commands
 

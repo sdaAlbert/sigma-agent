@@ -12,6 +12,7 @@ import (
 )
 
 func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T) {
+	useIsolatedUserSkillDirectory(t)
 	root := t.TempDir()
 	skillDir := filepath.Join(root, ".agents", "skills", "go-issue-workflow")
 	writeFixture(t, filepath.Join(skillDir, "SKILL.md"), "---\nname: go-issue-workflow\ndescription: Use when fixing a Go issue.\n---\nInspect the failing path, add a regression test, and run focused tests.\n")
@@ -47,7 +48,36 @@ func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T)
 	}
 }
 
+func TestMatchingSkillNamesUsesRepositoryLanguageAndTaskName(t *testing.T) {
+	useIsolatedUserSkillDirectory(t)
+	root := t.TempDir()
+	writeFixture(t, filepath.Join(root, "setup.py"), "")
+	writeFixture(t, filepath.Join(root, ".agents", "skills", "python-issue-workflow", "SKILL.md"), "---\nname: python-issue-workflow\ndescription: Use when fixing an issue in a Python repository.\n---\nworkflow\n")
+	writeFixture(t, filepath.Join(root, ".agents", "skills", "go-issue-workflow", "SKILL.md"), "---\nname: go-issue-workflow\ndescription: Use when fixing an issue in a Go repository.\n---\nworkflow\n")
+	writeFixture(t, filepath.Join(root, ".agents", "skills", "xlsx", "SKILL.md"), "---\nname: xlsx\ndescription: Use when working with a spreadsheet or a standalone Python script.\n---\nworkflow\n")
+	writeFixture(t, filepath.Join(root, ".agents", "skills", "manual-only", "SKILL.md"), "---\nname: manual-only\ndescription: Manual only.\n---\nworkflow\n")
+
+	guidance, err := LoadProjectGuidance(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range guidance.Skills {
+		if guidance.Skills[i].Name == "manual-only" {
+			guidance.Skills[i].DisableModelInvocation = true
+		}
+	}
+	got := guidance.MatchingSkillNames("Fix the issue")
+	if len(got) != 1 || got[0] != "python-issue-workflow" {
+		t.Fatalf("matching Skills = %v, want [python-issue-workflow]", got)
+	}
+	got = guidance.MatchingSkillNames("Please use go-issue-workflow")
+	if len(got) != 2 || got[0] != "go-issue-workflow" || got[1] != "python-issue-workflow" {
+		t.Fatalf("explicit task Skill match = %v, want sorted repository and explicitly named Skills", got)
+	}
+}
+
 func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
+	useIsolatedUserSkillDirectory(t)
 	root := t.TempDir()
 	writeFixture(t, filepath.Join(root, ".sigma-agent", "MEMORY.md"), "# Reviewed project memory\n\n- 2026-10-30 | source: docs/testing.md | Run focused Go package tests before the full suite.\n")
 	guidance, err := LoadProjectGuidance(root)
@@ -65,7 +95,7 @@ func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 		t.Fatal("empty skill registry should reject lookup")
 	}
 
-	tools, err := BuiltinTools(root, "", 0, nil, nil)
+	tools, err := BuiltinTools(root, 0, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +113,7 @@ func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 }
 
 func TestProjectGuidanceDoesNotInheritParentRepositoryContext(t *testing.T) {
+	useIsolatedUserSkillDirectory(t)
 	parent := t.TempDir()
 	writeFixture(t, filepath.Join(parent, ".sigma-agent", "MEMORY.md"), "parent-only fact\n")
 	writeFixture(t, filepath.Join(parent, ".agents", "skills", "parent-skill", "SKILL.md"), "---\nname: parent-skill\ndescription: Parent repository only.\n---\nparent skill body\n")
@@ -98,6 +129,13 @@ func TestProjectGuidanceDoesNotInheritParentRepositoryContext(t *testing.T) {
 	if guidance.Memory != "" || len(guidance.Skills) != 0 {
 		t.Fatalf("child repo inherited parent context: memory=%q skills=%#v", guidance.Memory, guidance.Skills)
 	}
+}
+
+func useIsolatedUserSkillDirectory(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 }
 
 func TestLoadMemoryEntriesPreservesSourceDateAndContent(t *testing.T) {
@@ -143,7 +181,7 @@ func TestWritingToolsRejectProjectGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := BuiltinTools(root, "", 0, nil, nil)
+	tools, err := BuiltinTools(root, 0, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -28,7 +28,7 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 | 主要目标 | 极简、可定制的 Coding Agent Harness | 面向仓库任务和后端集成的 Go 原生 Runtime |
 | 运行时 | TypeScript / Node.js | Go 可执行程序；Docker 执行仓库命令 |
 | 交互方式 | 交互式 CLI、print/JSON、RPC 和 TypeScript SDK | 集成终端 TUI、单次 CLI/JSONL、本地 HTTP/SSE 任务 API |
-| 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | Agent Skills 目录/frontmatter 子集与按需参考文件读取、可信命令工具适配器、GitHub MCP；不运行 Pi 扩展/包 |
+| 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | 包内 Skills、MCP 工具，以及支持斜杠命令、Agent 工具、通知、确认和只读生命周期事件的 JavaScript 工作流扩展宿主 |
 | 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 仓库命令/测试工具内建 Docker 执行；每个任务另有独立 Git worktree |
 | 环境准备 | 使用本机工具链，或另行配置容器/沙箱 | Agent 可检查项目配置并准备缓存的 Docker 镜像，安装选择的工具链和系统依赖 |
 | 编码任务重点与证据 | Pi 是更广泛、成熟且可定制的 Coding Agent Harness，支持多种交互方式和扩展生态 | Sigma 专注仓库 Issue 修复 |
@@ -53,9 +53,9 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 
 ## Docker 命令隔离与环境准备
 
-在 Sigma 的仓库任务流程里，`run_command` 和 Go 测试工具会在 Docker 中执行项目命令，而不是直接在宿主机运行。命令容器只把当前任务的独立 worktree 挂载为可写工作区；命令容器会移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。测试和命令容器默认使用临时 Docker internal 网络，不能访问外网；依赖下载需要联网时，可对当前会话使用 `/network on`，切换到 Docker bridge 网络。任务 worktree 和依赖缓存会在多次命令间保留。
+在 Sigma 的仓库任务流程里，`run_command` 会在 Docker 中执行项目自己的构建、检查和测试命令，而不是直接在宿主机运行。它不内置某一种语言的测试配置。命令容器只把当前任务的独立 worktree 挂载为可写工作区；容器会移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。容器默认阻止访问外网；需要下载项目依赖时，可用 `/network on` 为当前会话启用网络。任务 worktree 和依赖缓存会在多次命令间保留。
 
-执行项目命令前，Agent 可以检查仓库 Dockerfile、devcontainer、CI workflow、README 和依赖清单，再调用 `prepare_environment` 指定基础镜像与准备命令。Sigma 会构建并缓存派生镜像，供后续命令和恢复的 session 复用。Docker 构建上下文只有自动生成的 Dockerfile，不包含仓库源码。若准备环境时要下载系统包或依赖，需要主动开启网络。
+执行项目命令前，Agent 可以检查仓库 Dockerfile、devcontainer、CI workflow、README 和依赖清单，再调用 `prepare_environment` 指定基础镜像与准备命令。Sigma 会构建并缓存派生镜像，供后续命令和恢复的 session 复用。Docker 构建上下文只有自动生成的 Dockerfile，不包含仓库源码。容器默认可以下载系统包和项目依赖；需要隔离网络时可关闭。
 
 这属于**命令执行隔离**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行；任务 worktree 以读写方式挂入 Docker，所以容器命令仍可以修改该任务的文件，但通过这个挂载不能修改 worktree 以外的宿主机文件。它不是为恶意多租户任务设计的强化安全边界。
 
@@ -80,7 +80,7 @@ go build -o sigma-agent.exe ./cmd/sigma-agent
 
 进入 TUI 设置界面后，使用 `/login minimax` 保存模型 Key，使用 `/model list` 查看支持的提供商和 Key 配置状态，使用 `/model <provider>/<model-id>` 选择模型，再用 `/repo <path>` 选择一个干净的本地仓库。使用 `/model save` 将当前模型设为新会话默认值，然后直接输入任务或运行 `/start`。脚本模式也可以通过环境变量提供模型 Key。完整命令说明见[使用指南](docs/USAGE.md)；提供商、凭据、运行时限制和 Docker 设置见[配置说明](docs/CONFIGURATION.md)。
 
-Docker 命令容器默认无法访问外网。如果任务需要下载依赖，可以用 `/network on` 为当前会话主动开启网络；安全边界和依赖缓存行为见配置说明。
+Docker 命令容器默认不能访问外网。需要下载项目依赖时，用 `/network on` 为当前会话启用网络；详情见配置说明。
 
 ## 使用 Sigma
 
@@ -206,7 +206,7 @@ Sigma Agent 读取用户级 `~/.sigma-agent/mcp.json` 和项目级 `<repo>/.sigm
 
 MCP 服务器是以当前用户权限运行的程序，安装包也会执行包管理器的安装脚本，只应安装可信的包。包提供的工具仍然走配置的工具策略，可以被 `tool_permissions` 拒绝。
 
-包格式、支持的来源和当前限制见[包与 MCP 服务器](docs/PACKAGES.md)：包里的扩展模块只列出不执行，且不支持 HTTP 型 MCP 服务器。
+包格式、支持的来源、工作流扩展命令与事件以及当前限制见[包与 MCP 服务器](docs/PACKAGES.md)。目前不支持 HTTP 型 MCP 服务器。
 
 ## 仓库长期记忆 RAG 与 Skills
 
@@ -227,9 +227,10 @@ Qdrant 使用精确仓库范围过滤。Agent 得到带出处的候选事实后�
 
 Skill 和长期记忆解决不同问题：
 
+- 仓库根目录的 `AGENTS.md` 会在每次会话启动时作为项目指引加载，最多 16 KiB；它适合放稳定约定和文档入口。当前自动发现只读取仓库根目录文件，不向上搜索父目录，也不读取子目录内的 `AGENTS.md`。配置 `project_instructions_file` 后，还可以从目标仓库之外追加一份共享指引。
 - Sigma 会发现项目级 `.agents/skills/`、`.pi/skills/`，以及用户级 `~/.agents/skills/`、`~/.pi/agent/skills/`。初始上下文只暴露 Skill 名称和描述；匹配后通过 `read_skill` 加载正文，再用 `read_skill_resource` 按需读取同一 Skill 目录下的 Markdown 指引或文本模板。交互会话中可用 `/skill:<name> <task>` 显式调用 Skill，包括 frontmatter 标记 `disable-model-invocation: true` 的 Skill。
 - 支持常见 Agent Skills 字段：`name`、`description`、`license`、`compatibility`、`disable-model-invocation` 和 `user-invocable`。其他 frontmatter 字段会被容忍，但 Pi 的 `allowed-tools` 权限语义尚未实现；工具权限仍以 Sigma 配置为准。加载 Skill 或参考文件不会自动运行脚本。`read_skill_resource` 只读小型文本资料/模板，不开放脚本和二进制资源。
-- `.sigma-agent/MEMORY.md` 保存可能跨任务复用的短事实，每条带类别、来源和日期，并按仓库隔离。Session snapshot 保存的是中断恢复状态，不是长期记忆。
+- `.sigma-agent/MEMORY.md` 保存可能跨任务复用的短事实，每条带类别、来源和日期，并按仓库隔离；它通过 BM25/向量检索按需取回，不会整体塞进上下文。`memory_file` 和稳定的 `memory_repository_id` 可让独立任务 checkout 共享目标仓库记忆；文件复制到隔离 session worktree，原始目标 checkout 不变。Session snapshot 保存的是中断恢复状态，不是长期记忆。
 - 当前源码和测试优先级更高。记忆是需要对照当前代码验证的参考，不应取代源码阅读。
 - BM25 可在本机运行。配置 Embedding 和 Qdrant 后，Sigma 会加入按仓库过滤的向量候选，再用 Reciprocal Rank Fusion 融合排名。这个记忆功能不会给源码分块或建立源码向量索引。
 

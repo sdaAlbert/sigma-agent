@@ -78,11 +78,35 @@ func CopyProjectMemory(sourceRoot, workspaceRoot string) error {
 	return writeProjectMemoryFile(workspaceRoot, data)
 }
 
+// read the private worktree copy using the caller's stable repository scope.
+func CopyProjectMemoryFromFile(sourceFile, workspaceRoot, repoID string) (string, error) {
+	if strings.TrimSpace(repoID) == "" {
+		return "", errors.New("a stable repository ID is required for external memory")
+	}
+	_, data, hash, err := readExternalContextFile(sourceFile, maxMemoryBytes)
+	if err != nil {
+		return "", fmt.Errorf("read external project memory: %w", err)
+	}
+	if _, err := parseMemoryEntries(repoID, data); err != nil {
+		return "", fmt.Errorf("parse external project memory: %w", err)
+	}
+	if err := writeProjectMemoryFile(workspaceRoot, data); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
 // CaptureSuccessfulRunMemory extracts a few durable repository facts after a
 // successful agent run, appends them to the project source of truth, then
 // refreshes the derived vector index. A failed or interrupted coding run must
 // not promote uncertain notes into active memory.
 func CaptureSuccessfulRunMemory(ctx context.Context, model agent.Model, repo, runID, task, patch string, messages []agent.Message) MemoryWriteReport {
+	return CaptureSuccessfulRunMemoryWithProfile(ctx, model, repo, "", "", runID, task, patch, messages)
+}
+
+// CaptureSuccessfulRunMemoryWithProfile writes to a configured shared memory
+// source when present, then refreshes Qdrant under its stable repository scope.
+func CaptureSuccessfulRunMemoryWithProfile(ctx context.Context, model agent.Model, repo, memoryFile, memoryRepoID, runID, task, patch string, messages []agent.Message) MemoryWriteReport {
 	report := MemoryWriteReport{Status: "skipped"}
 	if model == nil {
 		report.Warning = "memory capture skipped: model is unavailable"
@@ -109,7 +133,7 @@ Keep durable test commands/outcomes, architecture or API constraints, compatibil
 	request := []agent.Message{{Role: "user", Content: []agent.ContentBlock{{Type: "text", Text: string(input)}}}}
 	callCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	if model, ok := model.(*agent.MiniMaxMessagesModel); ok {
+	if model, ok := model.(*agent.AnthropicMessagesModel); ok {
 		previous := model.MaxOutputTokens
 		model.MaxOutputTokens = 1200
 		defer func() { model.MaxOutputTokens = previous }()
@@ -141,7 +165,12 @@ Keep durable test commands/outcomes, architecture or API constraints, compatibil
 		report.Status = "no_facts"
 		return report
 	}
-	added, err := appendGeneratedMemory(repo, runID, drafts)
+	var added int
+	if memoryFile != "" {
+		added, err = appendGeneratedMemoryFile(memoryFile, memoryRepoID, runID, drafts)
+	} else {
+		added, err = appendGeneratedMemory(repo, runID, drafts)
+	}
 	if err != nil {
 		report.Warning = "memory capture could not be saved: " + err.Error()
 		return report
@@ -152,7 +181,12 @@ Keep durable test commands/outcomes, architecture or API constraints, compatibil
 		return report
 	}
 	report.Status = "saved"
-	indexed, err := IndexRepositoryMemory(repo)
+	var indexed int
+	if memoryFile != "" {
+		indexed, err = IndexProjectMemoryFile(memoryFile, memoryRepoID)
+	} else {
+		indexed, err = IndexRepositoryMemory(repo)
+	}
 	if err != nil {
 		// The Markdown source remains searchable through BM25 when Qdrant or the
 		// embedding endpoint is unavailable.
@@ -208,7 +242,7 @@ func memoryCaptureEvidence(task, patch string, messages []agent.Message) ([]stri
 				continue
 			}
 			toolCall := toolNames[block.ToolUseID]
-			if block.Type == "tool_result" && (toolCall.name == "run_tests" || toolCall.name == "run_command" && toolCall.purpose == "test") {
+			if block.Type == "tool_result" && toolCall.name == "run_command" && toolCall.purpose == "test" {
 				value := block.Content
 				if value == "" {
 					value = block.Text
@@ -344,9 +378,6 @@ func parseGeneratedMemory(output string, allowedPaths []string) ([]generatedMemo
 }
 
 func appendGeneratedMemory(root, runID string, drafts []generatedMemoryFact) (int, error) {
-	if len(drafts) == 0 {
-		return 0, nil
-	}
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return 0, err
@@ -364,6 +395,29 @@ func appendGeneratedMemory(root, runID string, drafts []generatedMemoryFact) (in
 		return 0, err
 	}
 	path := filepath.Join(directory, "MEMORY.md")
+	return appendGeneratedMemoryAt(path, repoID, runID, drafts)
+}
+
+func appendGeneratedMemoryFile(path, repoID, runID string, drafts []generatedMemoryFact) (int, error) {
+	if strings.TrimSpace(repoID) == "" {
+		return 0, errors.New("a stable repository ID is required for external memory writes")
+	}
+	abs, _, _, err := readExternalContextFile(path, maxMemoryBytes)
+	if err != nil {
+		return 0, fmt.Errorf("read external project memory: %w", err)
+	}
+	return appendGeneratedMemoryAt(abs, repoID, runID, drafts)
+}
+
+func appendGeneratedMemoryAt(path, repoID, runID string, drafts []generatedMemoryFact) (int, error) {
+	if len(drafts) == 0 {
+		return 0, nil
+	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return 0, err
+	}
+	directory := filepath.Dir(path)
 	var current []byte
 	info, err := os.Lstat(path)
 	if err == nil {

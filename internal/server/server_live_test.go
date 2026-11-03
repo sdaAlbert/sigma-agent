@@ -77,7 +77,7 @@ func TestLiveTaskServiceLifecycle(t *testing.T) {
 	}
 	t.Log("PASS: second real task remains queued while the single worker runs the first task")
 
-	awaitSSETool(t, ctx, streamA, "run_tests", client, baseURL, serviceHome, taskA.ID)
+	awaitSSETool(t, ctx, streamA, "run_command", client, baseURL, serviceHome, taskA.ID)
 	time.Sleep(time.Second) // Let Docker start the real go test process before cancelling it.
 	postTaskAction(t, client, baseURL, taskA.ID, "cancel")
 	waitTaskStatus(t, ctx, client, baseURL, taskA.ID, "cancelled")
@@ -90,7 +90,7 @@ func TestLiveTaskServiceLifecycle(t *testing.T) {
 	t.Log("PASS: queued real task ran after worker became free and changed its isolated worktree")
 
 	postTaskAction(t, client, baseURL, taskA.ID, "resume")
-	resumeMessageID := postLiveTaskMessage(t, client, baseURL, taskA.ID, "The earlier run_tests call was cancelled. Re-run the Go tests against the current workspace and fix any failures. Preserve the test sleep and unrelated code.", "steer")
+	resumeMessageID := postLiveTaskMessage(t, client, baseURL, taskA.ID, "The earlier test command was cancelled. Re-run the Go tests against the current workspace and fix any failures. Preserve the test sleep and unrelated code.", "steer")
 	streamAResume := startSSE(t, baseURL, taskA.ID, "")
 	waitTaskStatus(t, ctx, client, baseURL, taskA.ID, "completed")
 	resumedEvents := collectSSE(t, ctx, streamAResume)
@@ -107,7 +107,7 @@ func TestLiveTaskServiceLifecycle(t *testing.T) {
 	taskC := submitLiveTask(t, client, baseURL, repo, `Change Greeting to return "good night" and update TestGreeting to expect "good night". Preserve the sleep and unrelated code. Run the Go tests.`)
 	streamC := startSSE(t, baseURL, taskC.ID, "")
 	waitTaskStatus(t, ctx, client, baseURL, taskC.ID, "running")
-	awaitSSETool(t, ctx, streamC, "run_tests", client, baseURL, serviceHome, taskC.ID)
+	awaitSSETool(t, ctx, streamC, "run_command", client, baseURL, serviceHome, taskC.ID)
 	time.Sleep(time.Second)
 	streamC.close()
 	service.stop()
@@ -121,7 +121,7 @@ func TestLiveTaskServiceLifecycle(t *testing.T) {
 	t.Log("PASS: process-tree termination and restart restored running task as interrupted with its snapshot")
 
 	postTaskAction(t, client, baseURL, taskC.ID, "resume")
-	restartMessageID := postLiveTaskMessage(t, client, baseURL, taskC.ID, "The service was restarted while run_tests was executing. Inspect the interrupted result, re-run the Go tests against the current workspace, and fix any failures.", "steer")
+	restartMessageID := postLiveTaskMessage(t, client, baseURL, taskC.ID, "The service was restarted while the test command was executing. Inspect the interrupted result, re-run the Go tests against the current workspace, and fix any failures.", "steer")
 	streamCResume := startSSE(t, baseURL, taskC.ID, "")
 	waitTaskStatus(t, ctx, client, baseURL, taskC.ID, "completed")
 	eventsC := collectSSE(t, ctx, streamCResume)
@@ -185,7 +185,7 @@ func TestLiveTaskMessageInteraction(t *testing.T) {
 	task := submitLiveTask(t, client, baseURL, repo, `Change Greeting to return "good evening" and update TestGreeting to expect "good evening". Preserve unrelated code. Run the Go tests.`)
 
 	initialStream := startSSE(t, baseURL, task.ID, "")
-	awaitSSETool(t, ctx, initialStream, "run_tests", client, baseURL, serviceHome, task.ID)
+	awaitSSETool(t, ctx, initialStream, "run_command", client, baseURL, serviceHome, task.ID)
 	steerID := postLiveTaskMessage(t, client, baseURL, task.ID, `Also add ExcitedGreeting() string returning "good evening!" and add a test for it.`, "steer")
 	waitTaskStatus(t, ctx, client, baseURL, task.ID, "completed")
 	initialEvents := collectSSE(t, ctx, initialStream)
@@ -601,7 +601,7 @@ func assertSSELifecycle(t *testing.T, events []liveSSEEvent, expectCancel bool) 
 	if expectCancel && !containsEvent(events, "task_cancelled", "") {
 		t.Fatal("SSE replay is missing task_cancelled")
 	}
-	if !containsEvent(events, "task_completed", "") || !containsEvent(events, "tool_execution_start", "run_tests") {
+	if !containsEvent(events, "task_completed", "") || !containsEvent(events, "tool_execution_start", "run_command") {
 		t.Fatal("SSE replay is missing real Agent tool-start or terminal completion events")
 	}
 	if firstSSEID(t, events) <= 0 {

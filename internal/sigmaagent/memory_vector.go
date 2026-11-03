@@ -21,8 +21,14 @@ type memorySearchHit struct {
 
 // searchMemoryBM25 searches the reviewed source file directly. It keeps
 // repository facts useful even when no embedding provider or Qdrant is set up.
-func searchMemoryBM25(root, query string, topK int) ([]memorySearchHit, error) {
-	entries, err := LoadMemoryEntries(root)
+func searchMemoryBM25(root, query string, topK int, repositoryIDs ...string) ([]memorySearchHit, error) {
+	var entries []MemoryEntry
+	var err error
+	if len(repositoryIDs) > 0 && strings.TrimSpace(repositoryIDs[0]) != "" {
+		entries, err = loadMemoryEntriesWithRepoID(root, repositoryIDs[0])
+	} else {
+		entries, err = LoadMemoryEntries(root)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +194,10 @@ func (v *vectorConfig) indexMemoryForRepo(ctx context.Context, root, repoID stri
 	if err != nil {
 		return 0, err
 	}
+	return v.indexMemoryEntries(ctx, repoID, entries)
+}
+
+func (v *vectorConfig) indexMemoryEntries(ctx context.Context, repoID string, entries []MemoryEntry) (int, error) {
 	exists, err := v.memoryCollectionExists(ctx)
 	if err != nil {
 		return 0, err

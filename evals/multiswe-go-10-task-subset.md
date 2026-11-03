@@ -32,7 +32,7 @@
 
 For both agents, construct the user task from the official resolved issue title and body only. Do not provide the PR title/body, PR URL, `hints`, `fix_patch`, `test_patch`, target diff, or benchmark acceptance details. Keep web search and GitHub access disabled. Each agent gets a fresh checkout at the listed base commit and a fresh session; submit each saved patch to the same official per-instance evaluator image.
 
-Use the same model (`MiniMax-M3`), task text, wall-clock/token ceiling, and available read/write/shell/test permissions. Keep each agent's native system prompt and runtime intact, and document the exact versions/configuration before the first run. This is a product-level comparison; it does not isolate one internal feature such as memory or Skills. Any memory/Skill ablation should be reported separately.
+For future runs, use the same model (`MiniMax-M3.1-Flash`), task text, wall-clock/token ceiling, and available read/write/shell/test permissions. Keep each agent's native system prompt and runtime intact, and document the exact versions/configuration before the first run. This is a product-level comparison; it does not isolate one internal feature such as memory or Skills. Any memory/Skill ablation should be reported separately. Existing results retain the model actually used.
 
 For each task, report the official resolved result and stage counts, patch application status, target-test result, tokens, turns/tool calls, and provider/evaluator errors. If a gold-control or infrastructure preflight later shows an instance cannot be evaluated, mark it invalid with evidence; do not quietly replace it and retain the label “frozen 10-task set.”
 

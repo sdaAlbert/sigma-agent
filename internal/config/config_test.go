@@ -8,7 +8,7 @@ import (
 
 func TestLoadAppliesValuesOverDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"max_turns":48,"max_context_tokens":96000,"go_test_image":"mswebench/zeromicro_m_go-zero:pr-2537"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"max_turns":48,"max_context_tokens":96000,"command_execution_image":"debian:trixie-slim"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
@@ -24,8 +24,19 @@ func TestLoadAppliesValuesOverDefaults(t *testing.T) {
 	if !cfg.SkillsEnabled {
 		t.Fatal("skills_enabled should default to true")
 	}
-	if cfg.GoTestImage != "mswebench/zeromicro_m_go-zero:pr-2537" {
-		t.Fatalf("go_test_image = %q, want configured benchmark image", cfg.GoTestImage)
+	if cfg.CommandExecutionImage != "debian:trixie-slim" {
+		t.Fatalf("command_execution_image = %q, want configured fallback image", cfg.CommandExecutionImage)
+	}
+}
+
+func TestDefaultContextCompactionThresholdLeavesMargin(t *testing.T) {
+	defaults := Defaults()
+	if got := defaults.EffectiveContextCompactionThresholdTokens(); got != 30000 {
+		t.Fatalf("default compaction threshold = %d, want 30000", got)
+	}
+	smallWindow := Runtime{MaxContextTokens: 16000}
+	if got := smallWindow.EffectiveContextCompactionThresholdTokens(); got != 16000 {
+		t.Fatalf("threshold for smaller context = %d, want 16000", got)
 	}
 }
 
@@ -47,8 +58,8 @@ func TestLoadRejectsUnknownKeysAndOutOfRangeValues(t *testing.T) {
 	for _, contents := range []string{
 		`{"max_turn":48}`,
 		`{"max_turns":0}`,
-		`{"go_test_image":" "}`,
-		`{"go_test_image":"-not-an-image"}`,
+		`{"go_test_image":"golang:1.26"}`,
+		`{"command_execution_image":"-not-an-image"}`,
 	} {
 		path := filepath.Join(t.TempDir(), "config.json")
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
@@ -60,7 +71,7 @@ func TestLoadRejectsUnknownKeysAndOutOfRangeValues(t *testing.T) {
 	}
 }
 
-func TestAllowContainerNetworkDefaultsOffAndLoadsFromFile(t *testing.T) {
+func TestAllowContainerNetworkDefaultsOffAndCanBeEnabledFromFile(t *testing.T) {
 	defaults := Defaults()
 	if defaults.AllowContainerNetwork {
 		t.Fatal("Defaults().AllowContainerNetwork = true, want false")
@@ -78,9 +89,9 @@ func TestAllowContainerNetworkDefaultsOffAndLoadsFromFile(t *testing.T) {
 	}
 }
 
-func TestAllowContainerNetworkStaysOffWithoutOptIn(t *testing.T) {
+func TestAllowContainerNetworkCanBeDisabledInConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"max_turns":48}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"max_turns":48,"allow_container_network":false}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
@@ -88,6 +99,6 @@ func TestAllowContainerNetworkStaysOffWithoutOptIn(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if cfg.AllowContainerNetwork {
-		t.Fatal("Load().AllowContainerNetwork = true, want false")
+		t.Fatal("Load().AllowContainerNetwork = true, want explicit false")
 	}
 }

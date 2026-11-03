@@ -107,23 +107,29 @@ type Model interface {
 }
 
 type Event struct {
-	At                       time.Time `json:"at"`
-	Type                     string    `json:"type"`
-	Session                  string    `json:"session_id,omitempty"`
-	Turn                     int       `json:"turn,omitempty"`
-	Tool                     string    `json:"tool,omitempty"`
-	Duration                 int64     `json:"duration_ms,omitempty"`
-	Bytes                    int       `json:"bytes,omitempty"`
-	MessagesDropped          int       `json:"messages_dropped,omitempty"`
-	EstimatedTokensBefore    int       `json:"estimated_tokens_before,omitempty"`
-	EstimatedTokensAfter     int       `json:"estimated_tokens_after,omitempty"`
-	InputTokens              int       `json:"input_tokens,omitempty"`
-	OutputTokens             int       `json:"output_tokens,omitempty"`
-	CacheReadInputTokens     int       `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int       `json:"cache_creation_input_tokens,omitempty"`
-	SummaryTokens            int       `json:"summary_tokens,omitempty"`
-	Error                    string    `json:"error,omitempty"`
-	Text                     string    `json:"text,omitempty"`
+	At                       time.Time       `json:"at"`
+	Type                     string          `json:"type"`
+	Session                  string          `json:"session_id,omitempty"`
+	Turn                     int             `json:"turn,omitempty"`
+	Tool                     string          `json:"tool,omitempty"`
+	ToolCallID               string          `json:"tool_call_id,omitempty"`
+	Duration                 int64           `json:"duration_ms,omitempty"`
+	Bytes                    int             `json:"bytes,omitempty"`
+	MessagesDropped          int             `json:"messages_dropped,omitempty"`
+	EstimatedTokensBefore    int             `json:"estimated_tokens_before,omitempty"`
+	EstimatedTokensAfter     int             `json:"estimated_tokens_after,omitempty"`
+	InputTokens              int             `json:"input_tokens,omitempty"`
+	OutputTokens             int             `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     int             `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int             `json:"cache_creation_input_tokens,omitempty"`
+	SummaryTokens            int             `json:"summary_tokens,omitempty"`
+	CompactionSummary        string          `json:"compaction_summary,omitempty"`
+	Error                    string          `json:"error,omitempty"`
+	Text                     string          `json:"text,omitempty"`
+	Args                     json.RawMessage `json:"args,omitempty"`
+	ResultSummary            string          `json:"result_summary,omitempty"`
+	ResultOutput             string          `json:"result_output,omitempty"`
+	Status                   string          `json:"status,omitempty"`
 }
 
 type EventSink func(Event)
@@ -131,10 +137,11 @@ type ToolPolicy func(context.Context, Tool, json.RawMessage) error
 type ToolObserver func(context.Context, Tool, json.RawMessage, string, error)
 
 type Limits struct {
-	MaxTurns           int
-	MaxToolCalls       int
-	MaxToolResultBytes int
-	ToolTimeout        time.Duration
+	MaxTurns                  int
+	MaxToolCalls              int
+	MaxRepeatedFailedCommands int
+	MaxToolResultBytes        int
+	ToolTimeout               time.Duration
 }
 
 func DefaultLimits() Limits {
@@ -155,30 +162,33 @@ type Result struct {
 }
 
 type Session struct {
-	ID          string
-	System      string
-	Model       Model
-	Tools       *ToolRegistry
-	Limits      Limits
-	OnEvent     EventSink
-	BeforeTool  ToolPolicy
-	AfterTool   ToolObserver
-	Store       SessionStore
-	Context     ContextPreparer
-	ToolOutputs ToolOutputStore
+	ID             string
+	System         string
+	Model          Model
+	Tools          *ToolRegistry
+	Limits         Limits
+	RequiredSkills []string
+	OnEvent        EventSink
+	BeforeTool     ToolPolicy
+	AfterTool      ToolObserver
+	Store          SessionStore
+	Context        ContextPreparer
+	ToolOutputs    ToolOutputStore
 
-	mu                 sync.Mutex
-	messages           []Message
-	compactionSummary  string
-	compactionBoundary int
-	entries            []SessionEntry
-	head               string
-	modelID            string
-	steering           []Message
-	followUps          []Message
-	pendingTools       []ContentBlock
-	running            bool
-	cancel             context.CancelFunc
+	mu                                    sync.Mutex
+	messages                              []Message
+	compactionSummary                     string
+	compactionBoundary                    int
+	entries                               []SessionEntry
+	head                                  string
+	modelID                               string
+	loadedSkills                          map[string]bool
+	finalizationInspectionBudgetExhausted bool
+	steering                              []Message
+	followUps                             []Message
+	pendingTools                          []ContentBlock
+	running                               bool
+	cancel                                context.CancelFunc
 }
 
 func (s *Session) Messages() []Message {
@@ -256,6 +266,9 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	if limits.MaxToolCalls <= 0 {
 		limits.MaxToolCalls = DefaultLimits().MaxToolCalls
 	}
+	if limits.MaxRepeatedFailedCommands < 0 {
+		limits.MaxRepeatedFailedCommands = 0
+	}
 	if limits.MaxToolResultBytes <= 0 {
 		limits.MaxToolResultBytes = DefaultLimits().MaxToolResultBytes
 	}
@@ -304,6 +317,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	}
 	s.running = true
 	s.cancel = cancel
+	s.finalizationInspectionBudgetExhausted = false
 	s.mu.Unlock()
 	defer func() {
 		cancel()
@@ -339,11 +353,15 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		checkpointToolCall = 1
 	}
 	toolOrder := 0
+	finalizationInspectionCalls := 0
 	lastWriteOrder, lastTestOrder, lastDiffOrder := 0, 0, 0
 	lastTestPassed := false
+	repeatedFailedCommands := make(map[string]int)
 	reviewOnly := false
 	outputContinuationRetries := 0
+	skillBootstrapRetries := 0
 	const maxOutputContinuationRetries = 2
+	const maxSkillBootstrapRetries = 2
 	for turn := 1; turn <= limits.MaxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			s.emit(Event{Type: "agent_aborted", Turn: turn, Error: err.Error()})
@@ -358,6 +376,10 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			finalizationTurn = turn
 		}
 		finalizationPhase := turn >= finalizationTurn
+		inspectionBudgetExhausted := finalizationInspectionBudgetExhausted(finalizationPhase, finalizationInspectionCalls)
+		s.mu.Lock()
+		s.finalizationInspectionBudgetExhausted = inspectionBudgetExhausted
+		s.mu.Unlock()
 		testsNeeded := lastWriteOrder > 0 && lastTestOrder <= lastWriteOrder
 		diffNeeded := lastWriteOrder > 0 && lastDiffOrder <= lastWriteOrder
 		reviewNeeded := testsNeeded || diffNeeded
@@ -367,7 +389,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			systemPrompt += "\n\nLATEST TEST RESULT FAILED: inspect the first actionable compiler or test failure, make a targeted correction, then rerun the relevant test and inspect git_diff again. Do not finish with a newly introduced compile failure. If the failure is demonstrably pre-existing or environmental, preserve the evidence and report that limitation."
 		}
 		if reviewNeeded {
-			systemPrompt += "\n\nREQUIRED REVIEW: Source changes were made in this run. Complete the checks still outstanding after the latest successful edit. The runtime exposes only missing checks; do not repeat a completed check. Use run_tests for Go profiles or run_command with purpose=test for repository-native checks; inspect the result status and git_diff. If a test cannot run, keep its output as evidence and report why."
+			systemPrompt += "\n\nREQUIRED REVIEW: Source changes were made in this run. Complete the checks still outstanding after the latest successful edit. The runtime exposes only missing verification checks; do not repeat a completed check. You may read relevant files and make a targeted correction when test or diff evidence shows a problem. Every new write makes both tests and git_diff outstanding again. Use run_command with purpose=test for the repository's native test command. If a test cannot run, keep its output as evidence and report why."
 		}
 		if verificationComplete {
 			systemPrompt += "\n\nVERIFICATION COMPLETE: The current source revision has passed its required test command and its diff has been inspected. Do not rerun tests or git_diff without a new source edit. If the inspection revealed a concrete defect, make a targeted edit; otherwise provide the final summary now."
@@ -375,6 +397,12 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		if finalizationPhase {
 			remaining := limits.MaxTurns - turn + 1
 			systemPrompt += fmt.Sprintf("\n\nFINALIZATION PHASE: %d turns remain. Stop broad exploration. Only make a targeted correction if a test or diff review shows it is needed; then rerun the checks. If a write was rejected because the file changed, read that file again and rebase the edit.", remaining)
+		}
+		if limits.MaxRepeatedFailedCommands > 0 {
+			systemPrompt += fmt.Sprintf("\n\nCOMMAND PROGRESS RULE: Do not repeat an identical failed run_command unless the workspace or environment has changed. Inspect the failure, change the command or implementation, or report the blocker. The run pauses after %d identical failed calls without a workspace change.", limits.MaxRepeatedFailedCommands)
+		}
+		if inspectionBudgetExhausted {
+			systemPrompt += "\n\nFINALIZATION EXPLORATION BUDGET EXHAUSTED: No more repository searches, file reads, or non-test shell commands are available. Use evidence already gathered to make one targeted correction, run the required test, inspect git_diff, or report the concrete limitation. Do not create scratch files or keep probing the same issue."
 		}
 		systemPrompt, requestMessages := s.modelContext(systemPrompt)
 		if s.Context != nil {
@@ -392,6 +420,10 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		if finalizationPhase || reviewOnly || verificationComplete {
 			toolDefinitions = finalizationToolDefinitions(toolDefinitions, reviewOnly, testsNeeded, diffNeeded, verificationComplete)
 		}
+		if inspectionBudgetExhausted {
+			toolDefinitions = finalizationBudgetToolDefinitions(toolDefinitions, true)
+		}
+		toolDefinitions = requiredSkillBootstrapTools(toolDefinitions, s.pendingRequiredSkills())
 		response, err := s.Model.Stream(ctx, systemPrompt, requestMessages, toolDefinitions, func(modelEvent ModelEvent) {
 			s.emit(Event{Type: "model_" + modelEvent.Type, Turn: turn, Text: modelEvent.Text, Tool: modelEvent.Name})
 		})
@@ -460,8 +492,8 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				toolResults = make([]ContentBlock, len(toolCalls))
 				for i, call := range toolCalls {
 					message := "compact_context must be called by itself; no tools in this batch were executed"
-					s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name})
-					s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Error: message})
+					s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
+					s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultSummary: message, ResultOutput: message, Status: "failed"})
 					toolResults[i] = toolResult(call.ID, message, true)
 				}
 			} else {
@@ -502,19 +534,36 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 					}
 				}
 			}
+			stalledReason := ""
 			for index, call := range toolCalls {
 				if index >= len(toolResults) {
 					continue
 				}
+				if turn >= finalizationTurn && isFinalizationInspectionTool(call.Name, call.Input) {
+					finalizationInspectionCalls++
+				}
 				if isVerificationGateRejection(toolResults[index]) {
 					continue
 				}
-				toolOrder++
-				if call.Name == "run_tests" {
-					lastTestOrder = toolOrder
-					lastTestPassed = !toolResults[index].IsError && strings.Contains(toolResults[index].Content, "run_tests status=passed exit_code=0")
-					continue
+				if toolCallChangedWorkspaceOrEnvironment(call, toolResults[index], s.Tools) {
+					clear(repeatedFailedCommands)
 				}
+				if limits.MaxRepeatedFailedCommands > 0 {
+					if fingerprint, failedCommand := repeatedFailedCommandFingerprint(call, toolResults[index]); failedCommand {
+						for previous := range repeatedFailedCommands {
+							if previous != fingerprint {
+								delete(repeatedFailedCommands, previous)
+							}
+						}
+						repeatedFailedCommands[fingerprint]++
+						if repeatedFailedCommands[fingerprint] >= limits.MaxRepeatedFailedCommands {
+							stalledReason = fmt.Sprintf("no-progress guard paused the run: the same failed command was repeated %d times without a workspace change; inspect the saved output and choose a different next action", repeatedFailedCommands[fingerprint])
+						}
+					} else if successfulTestCommand(call, toolResults[index]) {
+						clear(repeatedFailedCommands)
+					}
+				}
+				toolOrder++
 				if call.Name == "run_command" {
 					content := toolResults[index].Content
 					statusLine := ""
@@ -594,16 +643,34 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				if compaction != nil {
 					result.ContextCompactions++
 					_, visible := s.modelContext(s.System)
-					s.emit(Event{Type: "context_compacted_model", Turn: turn, Tool: compactContextToolName, MessagesDropped: compaction.MessagesCompacted, EstimatedTokensBefore: compaction.EstimatedTokensBefore, EstimatedTokensAfter: estimateTextTokens(s.System) + estimateMessageTokens(visible), InputTokens: compaction.InputTokens, OutputTokens: compaction.OutputTokens, CacheReadInputTokens: compaction.CacheReadInputTokens, CacheCreationInputTokens: compaction.CacheCreationInputTokens, SummaryTokens: compaction.SummaryTokens})
+					s.emit(Event{Type: "context_compacted_model", Turn: turn, Tool: compactContextToolName, MessagesDropped: compaction.MessagesCompacted, EstimatedTokensBefore: compaction.EstimatedTokensBefore, EstimatedTokensAfter: estimateTextTokens(s.System) + estimateMessageTokens(visible), InputTokens: compaction.InputTokens, OutputTokens: compaction.OutputTokens, CacheReadInputTokens: compaction.CacheReadInputTokens, CacheCreationInputTokens: compaction.CacheCreationInputTokens, SummaryTokens: compaction.SummaryTokens, CompactionSummary: truncateToolOutput(compaction.Summary, 2048)})
 				}
 			}
 			s.emit(Event{Type: "turn_end", Turn: turn})
+			if stalledReason != "" {
+				s.emit(Event{Type: "agent_stalled", Turn: turn, Error: stalledReason})
+				return result, errors.New(stalledReason)
+			}
 			if toolErr != nil {
 				return result, toolErr
 			}
 			if _, err := s.consumeSteering(); err != nil {
 				return result, err
 			}
+			continue
+		}
+		if pendingSkills := s.pendingRequiredSkills(); len(pendingSkills) > 0 {
+			if err := s.appendAssistant(response.Content, nil); err != nil {
+				return result, err
+			}
+			if skillBootstrapRetries >= maxSkillBootstrapRetries {
+				return result, fmt.Errorf("required repository Skill(s) were not loaded: %s", strings.Join(pendingSkills, ", "))
+			}
+			if err := s.appendRecoveryPrompt("Before any repository inspection or implementation, call read_skill for each required Skill by its exact name. The only available tool is read_skill until those Skills are loaded."); err != nil {
+				return result, err
+			}
+			skillBootstrapRetries++
+			s.emit(Event{Type: "turn_end", Turn: turn})
 			continue
 		}
 		if err := s.appendAssistant(response.Content, nil); err != nil {
@@ -644,7 +711,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 func missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder int) []string {
 	var missing []string
 	if lastTestOrder <= lastWriteOrder {
-		missing = append(missing, "a relevant test command (run_tests or run_command with purpose=test)")
+		missing = append(missing, "a relevant run_command with purpose=test")
 	}
 	if lastDiffOrder <= lastWriteOrder {
 		missing = append(missing, "git_diff")
@@ -655,20 +722,28 @@ func missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder int) []str
 func finalizationToolDefinitions(definitions []ToolDefinition, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool) []ToolDefinition {
 	allowed := map[string]bool{
 		"read_file": true, "record_change_contract": true, "create_file": true, "edit_file": true, "apply_patch": true,
-		"run_tests": true, "run_command": true, "git_diff": true,
+		"run_command": true, "git_diff": true,
 	}
 	if reviewOnly {
 		allowed = map[string]bool{
-			"run_tests":   testsNeeded,
-			"run_command": testsNeeded,
-			"git_diff":    diffNeeded,
+			// Verification is a gate on completion, not a ban on repairing a
+			// defect discovered by a test or diff. Keep targeted correction tools
+			// available while exposing only checks that are still outstanding.
+			"read_file":              true,
+			"record_change_contract": true,
+			"create_file":            true,
+			"edit_file":              true,
+			"apply_patch":            true,
+			"run_command":            testsNeeded,
+			"git_diff":               diffNeeded,
 		}
 	} else if verificationComplete {
 		allowed = map[string]bool{
-			"read_file":   true,
-			"create_file": true,
-			"edit_file":   true,
-			"apply_patch": true,
+			"read_file":              true,
+			"record_change_contract": true,
+			"create_file":            true,
+			"edit_file":              true,
+			"apply_patch":            true,
 		}
 	}
 	filtered := make([]ToolDefinition, 0, len(definitions))
@@ -694,6 +769,9 @@ func (s *Session) hasMessageIDLocked(id string) bool {
 
 func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
 	parallel := len(calls) > 1
+	if len(s.pendingRequiredSkills()) > 0 {
+		parallel = false
+	}
 	mode := ""
 	for _, call := range calls {
 		tool, ok := s.Tools.byName[call.Name]
@@ -737,45 +815,149 @@ func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, 
 	return results, nil
 }
 
+func commandFingerprint(call ContentBlock) string {
+	var canonical any
+	if err := json.Unmarshal(call.Input, &canonical); err == nil {
+		if encoded, err := json.Marshal(canonical); err == nil {
+			return call.Name + ":" + string(encoded)
+		}
+	}
+	return call.Name + ":" + string(call.Input)
+}
+
+func repeatedFailedCommandFingerprint(call, result ContentBlock) (string, bool) {
+	if result.IsError {
+		return "", false
+	}
+	switch call.Name {
+	case "run_command":
+		var input struct {
+			Command          string `json:"command"`
+			Purpose          string `json:"purpose"`
+			Action           string `json:"action"`
+			WorkingDirectory string `json:"working_directory"`
+			Image            string `json:"image"`
+		}
+		if json.Unmarshal(call.Input, &input) != nil || strings.TrimSpace(input.Command) == "" {
+			return "", false
+		}
+		if input.Action == "" {
+			input.Action = "run"
+		}
+		if input.Action != "run" {
+			return "", false
+		}
+		status := resultStatusLine(result.Content, "SIGMA_RUN_COMMAND ")
+		if !strings.Contains(status, "status=failed") || strings.Contains(status, "workspace_changed=true") {
+			return "", false
+		}
+		return commandFingerprint(call), true
+	default:
+		return "", false
+	}
+}
+
+func successfulTestCommand(call, result ContentBlock) bool {
+	if result.IsError {
+		return false
+	}
+	switch call.Name {
+	case "run_command":
+		var input struct {
+			Purpose string `json:"purpose"`
+		}
+		if json.Unmarshal(call.Input, &input) != nil || input.Purpose != "test" {
+			return false
+		}
+		status := resultStatusLine(result.Content, "SIGMA_RUN_COMMAND ")
+		return strings.Contains(status, "status=passed") && strings.Contains(status, "exit_code=0") && !strings.Contains(status, "workspace_changed=true")
+	default:
+		return false
+	}
+}
+
+func resultStatusLine(content, marker string) string {
+	index := strings.Index(content, marker)
+	if index < 0 {
+		return ""
+	}
+	line := strings.SplitN(content[index+len(marker):], "\n", 2)[0]
+	return marker + line
+}
+
+func toolCallChangedWorkspaceOrEnvironment(call, result ContentBlock, registry *ToolRegistry) bool {
+	if result.IsError {
+		return false
+	}
+	switch call.Name {
+	case "create_file", "edit_file", "apply_patch", "prepare_environment":
+		return true
+	}
+	if tool, ok := registry.byName[call.Name]; ok && tool.ModifiesWorkspace {
+		return true
+	}
+	if call.Name != "run_command" {
+		return false
+	}
+	status := resultStatusLine(result.Content, "SIGMA_RUN_COMMAND ")
+	return strings.Contains(status, "workspace_changed=true")
+}
+
 func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
 	tool, exists := s.Tools.byName[call.Name]
 	started := time.Now()
-	s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name})
+	s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
 	if err := ctx.Err(); err != nil {
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: err.Error()})
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: err.Error(), ResultOutput: err.Error(), Status: "failed"})
 		return toolResult(call.ID, "Tool call cancelled before execution: "+err.Error(), true)
 	}
 	if !exists {
 		message := "unknown tool"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Error: message})
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		return toolResult(call.ID, message, true)
+	}
+	if pendingSkills := s.pendingRequiredSkills(); !skillBootstrapCallAllowed(call.Name, call.Input, pendingSkills) {
+		message := "load the matching repository Skill with read_skill before using repository tools"
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
+		return toolResult(call.ID, message, true)
+	}
+	s.mu.Lock()
+	inspectionBudgetExhausted := s.finalizationInspectionBudgetExhausted
+	s.mu.Unlock()
+	if finalizationInspectionCallBlocked(call.Name, call.Input, inspectionBudgetExhausted) {
+		message := "finalization exploration budget exhausted; use current evidence to edit, test, inspect git_diff, or report the limitation"
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if turn >= finalizationTurn && !isFinalizationTool(call.Name) {
-		message := "finalization phase only allows read_file, targeted file edits, run_tests, run_command, and git_diff"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: message})
+		message := "finalization phase only allows read_file, targeted file edits, run_command, and git_diff"
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
-	if reviewOnly && !reviewToolNeeded(call.Name, testsNeeded, diffNeeded) {
+	if reviewOnly && !reviewToolNeeded(call.Name, call.Input, testsNeeded, diffNeeded) && !isReviewCorrectionTool(call.Name) {
 		message := "verification phase only allows checks still outstanding after the latest edit; do not repeat completed checks"
+		if call.Name == "run_command" && testsNeeded {
+			message = "repository tests are still outstanding; use run_command with purpose=test. Inspection and build commands are paused during verification."
+		}
 		if !testsNeeded && !diffNeeded {
 			message = "verification is complete; no further tools are allowed in the finalization phase"
 		}
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: message})
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if verificationComplete && isVerificationCheck(call.Name, call.Input) {
 		message := "verification is complete for the unchanged source; make a targeted edit if needed or provide the final summary"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: message})
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if !json.Valid(call.Input) {
 		message := "tool arguments are not valid JSON"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Error: message})
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if tool.Validate != nil {
 		if err := tool.Validate(call.Input); err != nil {
-			s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Error: err.Error()})
+			s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: err.Error(), ResultOutput: err.Error(), Status: "failed"})
 			return toolResult(call.ID, "invalid tool arguments: "+err.Error(), true)
 		}
 	}
@@ -795,6 +977,14 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 	}
 	if callErr == nil {
 		output, callErr = tool.Handle(toolCtx, call.Input)
+	}
+	if callErr == nil && call.Name == "read_skill" {
+		var args struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(call.Input, &args) == nil {
+			s.markSkillLoaded(args.Name)
+		}
 	}
 	if s.AfterTool != nil {
 		s.AfterTool(toolCtx, tool, call.Input, output, callErr)
@@ -818,21 +1008,143 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 			output = truncateToolOutput(output, maxResultBytes)
 		}
 	}
-	event := Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Bytes: outputBytes}
+	event := Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Bytes: outputBytes, ResultSummary: truncateToolOutput(strings.TrimSpace(output), 1024), ResultOutput: truncateToolOutput(strings.TrimSpace(output), 16<<10), Status: "completed"}
 	if callErr != nil {
 		event.Error = callErr.Error()
+		event.Status = "failed"
 	}
 	s.emit(event)
 	return toolResult(call.ID, output, callErr != nil)
 }
 
-func reviewToolNeeded(name string, testsNeeded, diffNeeded bool) bool {
-	return name == "run_tests" && testsNeeded || name == "run_command" && testsNeeded || name == "git_diff" && diffNeeded
+func reviewToolNeeded(name string, input json.RawMessage, testsNeeded, diffNeeded bool) bool {
+	if name == "run_command" {
+		if !testsNeeded {
+			return false
+		}
+		var command struct {
+			Purpose string `json:"purpose"`
+		}
+		return json.Unmarshal(input, &command) == nil && command.Purpose == "test"
+	}
+	return name == "git_diff" && diffNeeded
+}
+
+func isReviewCorrectionTool(name string) bool {
+	switch name {
+	case "read_file", "record_change_contract", "create_file", "edit_file", "apply_patch":
+		return true
+	default:
+		return false
+	}
+}
+
+const maxFinalizationInspectionCalls = 8
+
+func finalizationInspectionBudgetExhausted(finalizationPhase bool, inspectionCalls int) bool {
+	return finalizationPhase && inspectionCalls >= maxFinalizationInspectionCalls
+}
+
+func finalizationBudgetToolDefinitions(definitions []ToolDefinition, exhausted bool) []ToolDefinition {
+	if !exhausted {
+		return definitions
+	}
+	allowed := map[string]bool{
+		"read_file":              true,
+		"record_change_contract": true,
+		"create_file":            true,
+		"edit_file":              true,
+		"apply_patch":            true,
+		"run_command":            true,
+		"git_diff":               true,
+	}
+	filtered := make([]ToolDefinition, 0, len(allowed))
+	for _, definition := range definitions {
+		if allowed[definition.Name] {
+			filtered = append(filtered, definition)
+		}
+	}
+	return filtered
+}
+
+func isFinalizationInspectionTool(name string, input json.RawMessage) bool {
+	switch name {
+	case "read_file", "list_files", "search_code", "search_memory", "web_search", "read_skill_resource":
+		return true
+	case "run_command":
+		var command struct {
+			Purpose string `json:"purpose"`
+		}
+		return json.Unmarshal(input, &command) != nil || command.Purpose != "test"
+	default:
+		return false
+	}
+}
+
+func finalizationInspectionCallBlocked(name string, input json.RawMessage, exhausted bool) bool {
+	// File reads are targeted repairs/verification, not broad exploration. Keep
+	// them available after the exploration budget so an Agent can inspect a
+	// failing test location and make a bounded correction.
+	return exhausted && name != "read_file" && isFinalizationInspectionTool(name, input)
+}
+
+func requiredSkillBootstrapTools(definitions []ToolDefinition, pendingSkills []string) []ToolDefinition {
+	if len(pendingSkills) == 0 {
+		return definitions
+	}
+	filtered := make([]ToolDefinition, 0, 1)
+	for _, definition := range definitions {
+		if definition.Name == "read_skill" {
+			filtered = append(filtered, definition)
+		}
+	}
+	return filtered
+}
+
+func skillBootstrapCallAllowed(name string, input json.RawMessage, pendingSkills []string) bool {
+	if len(pendingSkills) == 0 {
+		return true
+	}
+	if name != "read_skill" {
+		return false
+	}
+	var args struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(input, &args) != nil {
+		return false
+	}
+	for _, required := range pendingSkills {
+		if args.Name == required {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) pendingRequiredSkills() []string {
+	if len(s.RequiredSkills) == 0 {
+		return nil
+	}
+	pending := make([]string, 0, len(s.RequiredSkills))
+	for _, name := range s.RequiredSkills {
+		if s.loadedSkills == nil || !s.loadedSkills[name] {
+			pending = append(pending, name)
+		}
+	}
+	return pending
+}
+
+func (s *Session) markSkillLoaded(name string) {
+	if s.loadedSkills == nil {
+		s.loadedSkills = make(map[string]bool)
+	}
+	s.loadedSkills[name] = true
 }
 
 func isVerificationCheck(name string, input json.RawMessage) bool {
 	switch name {
-	case "run_tests", "git_diff":
+	case "git_diff":
 		return true
 	case "run_command":
 		var command struct {
@@ -854,7 +1166,7 @@ func isVerificationGateRejection(result ContentBlock) bool {
 
 func isFinalizationTool(name string) bool {
 	switch name {
-	case "read_file", "record_change_contract", "create_file", "edit_file", "apply_patch", "run_tests", "run_command", "git_diff":
+	case "read_file", "record_change_contract", "create_file", "edit_file", "apply_patch", "run_command", "git_diff":
 		return true
 	default:
 		return false
@@ -867,6 +1179,14 @@ func (s *Session) emit(event Event) {
 		event.Session = s.ID
 		s.OnEvent(event)
 	}
+}
+
+func eventToolArgs(input json.RawMessage) json.RawMessage {
+	const maxArgsBytes = 2048
+	if len(input) <= maxArgsBytes {
+		return append(json.RawMessage(nil), input...)
+	}
+	return json.RawMessage(`{"truncated":true}`)
 }
 
 func (s *Session) appendAssistant(content []ContentBlock, toolCalls []ContentBlock) error {

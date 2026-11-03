@@ -76,7 +76,7 @@
 
 ### 模型与工具
 
-- Pi 和后续 Sigma 匹配复跑均使用同一个 MiniMax M3.0 模型 ID、API endpoint、温度与最大上下文设置。正式启动前保存脱敏配置快照；API key 只从本地 secret/env 读取，不写进仓库、计划文档或运行日志。
+- Pi 和后续 Sigma 匹配复跑均使用同一个 MiniMax-M3.1-Flash 模型 ID、API endpoint、温度与最大上下文设置。正式启动前保存脱敏配置快照；API key 只从本地 secret/env 读取，不写进仓库、计划文档或运行日志。
 - Agent 只收到官方 issue 标题、正文和通用“调查并修复，运行相关测试”的任务说明。不得把 PR 标题/正文、PR URL、commit、hint、fix patch、test patch 或 evaluator 输出交给 Agent。
 - 每题从对应 base commit 的干净 checkout 开始。关闭 GitHub MCP、联网搜索、Skills、自定义 extensions、Sigma memory 和跨任务 session；避免 agent 访问 benchmark gold data。
 - 保留 Pi 自带的系统提示、内置文件/终端工具和正常上下文管理；这轮测的是 Pi coding agent 产品基线，不做删减 Pi 能力的对照。
@@ -86,7 +86,7 @@
 
 | 阶段 | 工作 | 完成条件 |
 |---|---|---|
-| 0. 锁版本与配置 | 安装/调用固定的上游 Pi 包；将 MiniMax M3.0 配置放在隔离目录；记录 Pi、Node、模型、API 参数和预算 | Pi `--version` 指向固定上游包；脱敏配置快照可复现；不泄露 key |
+| 0. 锁版本与配置 | 安装/调用固定的上游 Pi 包；将 MiniMax-M3.1-Flash 配置放在隔离目录；记录 Pi、Node、模型、API 参数和预算 | Pi `--version` 指向固定上游包；脱敏配置快照可复现；不泄露 key |
 | 1. 题目预检 | 用数据集 revision 校验 50 个 task ID、issue body、base commit、test patch 与镜像 tag；检查本机 Docker 镜像/拉取能力 | 50 条逐题 manifest；缺项任务标 `invalid` 并附证据，不静默换题；Issue 文本与 benchmark 行一致 |
 | 2. 单题冒烟 | 只处理清单首题 `zeromicro__go-zero-964`：Pi runner 挂载干净 base checkout，只收到 issue；评分阶段才取得该题 evaluator 镜像，先跑 gold oracle，再跑 Pi patch | Transcript 和 patch 成功保存，隐藏 patch 未进入 Pi workspace；oracle 和候选评分可复现；随后删除该题专属 evaluator image |
 | 3. Pi 全量（严格串行） | 按表格顺序一次只处理一道题。Pi runner 使用同一个可复用容器；对当前题只拉取/构建一个 evaluator image，依次跑 gold oracle 和 Pi patch 评分，保存所有产物后删除当前 PR 专属 image，再处理下一题 | 50 题都有 `resolved / unresolved / invalid / provider-error` 状态与可追溯产物；失败也保留；Docker 并发 worker 全设为 1 |

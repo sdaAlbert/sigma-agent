@@ -10,8 +10,6 @@
   "tool_timeout_ms": 300000,
   "model_timeout_ms": 120000,
   "max_retries": 2,
-  "go_test_image": "golang:1.26",
-  "command_execution_image": "sigma/swebench-verified-mini-django-11790:pilot",
   "allow_container_network": false,
   "skills_enabled": false,
   "memory_enabled": false,

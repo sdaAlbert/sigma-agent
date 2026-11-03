@@ -1,0 +1,8 @@
+{
+  "name": "sigma-workflow-demo",
+  "version": "1.0.0",
+  "description": "Example Sigma workflow extension",
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}

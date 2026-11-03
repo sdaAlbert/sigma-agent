@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
+	modelconfig "github.com/sdaAlbert/sigma-agent/internal/model"
 )
 
 type interactiveSetupOptions struct {
@@ -20,7 +21,7 @@ type interactiveSetupOptions struct {
 	allowNetwork  bool
 	githubMCP     bool
 	initialPrompt string
-	model         agent.ModelSelection
+	model         modelconfig.Selection
 	modelExplicit bool
 }
 
@@ -30,14 +31,14 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 		return options, false, nil, errors.New("interactive setup needs a repository path; use /repo <path>")
 	}
 	if options.model.Provider == "" {
-		selection, err := agent.LoadDefaultModelSelection()
+		selection, err := modelconfig.LoadDefaultSelection()
 		if err != nil {
 			return options, false, nil, err
 		}
 		options.model = selection
 	}
 	if options.model.Provider == "" {
-		options.model = agent.ModelSelection{Provider: "minimax", Model: agent.DefaultModelForProvider("minimax")}
+		options.model = modelconfig.Selection{Provider: "minimax", Model: modelconfig.DefaultModel("minimax")}
 	}
 	fmt.Fprintln(os.Stderr, "\nSigma setup — configure this session, then enter a task.")
 	fmt.Fprintln(os.Stderr, "Commands: /login <provider|github>, /model [provider/model-id|save], /logout <provider|github>, /repo <path>, /session <id>, /resume <id>, /network on|off, /publish <branch>|off, /github-write on|off, /start, /help, /exit")
@@ -86,7 +87,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				fmt.Fprintln(os.Stderr, "Saved GitHub token in the user configuration directory.")
 				continue
 			}
-			provider, ok := agent.NormalizeModelProvider(value)
+			provider, ok := modelconfig.NormalizeProvider(value)
 			if !ok {
 				fmt.Fprintln(os.Stderr, "Choose /login github or a model provider: minimax|anthropic|openai|deepseek|openrouter.")
 				continue
@@ -96,7 +97,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				fmt.Fprintf(os.Stderr, "Could not read API key: %v\n", err)
 				continue
 			}
-			if err := agent.SaveProviderAPIKey(provider, key); err != nil {
+			if err := modelconfig.SaveAPIKey(provider, key); err != nil {
 				fmt.Fprintf(os.Stderr, "Could not save API key: %v\n", err)
 				continue
 			}
@@ -110,12 +111,12 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				fmt.Fprintln(os.Stderr, "Removed the saved GitHub token. Environment or project-local credentials can still be used.")
 				continue
 			}
-			provider, ok := agent.NormalizeModelProvider(value)
+			provider, ok := modelconfig.NormalizeProvider(value)
 			if !ok {
 				fmt.Fprintln(os.Stderr, "Usage: /logout github|minimax|anthropic|openai|deepseek|openrouter")
 				continue
 			}
-			if err := agent.RemoveProviderAPIKey(provider); err != nil {
+			if err := modelconfig.RemoveAPIKey(provider); err != nil {
 				fmt.Fprintf(os.Stderr, "Could not remove saved API key: %v\n", err)
 				continue
 			}
@@ -126,12 +127,12 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				continue
 			}
 			if value == "save" {
-				hasKey, keyErr := agent.ModelProviderHasAPIKey(options.model.Provider)
+				hasKey, keyErr := modelconfig.ProviderHasAPIKey(options.model.Provider)
 				if keyErr != nil || !hasKey {
 					fmt.Fprintf(os.Stderr, "Configure a %s API key before saving this as the default.\n", options.model.Provider)
 					continue
 				}
-				if err := agent.SaveDefaultModelSelection(options.model); err != nil {
+				if err := modelconfig.SaveDefaultSelection(options.model); err != nil {
 					fmt.Fprintf(os.Stderr, "Could not save default model: %v\n", err)
 				} else {
 					fmt.Fprintf(os.Stderr, "Saved default model %s/%s.\n", options.model.Provider, options.model.Model)
@@ -139,19 +140,19 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				continue
 			}
 			providerText, modelID, hasModel := strings.Cut(value, "/")
-			provider, ok := agent.NormalizeModelProvider(providerText)
+			provider, ok := modelconfig.NormalizeProvider(providerText)
 			if !ok {
 				fmt.Fprintln(os.Stderr, "Usage: /model <provider>/<model-id> (see /model list)")
 				continue
 			}
 			if !hasModel {
-				modelID = agent.DefaultModelForProvider(provider)
+				modelID = modelconfig.DefaultModel(provider)
 			}
 			if strings.TrimSpace(modelID) == "" {
 				fmt.Fprintf(os.Stderr, "Enter a model id: /model %s/<model-id>\n", provider)
 				continue
 			}
-			hasKey, err := agent.ModelProviderHasAPIKey(provider)
+			hasKey, err := modelconfig.ProviderHasAPIKey(provider)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Could not inspect saved model credentials: %v\n", err)
 				continue
@@ -160,7 +161,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				fmt.Fprintf(os.Stderr, "No %s API key is configured. Use /login %s first.\n", provider, provider)
 				continue
 			}
-			options.model = agent.ModelSelection{Provider: provider, Model: strings.TrimSpace(modelID)}
+			options.model = modelconfig.Selection{Provider: provider, Model: strings.TrimSpace(modelID)}
 			options.modelExplicit = true
 			fmt.Fprintf(os.Stderr, "Selected model %s/%s for this session. Use /model save to make it the default.\n", provider, modelID)
 		case "/repo":
@@ -265,7 +266,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 
 func validateSetupOptions(options interactiveSetupOptions) error {
 	if options.resumeID == "" || options.modelExplicit {
-		hasKey, err := agent.ModelProviderHasAPIKey(options.model.Provider)
+		hasKey, err := modelconfig.ProviderHasAPIKey(options.model.Provider)
 		if err != nil {
 			return fmt.Errorf("check model credentials: %w", err)
 		}
@@ -293,7 +294,7 @@ func printSetupHelp() {
   /repo <path>          Select a local Git repository
   /session <id>         Name a new saved session
   /resume <id>          Resume a saved session
-  /network on|off       Allow/block internet access inside Docker containers
+  /network on|off       Allow/block container internet access (on by default)
   /publish <branch>     Enable commit and push to a new origin branch
   /publish off          Disable Git publishing
   /github-write on|off  Enable/disable GitHub pull request creation
@@ -303,10 +304,10 @@ func printSetupHelp() {
 You can also type a task directly to start it with the current settings.`)
 }
 
-func printModelOptions(current agent.ModelSelection) {
+func printModelOptions(current modelconfig.Selection) {
 	fmt.Fprintf(os.Stderr, "Current selection: %s/%s\nAvailable providers:\n", current.Provider, current.Model)
-	for _, provider := range agent.SupportedModelProviders() {
-		configured, err := agent.ModelProviderHasAPIKey(provider.ID)
+	for _, provider := range modelconfig.Providers() {
+		configured, err := modelconfig.ProviderHasAPIKey(provider.ID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  %-10s credential status unavailable: %v\n", provider.ID, err)
 			continue
@@ -341,7 +342,7 @@ func printSetupStatus(options interactiveSetupOptions) {
 		pr = "on"
 	}
 	modelKey := "missing key"
-	if configured, err := agent.ModelProviderHasAPIKey(options.model.Provider); err == nil && configured {
+	if configured, err := modelconfig.ProviderHasAPIKey(options.model.Provider); err == nil && configured {
 		modelKey = "key ready"
 	}
 	fmt.Fprintf(os.Stderr, "Repo: %s | Session: %s | Model: %s/%s (%s) | Container network: %s | Publish: %s | GitHub PR: %s\n", options.repo, resume, options.model.Provider, options.model.Model, modelKey, network, publish, pr)

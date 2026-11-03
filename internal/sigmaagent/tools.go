@@ -40,6 +40,7 @@ var ignoredDirs = map[string]bool{
 
 type workspace struct {
 	root               string
+	memoryRepositoryID string
 	changeGate         *changeContractGate
 	mutations          *fileMutationQueue
 	background         *BackgroundCommandManager
@@ -67,21 +68,25 @@ func (w workspace) ensureNoActiveBackgroundTask() error {
 	return w.background.EnsureNoActive()
 }
 
-func BuiltinTools(root, goTestImage string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, diffBase ...string) ([]agent.Tool, error) {
-	return builtinTools(root, goTestImage, maxMemoryQueryBytes, model, toolOutputs, nil, false, diffBase...)
+func BuiltinTools(root string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, diffBase ...string) ([]agent.Tool, error) {
+	return builtinTools(root, maxMemoryQueryBytes, model, toolOutputs, nil, false, "", diffBase...)
 }
 
 // BuiltinToolsWithBackground shares the session's background task manager with
 // file mutation tools so source edits cannot race a detached command.
-func BuiltinToolsWithBackground(root, goTestImage string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, diffBase ...string) ([]agent.Tool, error) {
-	return builtinTools(root, goTestImage, maxMemoryQueryBytes, model, toolOutputs, background, false, diffBase...)
+func BuiltinToolsWithBackground(root string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, diffBase ...string) ([]agent.Tool, error) {
+	return builtinTools(root, maxMemoryQueryBytes, model, toolOutputs, background, false, "", diffBase...)
 }
 
-func BuiltinToolsWithNetwork(root, goTestImage string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, allowNetwork bool, diffBase ...string) ([]agent.Tool, error) {
-	return builtinTools(root, goTestImage, maxMemoryQueryBytes, model, toolOutputs, background, allowNetwork, diffBase...)
+func BuiltinToolsWithNetwork(root string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, allowNetwork bool, diffBase ...string) ([]agent.Tool, error) {
+	return builtinTools(root, maxMemoryQueryBytes, model, toolOutputs, background, allowNetwork, "", diffBase...)
 }
 
-func builtinTools(root, goTestImage string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, allowNetwork bool, diffBase ...string) ([]agent.Tool, error) {
+func BuiltinToolsWithNetworkAndMemoryRepositoryID(root string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, allowNetwork bool, memoryRepositoryID string, diffBase ...string) ([]agent.Tool, error) {
+	return builtinTools(root, maxMemoryQueryBytes, model, toolOutputs, background, allowNetwork, memoryRepositoryID, diffBase...)
+}
+
+func builtinTools(root string, maxMemoryQueryBytes int, model agent.Model, toolOutputs agent.ToolOutputStore, background *BackgroundCommandManager, allowNetwork bool, memoryRepositoryID string, diffBase ...string) ([]agent.Tool, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -94,19 +99,24 @@ func builtinTools(root, goTestImage string, maxMemoryQueryBytes int, model agent
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("workspace is not a directory: %s", root)
 	}
-	ws := workspace{root: filepath.Clean(absolute), changeGate: newChangeContractGate(), mutations: newFileMutationQueue(), background: background, allowNetwork: allowNetwork}
+	ws := workspace{root: filepath.Clean(absolute), memoryRepositoryID: strings.TrimSpace(memoryRepositoryID), changeGate: newChangeContractGate(), mutations: newFileMutationQueue(), background: background, allowNetwork: allowNetwork}
 	if len(diffBase) > 0 {
 		ws.diffBase = strings.TrimSpace(diffBase[0])
 	}
 	vector := newVectorConfig()
 	tools := []agent.Tool{
 		ws.listFilesTool(), ws.searchCodeTool(), ws.readFileTool(), ws.recordChangeContractTool(),
-		ws.createFileTool(), ws.editFileTool(), ws.applyPatchTool(), ws.runTestsTool(goTestImage), ws.gitDiffTool(),
+		ws.createFileTool(), ws.editFileTool(), ws.applyPatchTool(), ws.gitDiffTool(),
 	}
 	if model != nil {
 		tools = append(tools, ws.delegateInvestigationTool(model, tools, toolOutputs))
 	}
-	entries, err := LoadMemoryEntries(ws.root)
+	var entries []MemoryEntry
+	if ws.memoryRepositoryID != "" {
+		entries, err = loadMemoryEntriesWithRepoID(ws.root, ws.memoryRepositoryID)
+	} else {
+		entries, err = LoadMemoryEntries(ws.root)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("load repository memory: %w", err)
 	}
@@ -118,15 +128,15 @@ func builtinTools(root, goTestImage string, maxMemoryQueryBytes int, model agent
 
 // CommandExecutionTools adds a general-purpose shell tool backed by an
 // isolated Docker container. The repository worktree is the only writable
-// host mount; the container has no external network access.
+// host mount; the default container network allows outbound dependency access.
 func CommandExecutionTools(root, image string, diffBase ...string) ([]agent.Tool, error) {
-	return commandExecutionTools(root, image, nil, false, false, diffBase...)
+	return commandExecutionTools(root, image, nil, true, false, diffBase...)
 }
 
 // CommandExecutionToolsWithBackground adds foreground and session-persistent
 // background command execution to a workspace.
 func CommandExecutionToolsWithBackground(root, image string, manager *BackgroundCommandManager, diffBase ...string) ([]agent.Tool, error) {
-	return commandExecutionTools(root, image, manager, false, false, diffBase...)
+	return commandExecutionTools(root, image, manager, true, false, diffBase...)
 }
 
 func CommandExecutionToolsWithNetwork(root, image string, manager *BackgroundCommandManager, allowNetwork bool, diffBase ...string) ([]agent.Tool, error) {
@@ -203,8 +213,15 @@ func (w workspace) searchMemoryTool(vector *vectorConfig, maxQueryBytes int) age
 		var err error
 		searchMode := ""
 		fallbackNotice := ""
+		repoScope := w.memoryRepositoryID
+		if repoScope == "" {
+			repoScope, err = repositoryID(w.root)
+			if err != nil {
+				return "", err
+			}
+		}
 		if vector != nil {
-			semantic, searchErr := vector.searchMemory(ctx, w.root, args.Query, args.TopK*4)
+			semantic, searchErr := vector.searchMemoryForRepo(ctx, w.root, repoScope, args.Query, args.TopK*4)
 			if searchErr != nil || len(semantic) == 0 {
 				if ctx.Err() != nil {
 					return "", ctx.Err()
@@ -214,10 +231,10 @@ func (w workspace) searchMemoryTool(vector *vectorConfig, maxQueryBytes int) age
 				} else {
 					fallbackNotice = "Vector memory search returned no current hits; using local BM25.\n\n"
 				}
-				hits, err = searchMemoryBM25(w.root, args.Query, args.TopK)
+				hits, err = searchMemoryBM25(w.root, args.Query, args.TopK, repoScope)
 				searchMode = "bm25"
 			} else {
-				lexical, lexicalErr := searchMemoryBM25(w.root, args.Query, args.TopK*4)
+				lexical, lexicalErr := searchMemoryBM25(w.root, args.Query, args.TopK*4, repoScope)
 				if lexicalErr != nil {
 					return "", lexicalErr
 				}
@@ -225,7 +242,7 @@ func (w workspace) searchMemoryTool(vector *vectorConfig, maxQueryBytes int) age
 				searchMode = "hybrid_rrf"
 			}
 		} else {
-			hits, err = searchMemoryBM25(w.root, args.Query, args.TopK)
+			hits, err = searchMemoryBM25(w.root, args.Query, args.TopK, repoScope)
 			searchMode = "bm25"
 		}
 		if err != nil {
@@ -584,76 +601,6 @@ func (w workspace) editFileTool() agent.Tool {
 	})
 }
 
-func (w workspace) runTestsTool(image string) agent.Tool {
-	networkDescription := "an internal Docker network with no external egress; dependencies must already be in the image"
-	if w.allowNetwork {
-		networkDescription = "a Docker bridge network with internet access, allowing dependency downloads"
-	}
-	description := fmt.Sprintf("Run Go tests or vet with GOMAXPROCS=2 and package parallelism limited to 2, in Docker image %s on %s and resource caps. Use go-test-package with a workspace-relative package such as ./core/mapping for focused feedback. The result begins with an explicit pass/fail status. If it fails, fix the first actionable compiler/test diagnostic before rerunning; do not repeat an unchanged command.", image, networkDescription)
-	return tool("run_tests", description, `{"type":"object","properties":{"profile":{"type":"string","enum":["go-test","go-test-package","go-vet"]},"package":{"type":"string","maxLength":160,"description":"Required for go-test-package; workspace-relative Go package, e.g. ./core/mapping"}},"required":["profile"],"additionalProperties":false}`, "sequential", func(ctx context.Context, raw json.RawMessage) (string, error) {
-		var args struct {
-			Profile string `json:"profile"`
-			Package string `json:"package"`
-		}
-		if err := decodeArgs(raw, &args); err != nil {
-			return "", err
-		}
-		if err := w.ensureNoActiveBackgroundTask(); err != nil {
-			return "", err
-		}
-		goArgs, err := goTestArgs(args.Profile, args.Package)
-		if err != nil {
-			return "", err
-		}
-		testCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-		defer cancel()
-		networkName, err := createIsolatedTestNetwork(testCtx, w.allowNetwork)
-		if err != nil {
-			return "", fmt.Errorf("create isolated Docker test network: %w", err)
-		}
-		volume := filepath.ToSlash(w.root) + ":/workspace"
-		persistentHome := "/workspace/.sigma-agent/container-home"
-		containerArgs := []string{"run", "--rm", "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--env", "GOMAXPROCS=2", "--env", "HOME=" + persistentHome, "--env", "GOPATH=" + persistentHome + "/go", "--env", "GOMODCACHE=" + persistentHome + "/go/pkg/mod", "--env", "GOCACHE=" + persistentHome + "/go/build-cache", "--volume", volume, "--workdir", "/workspace", image}
-		containerArgs = append(containerArgs, goTestContainerArgs(goArgs, w.allowNetwork)...)
-		command := exec.CommandContext(testCtx, "docker", containerArgs...)
-		command.Dir = w.root
-		output, err := command.CombinedOutput()
-		networkCleanupErr := removeIsolatedTestNetwork(networkName)
-		exitCode := 0
-		if err != nil {
-			exitCode = -1
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				exitCode = exitErr.ExitCode()
-			}
-		}
-		networkMode := "isolated-internal-no-egress"
-		if w.allowNetwork {
-			networkMode = "docker-bridge-egress-enabled"
-		}
-		result := map[string]any{"profile": args.Profile, "image": image, "network": networkMode, "command": goArgs, "exit_code": exitCode, "passed": err == nil, "output": string(output)}
-		if networkCleanupErr != nil {
-			result["network_cleanup_error"] = networkCleanupErr.Error()
-		}
-		if err != nil {
-			result["error"] = err.Error()
-			lowerOutput := strings.ToLower(string(output))
-			if strings.Contains(lowerOutput, "network is unreachable") || strings.Contains(lowerOutput, "no such host") {
-				result["diagnostic"] = "the offline test image is missing a Go module dependency; configure go_test_image to an image with this repository's module cache preloaded"
-			}
-		}
-		encoded, encodeErr := encode(result)
-		if encodeErr != nil {
-			return "", encodeErr
-		}
-		status := "passed"
-		if err != nil {
-			status = "failed"
-		}
-		return fmt.Sprintf("run_tests status=%s exit_code=%d\n%s", status, exitCode, encoded), nil
-	})
-}
-
 const maxCommandBytes = 16 * 1024
 const maxCommandOutputBytes = 64 * 1024
 
@@ -662,7 +609,7 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 	if w.allowNetwork {
 		networkDescription = "internet access is enabled, so package managers may download dependencies"
 	}
-	description := fmt.Sprintf("Run Linux shell commands inside Docker using any Docker image reference selected from the repository's Dockerfile, devcontainer, CI, manifests, or build instructions. The optional image argument overrides the active image for this command. If omitted, use the image most recently prepared with prepare_environment, or the configured fallback image %s. Docker pulls a missing image on first use. Package-manager caches persist under the task worktree's .sigma-agent/container-home. The container has %s, 2 GiB RAM, 2 CPUs, 128 processes, and only the isolated task worktree as a writable host mount. Use action=run for a foreground command (default), action=start to launch one bounded background command, action=list to find session jobs, action=status to inspect one job, or action=stop with its task_id. Job records are persisted with the session, one task may run at a time, and tasks expire after 30 minutes. While a task runs, file edits, foreground commands, tests, diffs, and Git publishing are paused to protect the shared workspace; polling and read-only tools remain available. Use purpose=inspect/build/test/other. After source changes, run a relevant test with purpose=test and inspect git_diff. Container network: %s.", image, networkDescription, networkDescription)
+	description := fmt.Sprintf("Run Linux shell commands inside Docker using any Docker image reference selected from the repository's Dockerfile, devcontainer, CI, manifests, or build instructions. The optional image argument overrides the active image for this command. If omitted, use the image most recently prepared with prepare_environment, or the configured fallback image %s. Docker pulls a missing image on first use. Package-manager caches persist under the task worktree's .sigma-agent/container-home. The container has %s, 2 GiB RAM, 2 CPUs, 128 processes, and only the isolated task worktree as a writable host mount. Use action=run for a foreground command (default), action=start to launch one bounded background command, action=list to find session jobs, action=status to inspect one job, or action=stop with its task_id. Job records are persisted with the session, one task may run at a time, and tasks expire after 30 minutes. While a task runs, file edits, foreground commands, tests, diffs, and Git publishing are paused to protect the shared workspace; polling and read-only tools remain available. Use purpose=inspect/build/test/other. After source changes, run a relevant test with purpose=test and inspect git_diff. Test-purpose commands must preserve the test process exit status: do not use shell pipelines, semicolons, or fallback operators that can hide a failing test. Chain setup with &&. Container network: %s.", image, networkDescription, networkDescription)
 	return tool("run_command", description, `{"type":"object","properties":{"action":{"type":"string","enum":["run","start","list","status","stop"]},"command":{"type":"string","minLength":1,"maxLength":16384},"task_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},"working_directory":{"type":"string","maxLength":512,"description":"Optional workspace-relative directory; defaults to workspace root."},"purpose":{"type":"string","enum":["inspect","build","test","other"]},"image":{"type":"string","maxLength":512,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@_-]*$","description":"Optional Docker image reference for this command. Omit to use the prepared image or configured fallback."}},"additionalProperties":false}`, "sequential", func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args struct {
 			Action           string `json:"action"`
@@ -712,6 +659,11 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 		args.Command = strings.TrimSpace(args.Command)
 		if args.Command == "" || len(args.Command) > maxCommandBytes {
 			return "", fmt.Errorf("command must be 1 to %d bytes", maxCommandBytes)
+		}
+		if args.Purpose == "test" {
+			if err := validateTestCommandExitStatus(args.Command); err != nil {
+				return "", err
+			}
 		}
 		workingDirectory := w.root
 		if args.WorkingDirectory != "" {
@@ -820,6 +772,40 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 	})
 }
 
+func validateTestCommandExitStatus(command string) error {
+	var quote rune
+	escaped := false
+	for _, char := range command {
+		if quote == '\'' {
+			if char == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' {
+			if char == '\\' {
+				escaped = true
+			} else if char == '"' {
+				quote = 0
+			}
+			continue
+		}
+		switch char {
+		case '\\':
+			escaped = true
+		case '\'', '"':
+			quote = char
+		case '|', ';':
+			return errors.New("purpose=test commands cannot contain unquoted '|' or ';' because they may mask the test exit status; run the test directly and chain setup with &&")
+		}
+	}
+	return nil
+}
+
 func formatBackgroundCommandResult(action string, job backgroundCommand) string {
 	workspaceChanged := job.WorkspaceChanged
 	if action == "start" {
@@ -912,50 +898,11 @@ func removeIsolatedTestNetwork(name string) error {
 	return nil
 }
 
-// containerRunArgs builds the shared docker run arguments for the Go test
+// containerRunArgs builds the shared docker run arguments for a command
 // container. The container is isolated with a bounded network, memory, CPU and
 // process budget, drops all capabilities, and mounts only the task worktree.
 func containerRunArgs(containerName, networkName string) []string {
 	return []string{"run", "--rm", "--init", "--name", containerName, "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,exec,nosuid,size=256m"}
-}
-
-// goTestContainerArgs returns the command executed inside the Go test
-// container. Module downloads are only attempted when the session enabled
-// container network; an offline session runs the tests against the image as-is.
-func goTestContainerArgs(goArgs []string, allowNetwork bool) []string {
-	if allowNetwork {
-		command := "go mod download && exec " + strings.Join(goArgs, " ")
-		return []string{"/bin/sh", "-lc", command}
-	}
-	return goArgs
-}
-
-func goTestArgs(profile, packagePath string) ([]string, error) {
-	switch profile {
-	case "go-test":
-		return []string{"go", "test", "-p", "2", "./..."}, nil
-	case "go-test-package":
-		if !validGoPackagePath(packagePath) {
-			return nil, errors.New("go-test-package requires package to start with ./ and contain a workspace-relative Go package path, such as ./core/mapping")
-		}
-		return []string{"go", "test", "-p", "2", packagePath}, nil
-	case "go-vet":
-		return []string{"go", "vet", "-p", "2", "./..."}, nil
-	default:
-		return nil, errors.New("profile must be go-test, go-test-package, or go-vet")
-	}
-}
-
-func validGoPackagePath(packagePath string) bool {
-	if !strings.HasPrefix(packagePath, "./") || strings.ContainsAny(packagePath, " \t\r\n\\") || strings.Contains(packagePath, "..") || strings.HasPrefix(packagePath, "-") {
-		return false
-	}
-	for _, r := range packagePath {
-		if !(r == '.' || r == '/' || r == '_' || r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
-			return false
-		}
-	}
-	return true
 }
 
 func (w workspace) gitDiffTool() agent.Tool {

@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const agentManagedMemoryPath = ".sigma-agent/MEMORY.md"
+
 // WorkspaceDiff returns the working tree diff, including new non-ignored files.
 func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
 	base := "HEAD"
@@ -22,6 +24,14 @@ func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
 		return "", fmt.Errorf("list untracked files: %w", err)
 	}
 	files := splitNUL(untrackedOutput)
+	filteredFiles := files[:0]
+	for _, file := range files {
+		if filepath.ToSlash(file) == agentManagedMemoryPath {
+			continue
+		}
+		filteredFiles = append(filteredFiles, file)
+	}
+	files = filteredFiles
 	if len(files) == 0 {
 		return runWorkspaceDiff(root, "", base)
 	}
@@ -66,7 +76,7 @@ func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
 }
 
 func runWorkspaceDiff(root, gitIndexEnv, base string) (string, error) {
-	diff := exec.Command("git", "diff", "--no-ext-diff", "--binary", "--unified=3", base)
+	diff := exec.Command("git", "diff", "--no-ext-diff", "--binary", "--unified=3", base, "--", ".", ":(exclude)"+agentManagedMemoryPath)
 	diff.Dir = root
 	if gitIndexEnv != "" {
 		diff.Env = append(os.Environ(), gitIndexEnv)

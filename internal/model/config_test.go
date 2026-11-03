@@ -1,6 +1,7 @@
-package agent
+package model
 
 import (
+	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,18 +27,18 @@ func isolateModelConfig(t *testing.T) string {
 	return directory
 }
 
-func TestSaveAndRemoveProviderAPIKey(t *testing.T) {
+func TestSaveAndRemoveAPIKey(t *testing.T) {
 	isolateModelConfig(t)
 
-	if err := SaveProviderAPIKey("openai", "saved-openai-key"); err != nil {
-		t.Fatalf("SaveProviderAPIKey error = %v", err)
+	if err := SaveAPIKey("openai", "saved-openai-key"); err != nil {
+		t.Fatalf("SaveAPIKey error = %v", err)
 	}
-	configured, err := ModelProviderHasAPIKey("openai")
+	configured, err := ProviderHasAPIKey("openai")
 	if err != nil {
-		t.Fatalf("ModelProviderHasAPIKey error = %v", err)
+		t.Fatalf("ProviderHasAPIKey error = %v", err)
 	}
 	if !configured {
-		t.Fatal("ModelProviderHasAPIKey(openai) = false, want true after SaveProviderAPIKey")
+		t.Fatal("ProviderHasAPIKey(openai) = false, want true after SaveAPIKey")
 	}
 	resolved, err := providerAPIKey("openai")
 	if err != nil {
@@ -47,71 +48,71 @@ func TestSaveAndRemoveProviderAPIKey(t *testing.T) {
 		t.Fatalf("providerAPIKey(openai) = %q, want %q", resolved, "saved-openai-key")
 	}
 
-	if err := RemoveProviderAPIKey("openai"); err != nil {
-		t.Fatalf("RemoveProviderAPIKey error = %v", err)
+	if err := RemoveAPIKey("openai"); err != nil {
+		t.Fatalf("RemoveAPIKey error = %v", err)
 	}
-	configured, err = ModelProviderHasAPIKey("openai")
+	configured, err = ProviderHasAPIKey("openai")
 	if err != nil {
-		t.Fatalf("ModelProviderHasAPIKey after removal error = %v", err)
+		t.Fatalf("ProviderHasAPIKey after removal error = %v", err)
 	}
 	if configured {
-		t.Fatal("ModelProviderHasAPIKey(openai) = true after RemoveProviderAPIKey, want false")
+		t.Fatal("ProviderHasAPIKey(openai) = true after RemoveAPIKey, want false")
 	}
 }
 
 func TestSaveAndRemoveGitHubToken(t *testing.T) {
 	isolateModelConfig(t)
 
-	if err := SaveGitHubToken("ghp_saved_token"); err != nil {
+	if err := agent.SaveGitHubToken("ghp_saved_token"); err != nil {
 		t.Fatalf("SaveGitHubToken error = %v", err)
 	}
-	token, err := GitHubMCPToken()
+	token, err := agent.GitHubMCPToken()
 	if err != nil {
 		t.Fatalf("GitHubMCPToken error = %v", err)
 	}
 	if token != "ghp_saved_token" {
-		t.Fatalf("GitHubMCPToken() = %q, want %q", token, "ghp_saved_token")
+		t.Fatalf("agent.GitHubMCPToken() = %q, want %q", token, "ghp_saved_token")
 	}
-	if !GitHubMCPConfigured() {
-		t.Fatal("GitHubMCPConfigured() = false after SaveGitHubToken, want true")
+	if !agent.GitHubMCPConfigured() {
+		t.Fatal("agent.GitHubMCPConfigured() = false after SaveGitHubToken, want true")
 	}
 
-	if err := RemoveGitHubToken(); err != nil {
+	if err := agent.RemoveGitHubToken(); err != nil {
 		t.Fatalf("RemoveGitHubToken error = %v", err)
 	}
-	token, err = GitHubMCPToken()
+	token, err = agent.GitHubMCPToken()
 	if err != nil {
 		t.Fatalf("GitHubMCPToken after removal error = %v", err)
 	}
 	if token != "" {
-		t.Fatalf("GitHubMCPToken() = %q after RemoveGitHubToken, want empty", token)
+		t.Fatalf("agent.GitHubMCPToken() = %q after RemoveGitHubToken, want empty", token)
 	}
-	if GitHubMCPConfigured() {
-		t.Fatal("GitHubMCPConfigured() = true after RemoveGitHubToken, want false")
+	if agent.GitHubMCPConfigured() {
+		t.Fatal("agent.GitHubMCPConfigured() = true after RemoveGitHubToken, want false")
 	}
 }
 
-// Regression: ModelProviderHasAPIKey used to consult the environment before the
+// Regression: ProviderHasAPIKey used to consult the environment before the
 // saved configuration file while providerAPIKey - the resolver that actually
 // builds the model - consults the saved configuration file first. When both
 // sources were present the two disagreed, so the setup prompt could report a
 // provider as "key ready" while a different secret was the live one.
 //
 // The presence check must agree with the canonical resolver.
-func TestModelProviderHasAPIKeyAgreesWithTheCanonicalResolver(t *testing.T) {
+func TestProviderHasAPIKeyAgreesWithTheCanonicalResolver(t *testing.T) {
 	isolateModelConfig(t)
 
-	if err := SaveProviderAPIKey("openai", "saved-config-key"); err != nil {
-		t.Fatalf("SaveProviderAPIKey error = %v", err)
+	if err := SaveAPIKey("openai", "saved-config-key"); err != nil {
+		t.Fatalf("SaveAPIKey error = %v", err)
 	}
 	t.Setenv("OPENAI_API_KEY", "env-key")
 
-	configured, err := ModelProviderHasAPIKey("openai")
+	configured, err := ProviderHasAPIKey("openai")
 	if err != nil {
-		t.Fatalf("ModelProviderHasAPIKey error = %v", err)
+		t.Fatalf("ProviderHasAPIKey error = %v", err)
 	}
 	if !configured {
-		t.Fatal("ModelProviderHasAPIKey(openai) = false, want true when both sources are configured")
+		t.Fatal("ProviderHasAPIKey(openai) = false, want true when both sources are configured")
 	}
 	resolved, err := providerAPIKey("openai")
 	if err != nil {
@@ -128,12 +129,12 @@ func TestModelProviderUsesEnvironmentKeyWhenNoSavedKeyExists(t *testing.T) {
 	isolateModelConfig(t)
 	t.Setenv("OPENAI_API_KEY", "env-key")
 
-	configured, err := ModelProviderHasAPIKey("openai")
+	configured, err := ProviderHasAPIKey("openai")
 	if err != nil {
-		t.Fatalf("ModelProviderHasAPIKey error = %v", err)
+		t.Fatalf("ProviderHasAPIKey error = %v", err)
 	}
 	if !configured {
-		t.Fatal("ModelProviderHasAPIKey(openai) = false, want true for an environment-only key")
+		t.Fatal("ProviderHasAPIKey(openai) = false, want true for an environment-only key")
 	}
 	resolved, err := providerAPIKey("openai")
 	if err != nil {
@@ -147,12 +148,12 @@ func TestModelProviderUsesEnvironmentKeyWhenNoSavedKeyExists(t *testing.T) {
 func TestModelProviderWithoutAnyKeyIsNotConfigured(t *testing.T) {
 	isolateModelConfig(t)
 
-	configured, err := ModelProviderHasAPIKey("openai")
+	configured, err := ProviderHasAPIKey("openai")
 	if err != nil {
-		t.Fatalf("ModelProviderHasAPIKey error = %v", err)
+		t.Fatalf("ProviderHasAPIKey error = %v", err)
 	}
 	if configured {
-		t.Fatal("ModelProviderHasAPIKey(openai) = true with no credential configured, want false")
+		t.Fatal("ProviderHasAPIKey(openai) = true with no credential configured, want false")
 	}
 	resolved, err := providerAPIKey("openai")
 	if err != nil {
@@ -166,17 +167,17 @@ func TestModelProviderWithoutAnyKeyIsNotConfigured(t *testing.T) {
 func TestUnsupportedProviderIsRejected(t *testing.T) {
 	isolateModelConfig(t)
 
-	if _, ok := NormalizeModelProvider("not-a-provider"); ok {
-		t.Fatal("NormalizeModelProvider(not-a-provider) reported a supported provider")
+	if _, ok := NormalizeProvider("not-a-provider"); ok {
+		t.Fatal("NormalizeProvider(not-a-provider) reported a supported provider")
 	}
-	if err := SaveProviderAPIKey("not-a-provider", "key"); err == nil {
-		t.Fatal("SaveProviderAPIKey accepted an unsupported provider, want error")
+	if err := SaveAPIKey("not-a-provider", "key"); err == nil {
+		t.Fatal("SaveAPIKey accepted an unsupported provider, want error")
 	}
-	if err := RemoveProviderAPIKey("not-a-provider"); err == nil {
-		t.Fatal("RemoveProviderAPIKey accepted an unsupported provider, want error")
+	if err := RemoveAPIKey("not-a-provider"); err == nil {
+		t.Fatal("RemoveAPIKey accepted an unsupported provider, want error")
 	}
-	if _, err := ModelProviderHasAPIKey("not-a-provider"); err == nil {
-		t.Fatal("ModelProviderHasAPIKey accepted an unsupported provider, want error")
+	if _, err := ProviderHasAPIKey("not-a-provider"); err == nil {
+		t.Fatal("ProviderHasAPIKey accepted an unsupported provider, want error")
 	}
 }
 
@@ -184,10 +185,10 @@ func TestCredentialsWithControlCharactersAreRejected(t *testing.T) {
 	isolateModelConfig(t)
 
 	for _, key := range []string{"", "   ", "key\r\nInjected: value", "key\nvalue", "key\x00value"} {
-		if err := SaveProviderAPIKey("openai", key); err == nil {
-			t.Fatalf("SaveProviderAPIKey accepted %q, want error", key)
+		if err := SaveAPIKey("openai", key); err == nil {
+			t.Fatalf("SaveAPIKey accepted %q, want error", key)
 		}
-		if err := SaveGitHubToken(key); err == nil {
+		if err := agent.SaveGitHubToken(key); err == nil {
 			t.Fatalf("SaveGitHubToken accepted %q, want error", key)
 		}
 	}
@@ -207,10 +208,10 @@ func TestCredentialsAreNotWrittenIntoTheWorkingDirectory(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(previous) }()
 
-	if err := SaveProviderAPIKey("openai", "secret-value"); err != nil {
-		t.Fatalf("SaveProviderAPIKey error = %v", err)
+	if err := SaveAPIKey("openai", "secret-value"); err != nil {
+		t.Fatalf("SaveAPIKey error = %v", err)
 	}
-	if err := SaveGitHubToken("ghp_secret_value"); err != nil {
+	if err := agent.SaveGitHubToken("ghp_secret_value"); err != nil {
 		t.Fatalf("SaveGitHubToken error = %v", err)
 	}
 
@@ -242,14 +243,14 @@ func TestCredentialsAreNotWrittenIntoTheWorkingDirectory(t *testing.T) {
 func TestDefaultModelSelectionRoundTrip(t *testing.T) {
 	isolateModelConfig(t)
 
-	if err := SaveDefaultModelSelection(ModelSelection{Provider: "anthropic", Model: "claude-sonnet-4"}); err != nil {
+	if err := SaveDefaultSelection(Selection{Provider: "anthropic", Model: "claude-sonnet-4"}); err != nil {
 		t.Fatalf("SaveDefaultModelSelection error = %v", err)
 	}
-	selection, err := LoadDefaultModelSelection()
+	selection, err := LoadDefaultSelection()
 	if err != nil {
 		t.Fatalf("LoadDefaultModelSelection error = %v", err)
 	}
 	if selection.Provider != "anthropic" || selection.Model != "claude-sonnet-4" {
-		t.Fatalf("LoadDefaultModelSelection() = %#v, want anthropic/claude-sonnet-4", selection)
+		t.Fatalf("LoadDefaultSelection() = %#v, want anthropic/claude-sonnet-4", selection)
 	}
 }

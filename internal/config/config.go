@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -15,6 +16,7 @@ import (
 type Runtime struct {
 	MaxTurns                         int               `json:"max_turns"`
 	MaxToolCalls                     int               `json:"max_tool_calls"`
+	MaxRepeatedFailedCommands        int               `json:"max_repeated_failed_commands"`
 	MaxContextTokens                 int               `json:"max_context_tokens"`
 	ContextCompactionThresholdTokens int               `json:"context_compaction_threshold_tokens"`
 	SummaryTokens                    int               `json:"summary_tokens"`
@@ -24,12 +26,14 @@ type Runtime struct {
 	ToolTimeoutMS                    int               `json:"tool_timeout_ms"`
 	ModelTimeoutMS                   int               `json:"model_timeout_ms"`
 	MaxRetries                       int               `json:"max_retries"`
-	GoTestImage                      string            `json:"go_test_image"`
 	CommandExecutionImage            string            `json:"command_execution_image"`
 	AllowContainerNetwork            bool              `json:"allow_container_network"`
 	SkillsEnabled                    bool              `json:"skills_enabled"`
 	MemoryEnabled                    bool              `json:"memory_enabled"`
 	MemoryAutoWrite                  bool              `json:"memory_auto_write"`
+	ProjectInstructionsFile          string            `json:"project_instructions_file,omitempty"`
+	MemoryFile                       string            `json:"memory_file,omitempty"`
+	MemoryRepositoryID               string            `json:"memory_repository_id,omitempty"`
 	WebSearchEnabled                 bool              `json:"web_search_enabled"`
 	DefaultToolPermission            string            `json:"default_tool_permission"`
 	ToolPermissions                  map[string]string `json:"tool_permissions,omitempty"`
@@ -47,6 +51,7 @@ type CommandTool struct {
 }
 
 var commandToolName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`)
+var memoryRepositoryIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 func Defaults() Runtime {
 	return Runtime{
@@ -56,8 +61,9 @@ func Defaults() Runtime {
 		MaxRetrievalQueryBytes: 8 * 1024,
 		ModelOutputTokens:      16384, ToolTimeoutMS: 600000,
 		ModelTimeoutMS: 120000, MaxRetries: 2,
-		GoTestImage: "golang:1.26", CommandExecutionImage: "golang:1.26",
-		SkillsEnabled: true, MemoryEnabled: true, MemoryAutoWrite: false, DefaultToolPermission: "allow",
+		CommandExecutionImage: "debian:trixie-slim",
+		AllowContainerNetwork: false,
+		SkillsEnabled:         true, MemoryEnabled: true, MemoryAutoWrite: false, DefaultToolPermission: "allow",
 	}
 }
 
@@ -83,6 +89,20 @@ func Load(path string) (Runtime, error) {
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return Runtime{}, fmt.Errorf("decode config %s: expected one JSON object", path)
 	}
+	configPath, err := filepath.Abs(path)
+	if err != nil {
+		return Runtime{}, fmt.Errorf("resolve config path: %w", err)
+	}
+	for _, configuredPath := range []*string{&cfg.ProjectInstructionsFile, &cfg.MemoryFile} {
+		if *configuredPath == "" || filepath.IsAbs(*configuredPath) {
+			continue
+		}
+		resolved, err := filepath.Abs(filepath.Join(filepath.Dir(configPath), *configuredPath))
+		if err != nil {
+			return Runtime{}, fmt.Errorf("resolve configured project context path: %w", err)
+		}
+		*configuredPath = resolved
+	}
 	if err := cfg.Validate(); err != nil {
 		return Runtime{}, fmt.Errorf("invalid config %s: %w", path, err)
 	}
@@ -95,6 +115,9 @@ func (c Runtime) Validate() error {
 	}
 	if c.MaxToolCalls < 1 || c.MaxToolCalls > 4096 {
 		return errors.New("max_tool_calls must be between 1 and 4096")
+	}
+	if c.MaxRepeatedFailedCommands < 0 || c.MaxRepeatedFailedCommands > 20 {
+		return errors.New("max_repeated_failed_commands must be between 0 and 20")
 	}
 	if c.MaxContextTokens < 512 || c.MaxContextTokens > 1000000 {
 		return errors.New("max_context_tokens must be between 512 and 1000000")
@@ -129,8 +152,22 @@ func (c Runtime) Validate() error {
 	if c.MemoryAutoWrite && !c.MemoryEnabled {
 		return errors.New("memory_auto_write requires memory_enabled")
 	}
-	if c.GoTestImage == "" || strings.TrimSpace(c.GoTestImage) != c.GoTestImage || strings.ContainsAny(c.GoTestImage, " \t\r\n") || strings.HasPrefix(c.GoTestImage, "-") {
-		return errors.New("go_test_image must be a non-empty Docker image reference without whitespace")
+	for name, path := range map[string]string{
+		"project_instructions_file": c.ProjectInstructionsFile,
+		"memory_file":               c.MemoryFile,
+	} {
+		if path != "" && (!filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n")) {
+			return fmt.Errorf("%s must be an absolute filesystem path", name)
+		}
+	}
+	if c.MemoryFile == "" && c.MemoryRepositoryID != "" {
+		return errors.New("memory_repository_id requires memory_file")
+	}
+	if c.MemoryFile != "" && c.MemoryRepositoryID == "" {
+		return errors.New("memory_file requires a stable memory_repository_id")
+	}
+	if len(c.MemoryRepositoryID) > 128 || (c.MemoryRepositoryID != "" && !memoryRepositoryIDPattern.MatchString(c.MemoryRepositoryID)) {
+		return errors.New("memory_repository_id must be 1–128 letters, digits, '.', '_', ':', '/', or '-' and start with a letter or digit")
 	}
 	if c.CommandExecutionImage == "" || strings.TrimSpace(c.CommandExecutionImage) != c.CommandExecutionImage || strings.ContainsAny(c.CommandExecutionImage, " \t\r\n") || strings.HasPrefix(c.CommandExecutionImage, "-") {
 		return errors.New("command_execution_image must be a non-empty Docker image reference without whitespace")
@@ -188,10 +225,10 @@ func (c Runtime) EffectiveContextCompactionThresholdTokens() int {
 	if c.ContextCompactionThresholdTokens > 0 {
 		return c.ContextCompactionThresholdTokens
 	}
-	if c.MaxContextTokens > 0 && c.MaxContextTokens < 24000 {
+	if c.MaxContextTokens > 0 && c.MaxContextTokens < 30000 {
 		return c.MaxContextTokens
 	}
-	return 24000
+	return 30000
 }
 
 func validToolPermission(permission string) bool {

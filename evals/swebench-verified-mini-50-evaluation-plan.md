@@ -4,7 +4,16 @@
 
 ## 目标与边界
 
-用固定的 SWE-bench Verified Mini 50 题子集评估 Sigma Agent 的端到端 issue 修复能力。先进行单题试跑，确认模型、仓库准备、Docker 测试和官方评分链路；通过后再逐题顺序执行。MiniMax M3、Sigma 运行配置、Skills/记忆开关、提示词和每题预算在正式批次中固定。
+用固定的 SWE-bench Verified Mini 50 题子集评估 Sigma Agent 的端到端 issue 修复能力。先进行单题试跑，确认模型、仓库准备、Docker 测试和官方评分链路；通过后再逐题顺序执行。后续新批次统一使用 MiniMax-M3.1-Flash，并固定 Sigma 运行配置、Skills/记忆开关、提示词和每题预算。旧批次仍按实际使用的 MiniMax-M3 记录，不回写历史结果。
+
+Docker 镜像准备、网络故障、运行中断和清理一律遵循 [benchmark protocol](benchmark-protocol.md)。
+
+`full-sigma-5` 的 #11815、#11848 和 #11880 首轮使用的是各目标 checkout
+自己的 `.sigma-agent/MEMORY.md`，未加载仓库外的 `AGENTS.md` profile。现在增加了
+`configs/full-sigma-5-django-11880-shared-profile.json`：它会把 Sigma 的
+`AGENTS.md` 外置注入，并从 Sigma 仓库外的共享 Django 记忆源检索，目标 checkout
+不需要写入这些配置。若用它续跑 #11880，应标记为 profile 更新后的续跑，不与原
+条件混报；后续题目使用共享 profile 时也应单独标明评测条件。
 
 这个子集来自 500 题人工验证的 SWE-bench Verified。Mini 数据集作者用聚类与优化选择 50 题，试图近似原数据集的难度、通过率和模型表现分布，并把所需 Docker 环境压缩到 Django/Sphinx 相关环境；它不是从 500 题中简单随机抽 50 题。50 题成绩适合作为小型、可复现的项目评测证据，不等同于官方 500 题成绩。
 
@@ -24,7 +33,7 @@
 | 1. 准备任务 | 基于清单的 `base_commit` 创建干净 checkout；只输入 issue 原文；Agent 使用隔离工作区和 Docker 命令容器 | 启动前记录 HEAD、工作区干净状态及任务 ID |
 | 2. Agent 修复 | 每题单次运行；不注入 PR diff、修复提示、测试补丁或人工中途指导；允许 Agent 自己查看代码、编辑和运行项目命令 | 保存完整轨迹、工具调用、模型错误、耗时、用量、patch 与退出状态 |
 | 3. 官方评分 | 对 Agent patch 运行 SWE-bench 官方 evaluator；同时对该题 gold patch 跑 evaluator 作环境校验 | gold patch 若不能通过，标记 infra-invalid，不计入 Agent 分母；候选 patch 的 fail-to-pass 全通过且无新增 pass-to-pass 回归才记 resolved |
-| 4. 清理与归档 | 一题完成后先归档结果，再移除该题专属容器/镜像；保留数据集、日志和可复用环境层 | 同时最多运行一个任务；每题结束核对 Docker 占用 |
+| 4. 清理与归档 | 只有 Agent、官方 evaluator 与结果归档全部完成后，才清理不再复用的任务专属资源；保留数据集、日志和可复用环境层 | 中断/未完成的题标记 `invalid/incomplete` 并保留环境；同一时间最多运行一个任务 |
 
 ## 单题试跑验收（第 1 题）
 
@@ -41,7 +50,7 @@
 - Agent 修复了 `django/contrib/auth/forms.py`，并在 `tests/auth_tests/test_forms.py` 写了自己的测试。它的本地命令报告 82 项测试通过；官方评分的两个目标检查却发现 `widget.attrs['maxlength']` 是字符串（例如 `'254'`），预期值是整数 `254`。因此 HTML 序列化可能看起来正确，但原始 Widget 属性的类型契约没有满足官方验收；后续复盘应分开判断对用户可见的 HTML 行为与基准测试要求。
 - Sigma 使用 MiniMax-M3，Skills/Memory、web search、GitHub MCP 均关闭；只给数据集 `problem_statement`，没有给 `patch`、`test_patch`、`hints_text` 或 PR diff。运行 `44` 轮、`58` 次工具调用，约 `172,572` 输入 token、`11,786` 输出 token。这个单题 token 消耗偏高，正式跑 50 题前要先决定是否调整上下文/工具策略；若调整，结果需另开批次。
 - 此任务使用的数据集 revision 为 `b316c349947c29963fce3f4a65967c9807a4b673`。Sigma checkout commit 为 `780238173e1b98101c75f30d6e73c6179077f2f8`；当时工作区含未提交修改，非 `var`/密钥文件源码清单 SHA-256 为 `5EFCDE8CD2BB9B8CBF28E5E5F6D5713F3313E70337E95FEF5F002DBFEB883876`，pilot config SHA-256 为 `9766C05DA608BBDF68A3726624B1B808B0A8C3872FAB2A9D9735B6345B83D38B`。
-- Windows 运行适配：SWE-bench 4.1.0 的评测脚本在 Windows 写出 CRLF，第一次 gold 正控因此无法启动；将本机隔离 venv 中的脚本写入改为 LF 后，gold 正控通过。Agent 命令容器通过薄包装镜像把 `/testbed` 映射到 Sigma 挂载的 `/workspace`，确认 Agent 测试确实使用候选源码。试跑结束后已删除该题的官方和包装镜像；后续任务需逐题拉取并清理。
+- Windows 运行适配：SWE-bench 4.1.0 的评测脚本在 Windows 写出 CRLF，第一次 gold 正控因此无法启动；将本机隔离 venv 中的脚本写入改为 LF 后，gold 正控通过。Agent 命令容器通过薄包装镜像把 `/testbed` 映射到 Sigma 挂载的 `/workspace`，确认 Agent 测试确实使用候选源码。#11880 后续运行在第 86 轮被用户停止，未完成官方评测；该题镜像和环境须保留至续跑或明确归档。每题结束后按 [benchmark protocol](benchmark-protocol.md) 判断是否可以清理。
 - 产物均在被 Git 忽略的 `var/benchmark-data/swebench-verified-mini/` 与 `var/runs/343a5689-9f97-41c2-b630-2371177360d2/`，含 Agent 原始 patch、source-only 诊断 patch、官方 gold/candidate 报告及运行日志。试跑作为 50 题清单第 1 题记录，但仅为 pilot，不单独作为 Sigma 能力的结论。
 
 ## 50 题固定清单
@@ -49,9 +58,9 @@
 | # | instance_id | 仓库 / 版本 | base commit | 状态 |
 |---:|---|---|---|---|
 | 1 | `django__django-11790` | `django/django` / 3.1 | `b1d6b35e146aea83b171c1b921178bbaae2795ed` | Pilot：gold 1/1；Sigma 0/1 |
-| 2 | `django__django-11815` | `django/django` / 3.1 | `e02f67ef2d03d48128e7a118bf75f0418e24e8ac` | 待测 |
-| 3 | `django__django-11848` | `django/django` / 3.1 | `f0adf3b9b7a19cdee05368ff0c0c2d087f011180` | 待测 |
-| 4 | `django__django-11880` | `django/django` / 3.1 | `06909fe084f87a65459a83bd69d7cdbe4fce9a7c` | 待测 |
+| 2 | `django__django-11815` | `django/django` / 3.1 | `e02f67ef2d03d48128e7a118bf75f0418e24e8ac` | 已评分：resolved |
+| 3 | `django__django-11848` | `django/django` / 3.1 | `f0adf3b9b7a19cdee05368ff0c0c2d087f011180` | 已评分：unresolved |
+| 4 | `django__django-11880` | `django/django` / 3.1 | `06909fe084f87a65459a83bd69d7cdbe4fce9a7c` | 未完成：第 86 轮停止；续跑遇 429，未评分 |
 | 5 | `django__django-11885` | `django/django` / 3.1 | `04ac9b45a34440fa447feb6ae934687aacbfc5f4` | 待测 |
 | 6 | `django__django-11951` | `django/django` / 3.1 | `312049091288dbba2299de8d07ea3e3311ed7238` | 待测 |
 | 7 | `django__django-11964` | `django/django` / 3.1 | `fc2b1cc926e34041953738e58fa6ad3053059b22` | 待测 |
@@ -104,9 +113,9 @@
 | # | instance_id | Sigma 执行状态 | 官方评分 | F2P 通过 / 总数 | P2P 回归 | 轮数 / 工具数 | 耗时 | Token / 费用 | 备注 |
 |---:|---|---|---|---:|---:|---:|---:|---:|---|
 | 1 | `django__django-11790` | 完成 | unresolved | 0/2 | 77/77 通过 | 44 / 58 | 约 4.5 分钟 | 172,572 / 11,786 tokens | gold 1/1；raw 与 source-only 均未通过 F2P，属性值类型不符 |
-| 2 | `django__django-11815` | 未运行 | 未评分 | — | — | — | — | — | — |
-| 3 | `django__django-11848` | 未运行 | 未评分 | — | — | — | — | — | — |
-| 4 | `django__django-11880` | 未运行 | 未评分 | — | — | — | — | — | — |
+| 2 | `django__django-11815` | 完成 | resolved | 2/2 | 44/44 通过 | 72 / 83 | 约 11 分钟（按记录时间估算） | 1,634,776 / 19,227 tokens | code-only candidate 1/1；raw patch 因 `.sigma-agent/MEMORY.md` sidecar 冲突未评分；运行配置启用 Skills/Memory，但 trace 没有 `read_skill` / `search_memory` 调用。 |
+| 3 | `django__django-11848` | 完成（额度恢复后续跑） | unresolved | 0/2 | 43/43 通过 | 135 / 142（3 次运行） | 约 13 分钟（不含等待额度） | 3,571,625 / 54,527 tokens（累计） | 官方测试中两个 F2P 因 `datetime.datetime` mock 接口不匹配而报错；第一次 evaluator 调用的 CRLF 补丁格式错误，修正为 LF 后评分。续跑前修复了 Skill 误匹配。 |
+| 4 | `django__django-11880` | 未完成（86 轮后停止；gate 修复后续跑 20 轮并遇 MiniMax 429） | 未评分 | — | — | 原跑 86；续跑 20 / 16 工具调用 | — | 续跑 621,264 输入 / 6,695 输出 tokens | 23 项聚焦测试曾报告通过；后续测试与官方 evaluator 未完成。续跑配置加入外部 `AGENTS.md` 和共享记忆 profile，属于配置变化后的续跑，不能与首轮条件混报。详见 `C:\dev\Agent\swb5\outputs\runs\django-11880-issue-only-20261103` 和 `C:\dev\Agent\swb5\outputs\evaluation-issues.md`；环境保留。 |
 | 5 | `django__django-11885` | 未运行 | 未评分 | — | — | — | — | — | — |
 | 6 | `django__django-11951` | 未运行 | 未评分 | — | — | — | — | — | — |
 | 7 | `django__django-11964` | 未运行 | 未评分 | — | — | — | — | — | — |

@@ -238,6 +238,27 @@ func packageSkills(scopes []packageScope) ([]sigmaagent.PackageSkills, error) {
 	return result, nil
 }
 
+func packageExtensions(scopes []packageScope) ([]string, error) {
+	packages, err := installedPackages(scopes)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, installed := range packages {
+		found, err := installed.ResourcePaths(pkgmgr.ResourceExtensions)
+		if err != nil {
+			return nil, fmt.Errorf("discover extensions in package %q: %w", installed.Name, err)
+		}
+		for _, path := range found {
+			switch strings.ToLower(filepath.Ext(path)) {
+			case ".js", ".mjs", ".cjs":
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths, nil
+}
+
 // mcpConfigPaths returns the MCP configuration files of the given scopes,
 // from the lowest to the highest precedence.
 func mcpConfigPaths(scopes []packageScope) []string {
