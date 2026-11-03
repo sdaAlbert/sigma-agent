@@ -130,7 +130,7 @@ type Limits struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxTurns: 128, MaxToolCalls: 256, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
+	return Limits{MaxTurns: 64, MaxToolCalls: 256, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
 }
 
 type Result struct {

@@ -614,12 +614,7 @@ func (w workspace) runTestsTool(image string) agent.Tool {
 		volume := filepath.ToSlash(w.root) + ":/workspace"
 		persistentHome := "/workspace/.sigma-agent/container-home"
 		containerArgs := []string{"run", "--rm", "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--env", "GOMAXPROCS=2", "--env", "HOME=" + persistentHome, "--env", "GOPATH=" + persistentHome + "/go", "--env", "GOMODCACHE=" + persistentHome + "/go/pkg/mod", "--env", "GOCACHE=" + persistentHome + "/go/build-cache", "--volume", volume, "--workdir", "/workspace", image}
-		if w.allowNetwork {
-			command := "go mod download && exec " + strings.Join(goArgs, " ")
-			containerArgs = append(containerArgs, "/bin/sh", "-lc", command)
-		} else {
-			containerArgs = append(containerArgs, goArgs...)
-		}
+		containerArgs = append(containerArgs, goTestContainerArgs(goArgs, w.allowNetwork)...)
 		command := exec.CommandContext(testCtx, "docker", containerArgs...)
 		command.Dir = w.root
 		output, err := command.CombinedOutput()
@@ -769,7 +764,7 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 		if relative, relErr := filepath.Rel(w.root, workingDirectory); relErr == nil && relative != "." {
 			containerWorkdir += "/" + filepath.ToSlash(relative)
 		}
-		containerArgs := []string{"run", "--rm", "--init", "--name", containerName, "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,nosuid,size=256m"}
+		containerArgs := containerRunArgs(containerName, networkName)
 		if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {
 			containerArgs = append(containerArgs, "--user", fmt.Sprintf("%d:%d", uid, gid))
 		}
@@ -915,6 +910,24 @@ func removeIsolatedTestNetwork(name string) error {
 		return fmt.Errorf("docker network rm: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// containerRunArgs builds the shared docker run arguments for the Go test
+// container. The container is isolated with a bounded network, memory, CPU and
+// process budget, drops all capabilities, and mounts only the task worktree.
+func containerRunArgs(containerName, networkName string) []string {
+	return []string{"run", "--rm", "--init", "--name", containerName, "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,exec,nosuid,size=256m"}
+}
+
+// goTestContainerArgs returns the command executed inside the Go test
+// container. Module downloads are only attempted when the session enabled
+// container network; an offline session runs the tests against the image as-is.
+func goTestContainerArgs(goArgs []string, allowNetwork bool) []string {
+	if allowNetwork {
+		command := "go mod download && exec " + strings.Join(goArgs, " ")
+		return []string{"/bin/sh", "-lc", command}
+	}
+	return goArgs
 }
 
 func goTestArgs(profile, packagePath string) ([]string, error) {

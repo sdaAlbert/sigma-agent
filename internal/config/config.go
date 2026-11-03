@@ -35,7 +35,7 @@ type Runtime struct {
 
 func Defaults() Runtime {
 	return Runtime{
-		MaxTurns: 128, MaxToolCalls: 256, MaxContextTokens: 64000,
+		MaxTurns: 64, MaxToolCalls: 256, MaxContextTokens: 64000,
 		SummaryTokens: 800, MaxToolResultBytes: 16 * 1024,
 		MaxRetrievalQueryBytes: 8 * 1024,
 		ModelOutputTokens:      16384, ToolTimeoutMS: 600000,
