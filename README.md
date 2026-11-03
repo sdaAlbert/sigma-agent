@@ -9,16 +9,16 @@ Current capabilities include persistent sessions, context compaction, source bro
 Requirements: Go 1.26+, Git, Docker Desktop, and an API key from one of the supported model providers (MiniMax, Anthropic, OpenAI, DeepSeek, or OpenRouter).
 
 ```powershell
-$env:MINIMAX_API_KEY = "your-api-key"
 go run ./cmd/sigma-agent
 ```
 
-Sigma opens a setup prompt. Use `/repo <path>` to select a checkout, `/login`
-to save a model API key, and `/model` to select a model. Configure optional
-session, network, and GitHub publishing settings with slash commands, then type
-a task to start. You can also run Sigma from inside the target Git repository
-and it will select the current directory by default. Type `/help` at the setup
-prompt to see the available commands.
+Sigma opens a setup prompt. Enter `/login minimax` and paste your MiniMax API
+key when prompted; the key is hidden while you enter it and saved in your user
+configuration. Then use `/model minimax/MiniMax-M3` to select a model and
+`/model save` to make it the default for new sessions. Use `/login github` if
+you want Sigma to read private GitHub data or create pull requests. Type `/help`
+to see all setup commands. You can also run Sigma from inside the target Git
+repository and it will select the current directory by default.
 
 For configuration, credentials, optional Qdrant setup, and CLI options, see [CONFIGURATION.md](CONFIGURATION.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -28,15 +28,19 @@ Sigma Agent runs as a standalone CLI from your terminal; Codex is not required. 
 
 ### One-time setup
 
-Install Go 1.26+, Git, and Docker Desktop. Start Docker Desktop, then configure your model key and GitHub token from this directory:
+Install Go 1.26+, Git, and Docker Desktop. Start Docker Desktop, then launch Sigma:
 
 ```powershell
-Set-Location C:\path\to\sigma-agent\go-runtime
-.\scripts\set-minimax-key.ps1
-.\scripts\set-github-token.ps1
+go run ./cmd/sigma-agent
 ```
 
-The GitHub token is used to read issues and pull requests. For PR creation it must also have permission to create pull requests in the target repository. Git push uses your local Git credential helper (for example, Git Credential Manager); the MCP token is not used for `git push`.
+Use `/login minimax` to save your model API key and `/model` to select a model.
+Use `/login github` to save a GitHub token for issue/PR access. For PR creation,
+the token must also have permission to create pull requests in the target
+repository. Git push uses your local Git credential helper (for example, Git
+Credential Manager); the MCP token is not used for `git push`. Environment
+variables such as `MINIMAX_API_KEY` remain available for scripted setups, but
+are not required for interactive use.
 
 ### Run an issue repair
 
