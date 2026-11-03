@@ -28,10 +28,11 @@ func ToolTurn(ctx context.Context) (int, bool) {
 }
 
 type Tool struct {
-	Definition    ToolDefinition
-	ExecutionMode string // "parallel" for independent reads; "parallel_write" for path-locked mutations; otherwise serialized.
-	Validate      func(json.RawMessage) error
-	Handle        ToolHandler
+	Definition        ToolDefinition
+	ExecutionMode     string // "parallel" for independent reads; "parallel_write" for path-locked mutations; otherwise serialized.
+	ModifiesWorkspace bool   // Successful calls force the normal test-and-diff review gate.
+	Validate          func(json.RawMessage) error
+	Handle            ToolHandler
 }
 
 type ToolRegistry struct{ byName map[string]Tool }
@@ -84,10 +85,12 @@ type Message struct {
 }
 
 type ModelResponse struct {
-	Content      []ContentBlock `json:"content"`
-	StopReason   string         `json:"stop_reason"`
-	InputTokens  int            `json:"input_tokens,omitempty"`
-	OutputTokens int            `json:"output_tokens,omitempty"`
+	Content                  []ContentBlock `json:"content"`
+	StopReason               string         `json:"stop_reason"`
+	InputTokens              int            `json:"input_tokens,omitempty"`
+	OutputTokens             int            `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     int            `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int            `json:"cache_creation_input_tokens,omitempty"`
 }
 
 type ModelEvent struct {
@@ -104,18 +107,23 @@ type Model interface {
 }
 
 type Event struct {
-	At                    time.Time `json:"at"`
-	Type                  string    `json:"type"`
-	Session               string    `json:"session_id,omitempty"`
-	Turn                  int       `json:"turn,omitempty"`
-	Tool                  string    `json:"tool,omitempty"`
-	Duration              int64     `json:"duration_ms,omitempty"`
-	Bytes                 int       `json:"bytes,omitempty"`
-	MessagesDropped       int       `json:"messages_dropped,omitempty"`
-	EstimatedTokensBefore int       `json:"estimated_tokens_before,omitempty"`
-	EstimatedTokensAfter  int       `json:"estimated_tokens_after,omitempty"`
-	Error                 string    `json:"error,omitempty"`
-	Text                  string    `json:"text,omitempty"`
+	At                       time.Time `json:"at"`
+	Type                     string    `json:"type"`
+	Session                  string    `json:"session_id,omitempty"`
+	Turn                     int       `json:"turn,omitempty"`
+	Tool                     string    `json:"tool,omitempty"`
+	Duration                 int64     `json:"duration_ms,omitempty"`
+	Bytes                    int       `json:"bytes,omitempty"`
+	MessagesDropped          int       `json:"messages_dropped,omitempty"`
+	EstimatedTokensBefore    int       `json:"estimated_tokens_before,omitempty"`
+	EstimatedTokensAfter     int       `json:"estimated_tokens_after,omitempty"`
+	InputTokens              int       `json:"input_tokens,omitempty"`
+	OutputTokens             int       `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     int       `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int       `json:"cache_creation_input_tokens,omitempty"`
+	SummaryTokens            int       `json:"summary_tokens,omitempty"`
+	Error                    string    `json:"error,omitempty"`
+	Text                     string    `json:"text,omitempty"`
 }
 
 type EventSink func(Event)
@@ -130,15 +138,20 @@ type Limits struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxTurns: 64, MaxToolCalls: 256, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
+	return Limits{MaxTurns: 128, MaxToolCalls: 256, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
 }
 
 type Result struct {
-	Text         string
-	Turns        int
-	ToolCalls    int
-	InputTokens  int
-	OutputTokens int
+	Text                          string
+	Turns                         int
+	ToolCalls                     int
+	InputTokens                   int
+	OutputTokens                  int
+	CacheReadInputTokens          int
+	CacheCreationInputTokens      int
+	ContextCompactions            int
+	ContextCompactionInputTokens  int
+	ContextCompactionOutputTokens int
 }
 
 type Session struct {
@@ -154,16 +167,18 @@ type Session struct {
 	Context     ContextPreparer
 	ToolOutputs ToolOutputStore
 
-	mu           sync.Mutex
-	messages     []Message
-	entries      []SessionEntry
-	head         string
-	modelID      string
-	steering     []Message
-	followUps    []Message
-	pendingTools []ContentBlock
-	running      bool
-	cancel       context.CancelFunc
+	mu                 sync.Mutex
+	messages           []Message
+	compactionSummary  string
+	compactionBoundary int
+	entries            []SessionEntry
+	head               string
+	modelID            string
+	steering           []Message
+	followUps          []Message
+	pendingTools       []ContentBlock
+	running            bool
+	cancel             context.CancelFunc
 }
 
 func (s *Session) Messages() []Message {
@@ -361,14 +376,15 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			remaining := limits.MaxTurns - turn + 1
 			systemPrompt += fmt.Sprintf("\n\nFINALIZATION PHASE: %d turns remain. Stop broad exploration. Only make a targeted correction if a test or diff review shows it is needed; then rerun the checks. If a write was rejected because the file changed, read that file again and rebase the edit.", remaining)
 		}
-		requestMessages := s.Messages()
+		systemPrompt, requestMessages := s.modelContext(systemPrompt)
 		if s.Context != nil {
 			prepared, prepareErr := s.Context.Prepare(systemPrompt, requestMessages)
 			if prepareErr != nil {
 				return result, fmt.Errorf("prepare model context: %w", prepareErr)
 			}
 			systemPrompt, requestMessages = prepared.System, prepared.Messages
-			if prepared.DroppedMessages > 0 {
+			if prepared.Compacted {
+				result.ContextCompactions++
 				s.emit(Event{Type: "context_compacted", Turn: turn, MessagesDropped: prepared.DroppedMessages, EstimatedTokensBefore: prepared.EstimatedBefore, EstimatedTokensAfter: prepared.EstimatedAfter})
 			}
 		}
@@ -385,6 +401,9 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		}
 		result.InputTokens += response.InputTokens
 		result.OutputTokens += response.OutputTokens
+		result.CacheReadInputTokens += response.CacheReadInputTokens
+		result.CacheCreationInputTokens += response.CacheCreationInputTokens
+		s.emit(Event{Type: "model_usage", Turn: turn, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens, CacheReadInputTokens: response.CacheReadInputTokens, CacheCreationInputTokens: response.CacheCreationInputTokens})
 		result.Text += textBlocks(response.Content)
 		toolCalls := make([]ContentBlock, 0)
 		for _, block := range response.Content {
@@ -431,7 +450,58 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				return result, err
 			}
 			result.ToolCalls += len(toolCalls)
-			toolResults, toolErr := s.executeTools(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
+			compactRequested := false
+			for _, call := range toolCalls {
+				compactRequested = compactRequested || isCompactContextTool(call.Name)
+			}
+			var toolResults []ContentBlock
+			var toolErr error
+			if compactRequested && len(toolCalls) > 1 {
+				toolResults = make([]ContentBlock, len(toolCalls))
+				for i, call := range toolCalls {
+					message := "compact_context must be called by itself; no tools in this batch were executed"
+					s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name})
+					s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Error: message})
+					toolResults[i] = toolResult(call.ID, message, true)
+				}
+			} else {
+				toolResults, toolErr = s.executeTools(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
+			}
+			compactIndex, compactCount := -1, 0
+			for i, call := range toolCalls {
+				if isCompactContextTool(call.Name) {
+					compactIndex = i
+					compactCount++
+				}
+			}
+			var compaction *contextCompaction
+			if compactCount > 0 && compactIndex < len(toolResults) {
+				switch {
+				case compactCount > 1 || len(toolCalls) > 1:
+					for i, call := range toolCalls {
+						if isCompactContextTool(call.Name) {
+							toolResults[i] = toolResult(call.ID, "Call compact_context by itself in a separate turn so its summary includes all completed tool results.", true)
+						}
+					}
+				case toolResults[compactIndex].IsError:
+					// The normal tool policy or validation error is already recorded.
+				default:
+					compacted, compactErr := s.summarizeContext(ctx, turn, toolCalls[compactIndex].Input)
+					if compactErr != nil {
+						s.emit(Event{Type: "context_compaction_model_failed", Turn: turn, Tool: compactContextToolName, Error: compactErr.Error()})
+						toolResults[compactIndex] = toolResult(toolCalls[compactIndex].ID, "Context compaction failed: "+compactErr.Error(), true)
+					} else {
+						compaction = &compacted
+						result.InputTokens += compacted.InputTokens
+						result.OutputTokens += compacted.OutputTokens
+						result.CacheReadInputTokens += compacted.CacheReadInputTokens
+						result.CacheCreationInputTokens += compacted.CacheCreationInputTokens
+						result.ContextCompactionInputTokens += compacted.InputTokens
+						result.ContextCompactionOutputTokens += compacted.OutputTokens
+						toolResults[compactIndex] = toolResult(toolCalls[compactIndex].ID, fmt.Sprintf("Context summary created (%d estimated tokens). The previous session history is archived in the session record.", compacted.SummaryTokens), false)
+					}
+				}
+			}
 			for index, call := range toolCalls {
 				if index >= len(toolResults) {
 					continue
@@ -492,6 +562,11 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				if toolResults[index].IsError {
 					continue
 				}
+				if tool, ok := s.Tools.byName[call.Name]; ok && tool.ModifiesWorkspace {
+					lastWriteOrder = toolOrder
+					reviewOnly = true
+					continue
+				}
 				switch call.Name {
 				case "create_file", "edit_file", "apply_patch":
 					lastWriteOrder = toolOrder
@@ -507,8 +582,19 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				reviewOnly = false
 			}
 			if len(toolResults) > 0 {
-				if err := s.appendToolResults(toolResults); err != nil {
-					return result, err
+				var appendErr error
+				if compaction != nil {
+					appendErr = s.appendToolResultsAndCompact(toolResults, compaction.Summary)
+				} else {
+					appendErr = s.appendToolResults(toolResults)
+				}
+				if appendErr != nil {
+					return result, appendErr
+				}
+				if compaction != nil {
+					result.ContextCompactions++
+					_, visible := s.modelContext(s.System)
+					s.emit(Event{Type: "context_compacted_model", Turn: turn, Tool: compactContextToolName, MessagesDropped: compaction.MessagesCompacted, EstimatedTokensBefore: compaction.EstimatedTokensBefore, EstimatedTokensAfter: estimateTextTokens(s.System) + estimateMessageTokens(visible), InputTokens: compaction.InputTokens, OutputTokens: compaction.OutputTokens, CacheReadInputTokens: compaction.CacheReadInputTokens, CacheCreationInputTokens: compaction.CacheCreationInputTokens, SummaryTokens: compaction.SummaryTokens})
 				}
 			}
 			s.emit(Event{Type: "turn_end", Turn: turn})

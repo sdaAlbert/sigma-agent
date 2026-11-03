@@ -13,3 +13,4 @@ evals/results/
 # Local build output and Python cache
 *.exe
 __pycache__/
+docs/PROJECT_STATUS.md

@@ -1,7 +1,8 @@
 {
-  "max_turns": 32,
-  "max_tool_calls": 64,
+  "max_turns": 128,
+  "max_tool_calls": 256,
   "max_context_tokens": 64000,
+  "context_compaction_threshold_tokens": 24000,
   "summary_tokens": 800,
   "max_tool_result_bytes": 16384,
   "max_retrieval_query_bytes": 8192,
@@ -12,5 +13,6 @@
   "go_test_image": "mswebench/zeromicro_m_go-zero:pr-2537",
   "skills_enabled": false,
   "memory_enabled": false,
+  "memory_auto_write": false,
   "web_search_enabled": false
 }

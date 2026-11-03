@@ -9,6 +9,7 @@ defaults. A file can contain only the settings that need changing.
   "max_turns": 128,
   "max_tool_calls": 256,
   "max_context_tokens": 64000,
+  "context_compaction_threshold_tokens": 24000,
   "summary_tokens": 800,
   "max_tool_result_bytes": 16384,
   "max_retrieval_query_bytes": 8192,
@@ -32,8 +33,9 @@ defaults. A file can contain only the settings that need changing.
 | --- | ---: | ---: | --- |
 | `max_turns` | 128 | 1–512 | Assistant/model turns allowed in one run |
 | `max_tool_calls` | 256 | 1–4096 | Tool calls allowed in one run |
-| `max_context_tokens` | 64000 | 512–1000000 | Estimated context budget passed to the model; if MiniMax explicitly rejects an oversized prompt, Sigma Agent compacts the request and retries up to three times |
-| `summary_tokens` | 800 | 0 to less than context budget | Space reserved for the compact transcript summary |
+| `max_context_tokens` | 64000 | 512–1000000 | Hard estimated context ceiling; proactive compaction normally uses the lower threshold below. If MiniMax explicitly rejects an oversized prompt, Sigma Agent compacts the request and retries up to three times |
+| `context_compaction_threshold_tokens` | `min(24000, max_context_tokens)` | 0–`max_context_tokens` | Proactively compact older conversation history when estimated input exceeds this threshold. `0` selects the automatic default. Compaction keeps recent complete turns, adds a bounded extractive summary, and records before/after estimates in the event log. |
+| `summary_tokens` | 800 | 0 to less than compaction threshold | Maximum estimated size of summaries produced by automatic or model-requested context compaction |
 | `max_tool_result_bytes` | 16384 | 1024–4194304 | Inline limit for each tool result. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. If artifact storage fails or reaches its cap, the inline result is truncated. |
 | `max_retrieval_query_bytes` | 8192 | 500–65536 | Maximum UTF-8 bytes accepted by `search_memory` (legacy setting name) |
 | `model_output_tokens` | 16384 | 256–65536 | Requested output limit for each model response; truncated responses get up to two continuation attempts |
@@ -52,9 +54,61 @@ defaults. A file can contain only the settings that need changing.
 
 Tool permissions are checked after argument validation and before the handler runs. A denied call is not executed; the Agent receives a tool error and the JSONL trace records `tool_permission_denied`. This first version supports policy-based allow/deny only; it does not prompt for interactive approval.
 
+The model can also call `compact_context` by itself when it judges that older
+conversation or tool output can be summarized without losing information needed
+for the task. This makes one additional model request, is bounded by
+`summary_tokens`, and is lossy. The generated handoff summary and its message
+boundary are saved with the session, so resumed sessions keep using the compact
+context. The full conversation remains in the session history. Run metadata
+reports `context_compactions`, `context_compaction_input_tokens`, and
+`context_compaction_output_tokens`. Run metadata and `model_usage` events also
+record input/output tokens plus cache-read and cache-creation input tokens when
+the provider returns them. For MiniMax's Anthropic-compatible API, `input_tokens`
+is normalized to include uncached, cache-read, and cache-creation input tokens;
+cache fields remain separate subsets for calculating reuse. The event log records
+`context_compacted_model` and any failed summary attempt. Automatic extractive
+compaction at `context_compaction_threshold_tokens` remains available as a
+separate safety mechanism.
+
 For quick one-run adjustments, `--max-turns`, `--max-tool-calls`,
-`--context-tokens`, and `--model-output-tokens` override the file. The HTTP
-service passes the same config path to each task worker.
+`--context-tokens`, `--context-compaction-tokens`, and `--model-output-tokens`
+override the file. The effective compaction threshold is written to `run.json`;
+each `context_compacted` event records estimated tokens before and after
+compaction. The HTTP service passes the same config path to each task worker.
+
+## External command tools
+
+`command_tools` can expose trusted local executables as Agent tools. Each call
+starts the configured command in the task workspace, writes one JSON object to
+stdin, and returns stdout as the tool result. Configure the tool's JSON Schema
+so the model knows the accepted arguments:
+
+```json
+{
+  "command_tools": [
+    {
+      "name": "my_repo_helper",
+      "description": "Run the repository-specific helper for a requested operation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"operation": {"type": "string"}},
+        "required": ["operation"],
+        "additionalProperties": false
+      },
+      "command": "python",
+      "args": ["tools/sigma_plugin.py"],
+      "modifies_workspace": false
+    }
+  ]
+}
+```
+
+The executable runs on the host with the user's permissions and inherited
+environment. Only add commands you trust. Tool permission rules apply using the
+configured tool name; output is capped before it enters model context. Set
+`modifies_workspace` to `true` if the tool may edit repository files; successful
+calls then trigger Sigma's normal test-and-diff review gate. This is a
+lightweight executable adapter, not a package manager or process sandbox.
 
 Interactive CLI setup uses `/login <provider>` to save API keys or the GitHub token and `/model`
 to show or select a provider/model. The initial API-key providers are MiniMax,
@@ -168,7 +222,7 @@ Keep durable, cross-task repository facts in `.sigma-agent/MEMORY.md`, one entry
 
 ```markdown
 - 2026-10-30 | kind: testing | source: docs/testing.md | Run focused package tests before the full Go suite.
-- 2026-10-30 | kind: architecture | source: ARCHITECTURE.md | The HTTP service delegates each task to a Sigma Agent process and persists its session by task ID.
+- 2026-10-30 | kind: architecture | source: docs/ARCHITECTURE.md | The HTTP service delegates each task to a Sigma Agent process and persists its session by task ID.
 ```
 
 Supported kinds are `testing`, `architecture`, `compatibility`, `pitfall`, and
@@ -222,10 +276,14 @@ Configure both services only for data permitted to leave or enter those
 systems. The current repository identity is local to a Git common directory, so
 separate clones do not share one memory namespace automatically.
 
-For a Hugging Face-compatible endpoint, set `SIGMA_AGENT_EMBEDDING_PROVIDER`
-(`huggingface` is the default), `SIGMA_AGENT_EMBEDDING_MODEL`, and optionally
-`HF_TOKEN` or `SIGMA_AGENT_EMBEDDING_API_KEY`. Qdrant defaults to
-`http://localhost:6333`; override it with `SIGMA_AGENT_QDRANT_URL` when needed.
+Persist local embedding endpoint settings in the Git-ignored
+`.secrets/embedding-config.json` (`provider`, `model`, and `base_url`); keep the
+credential in `.secrets/embedding-api-key`. Environment variables
+`SIGMA_AGENT_EMBEDDING_PROVIDER`, `SIGMA_AGENT_EMBEDDING_MODEL`,
+`SIGMA_AGENT_EMBEDDING_BASE_URL`, and `SIGMA_AGENT_EMBEDDING_API_KEY` override
+the local settings when set. For Hugging Face, `HF_TOKEN` can be used instead
+of the embedding API key. Qdrant defaults to `http://localhost:6333`; override
+it with `SIGMA_AGENT_QDRANT_URL` when needed.
 Start the existing Qdrant service and index a repository with:
 
 ```powershell
@@ -268,14 +326,15 @@ preserving the current task and tool-call/result pairing.
 
 ## GitHub MCP credentials
 
-Sigma Agent automatically enables GitHub MCP when it finds credentials. It checks
-`GITHUB_PERSONAL_ACCESS_TOKEN` first and then reads `.secrets/github-pat`
-relative to the current working directory. Keep the token in that local file;
-`.secrets/` is ignored by Git.
-The GitHub MCP server is started in Docker with the read-only `issues`, `repos`,
-and `pull_requests` toolsets. Start Sigma Agent from `go-runtime` so it finds the
-project-local credential file. A one-time setup helper can create or replace
-the credential file without echoing the token:
+Sigma Agent automatically enables GitHub MCP when it finds credentials. It
+checks the saved user configuration first, then
+`GITHUB_PERSONAL_ACCESS_TOKEN`, then `.secrets/github-pat` relative to the
+current working directory. Keep the fallback token in that local file;
+`.secrets/` is ignored by Git. The GitHub MCP server runs in Docker with the
+read-only `issues`, `repos`, and `pull_requests` toolsets unless scoped PR
+creation is explicitly enabled. Start Sigma Agent from `go-runtime` to find the
+project-local fallback credential. A helper can create or replace the file
+without echoing the token:
 
 ```powershell
 Set-Location C:\dev\Agent\coding-agent-harness\go-runtime

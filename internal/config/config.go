@@ -6,37 +6,53 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 )
 
 // Runtime contains tunable limits for one agent run. Values are intentionally
 // kept together so a run can be reproduced from its config file.
 type Runtime struct {
-	MaxTurns               int               `json:"max_turns"`
-	MaxToolCalls           int               `json:"max_tool_calls"`
-	MaxContextTokens       int               `json:"max_context_tokens"`
-	SummaryTokens          int               `json:"summary_tokens"`
-	MaxToolResultBytes     int               `json:"max_tool_result_bytes"`
-	MaxRetrievalQueryBytes int               `json:"max_retrieval_query_bytes"`
-	ModelOutputTokens      int               `json:"model_output_tokens"`
-	ToolTimeoutMS          int               `json:"tool_timeout_ms"`
-	ModelTimeoutMS         int               `json:"model_timeout_ms"`
-	MaxRetries             int               `json:"max_retries"`
-	GoTestImage            string            `json:"go_test_image"`
-	CommandExecutionImage  string            `json:"command_execution_image"`
-	AllowContainerNetwork  bool              `json:"allow_container_network"`
-	SkillsEnabled          bool              `json:"skills_enabled"`
-	MemoryEnabled          bool              `json:"memory_enabled"`
-	MemoryAutoWrite        bool              `json:"memory_auto_write"`
-	WebSearchEnabled       bool              `json:"web_search_enabled"`
-	DefaultToolPermission  string            `json:"default_tool_permission"`
-	ToolPermissions        map[string]string `json:"tool_permissions,omitempty"`
+	MaxTurns                         int               `json:"max_turns"`
+	MaxToolCalls                     int               `json:"max_tool_calls"`
+	MaxContextTokens                 int               `json:"max_context_tokens"`
+	ContextCompactionThresholdTokens int               `json:"context_compaction_threshold_tokens"`
+	SummaryTokens                    int               `json:"summary_tokens"`
+	MaxToolResultBytes               int               `json:"max_tool_result_bytes"`
+	MaxRetrievalQueryBytes           int               `json:"max_retrieval_query_bytes"`
+	ModelOutputTokens                int               `json:"model_output_tokens"`
+	ToolTimeoutMS                    int               `json:"tool_timeout_ms"`
+	ModelTimeoutMS                   int               `json:"model_timeout_ms"`
+	MaxRetries                       int               `json:"max_retries"`
+	GoTestImage                      string            `json:"go_test_image"`
+	CommandExecutionImage            string            `json:"command_execution_image"`
+	AllowContainerNetwork            bool              `json:"allow_container_network"`
+	SkillsEnabled                    bool              `json:"skills_enabled"`
+	MemoryEnabled                    bool              `json:"memory_enabled"`
+	MemoryAutoWrite                  bool              `json:"memory_auto_write"`
+	WebSearchEnabled                 bool              `json:"web_search_enabled"`
+	DefaultToolPermission            string            `json:"default_tool_permission"`
+	ToolPermissions                  map[string]string `json:"tool_permissions,omitempty"`
+	CommandTools                     []CommandTool     `json:"command_tools,omitempty"`
 }
+
+// CommandTool describes a trusted external executable exposed as one Agent tool.
+type CommandTool struct {
+	Name              string          `json:"name"`
+	Description       string          `json:"description"`
+	InputSchema       json.RawMessage `json:"input_schema"`
+	Command           string          `json:"command"`
+	Args              []string        `json:"args,omitempty"`
+	ModifiesWorkspace bool            `json:"modifies_workspace,omitempty"`
+}
+
+var commandToolName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`)
 
 func Defaults() Runtime {
 	return Runtime{
-		MaxTurns: 64, MaxToolCalls: 256, MaxContextTokens: 64000,
-		SummaryTokens: 800, MaxToolResultBytes: 16 * 1024,
+		MaxTurns: 128, MaxToolCalls: 256, MaxContextTokens: 64000,
+		ContextCompactionThresholdTokens: 0,
+		SummaryTokens:                    800, MaxToolResultBytes: 16 * 1024,
 		MaxRetrievalQueryBytes: 8 * 1024,
 		ModelOutputTokens:      16384, ToolTimeoutMS: 600000,
 		ModelTimeoutMS: 120000, MaxRetries: 2,
@@ -83,6 +99,12 @@ func (c Runtime) Validate() error {
 	if c.MaxContextTokens < 512 || c.MaxContextTokens > 1000000 {
 		return errors.New("max_context_tokens must be between 512 and 1000000")
 	}
+	if c.ContextCompactionThresholdTokens < 0 || c.ContextCompactionThresholdTokens > c.MaxContextTokens {
+		return errors.New("context_compaction_threshold_tokens must be 0 or no greater than max_context_tokens")
+	}
+	if c.SummaryTokens >= c.EffectiveContextCompactionThresholdTokens() {
+		return errors.New("summary_tokens must be less than context_compaction_threshold_tokens")
+	}
 	if c.SummaryTokens < 0 || c.SummaryTokens >= c.MaxContextTokens {
 		return errors.New("summary_tokens must be non-negative and less than max_context_tokens")
 	}
@@ -124,7 +146,52 @@ func (c Runtime) Validate() error {
 			return fmt.Errorf("tool_permissions[%q] must be 'allow' or 'deny'", name)
 		}
 	}
+	seenCommandTools := make(map[string]bool, len(c.CommandTools))
+	for i, tool := range c.CommandTools {
+		if !commandToolName.MatchString(tool.Name) {
+			return fmt.Errorf("command_tools[%d].name must start with a letter and contain only letters, digits, '_' or '-'", i)
+		}
+		if seenCommandTools[tool.Name] {
+			return fmt.Errorf("command_tools contains duplicate name %q", tool.Name)
+		}
+		seenCommandTools[tool.Name] = true
+		if strings.TrimSpace(tool.Description) == "" || len(tool.Description) > 4096 {
+			return fmt.Errorf("command_tools[%d].description must contain 1–4096 characters", i)
+		}
+		if strings.TrimSpace(tool.Command) == "" || strings.TrimSpace(tool.Command) != tool.Command {
+			return fmt.Errorf("command_tools[%d].command must be a non-empty executable", i)
+		}
+		if len(tool.Args) > 64 {
+			return fmt.Errorf("command_tools[%d].args may contain at most 64 arguments", i)
+		}
+		for _, arg := range tool.Args {
+			if len(arg) > 4096 {
+				return fmt.Errorf("command_tools[%d] argument exceeds 4096 characters", i)
+			}
+		}
+		if len(tool.InputSchema) == 0 || len(tool.InputSchema) > 32*1024 || !json.Valid(tool.InputSchema) {
+			return fmt.Errorf("command_tools[%d].input_schema must be valid JSON no larger than 32 KiB", i)
+		}
+		var schema struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil || schema.Type != "object" {
+			return fmt.Errorf("command_tools[%d].input_schema must define an object schema", i)
+		}
+	}
 	return nil
+}
+
+// EffectiveContextCompactionThresholdTokens returns the configured threshold,
+// or a bounded default that fits within the model context budget.
+func (c Runtime) EffectiveContextCompactionThresholdTokens() int {
+	if c.ContextCompactionThresholdTokens > 0 {
+		return c.ContextCompactionThresholdTokens
+	}
+	if c.MaxContextTokens > 0 && c.MaxContextTokens < 24000 {
+		return c.MaxContextTokens
+	}
+	return 24000
 }
 
 func validToolPermission(permission string) bool {

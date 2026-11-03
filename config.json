@@ -1,15 +1,19 @@
 {
-  "max_turns": 64,
-  "max_tool_calls": 64,
+  "max_turns": 128,
+  "max_tool_calls": 256,
   "max_context_tokens": 64000,
+  "context_compaction_threshold_tokens": 24000,
   "summary_tokens": 800,
   "max_tool_result_bytes": 16384,
   "max_retrieval_query_bytes": 8192,
   "model_output_tokens": 16384,
-  "tool_timeout_ms": 60000,
+  "tool_timeout_ms": 600000,
   "model_timeout_ms": 120000,
   "max_retries": 2,
   "go_test_image": "golang:1.26",
+  "command_execution_image": "golang:1.26",
+  "allow_container_network": false,
   "memory_enabled": true,
+  "memory_auto_write": false,
   "web_search_enabled": true
 }

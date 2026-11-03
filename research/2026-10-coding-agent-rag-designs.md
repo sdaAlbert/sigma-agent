@@ -3,7 +3,7 @@
 **Reviewed:** 2026-10-30
 **Scope:** First-party docs/source and a primary research paper. This is a design survey, not an independent product benchmark.
 
-Sigma Agent already has 80-line/12-line-overlap chunks, content hashes, BM25, optional embeddings + Qdrant, and reciprocal-rank fusion; its retrieval benchmark measures path-level Recall@5 and MRR ([runtime architecture](../ARCHITECTURE.md)). The designs below suggest useful complementary signals and operational details.
+Sigma Agent already has 80-line/12-line-overlap chunks, content hashes, BM25, optional embeddings + Qdrant, and reciprocal-rank fusion; its retrieval benchmark measures path-level Recall@5 and MRR ([runtime architecture](../docs/ARCHITECTURE.md)). The designs below suggest useful complementary signals and operational details.
 
 ## Actual vector RAG and hybrid indexes
 

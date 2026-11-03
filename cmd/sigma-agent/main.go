@@ -49,6 +49,7 @@ func main() {
 	maxTurns := flag.Int("max-turns", 0, "override config: maximum assistant turns")
 	maxToolCalls := flag.Int("max-tool-calls", 0, "override config: maximum tool calls per task")
 	contextTokens := flag.Int("context-tokens", 0, "override config: maximum estimated context tokens")
+	contextCompactionTokens := flag.Int("context-compaction-tokens", 0, "override config: proactively compact context above this estimated token count")
 	modelOutputTokens := flag.Int("model-output-tokens", 0, "override config: maximum model output tokens")
 	sessionID := flag.String("session-id", "", "use this id for a new session")
 	eventFile := flag.String("event-file", "", "append agent lifecycle events to this JSONL file")
@@ -79,6 +80,12 @@ func main() {
 	}
 	if *contextTokens > 0 {
 		runtimeConfig.MaxContextTokens = *contextTokens
+		if runtimeConfig.ContextCompactionThresholdTokens > *contextTokens {
+			runtimeConfig.ContextCompactionThresholdTokens = *contextTokens
+		}
+	}
+	if *contextCompactionTokens > 0 {
+		runtimeConfig.ContextCompactionThresholdTokens = *contextCompactionTokens
 	}
 	if *modelOutputTokens > 0 {
 		runtimeConfig.ModelOutputTokens = *modelOutputTokens
@@ -420,6 +427,17 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if err != nil {
 		return err
 	}
+	tools = append(tools, agent.CompactContextTool())
+	if len(runtimeConfig.CommandTools) > 0 {
+		plugins := make([]agent.CommandPlugin, 0, len(runtimeConfig.CommandTools))
+		for _, plugin := range runtimeConfig.CommandTools {
+			plugins = append(plugins, agent.CommandPlugin{
+				Name: plugin.Name, Description: plugin.Description, InputSchema: plugin.InputSchema,
+				Command: plugin.Command, Args: append([]string(nil), plugin.Args...), ModifiesWorkspace: plugin.ModifiesWorkspace,
+			})
+		}
+		tools = append(tools, agent.CommandPluginTools(workspace, plugins)...)
+	}
 	commandTools, err := sigmaagent.CommandExecutionToolsWithEnvironmentPreparation(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, startingCommit)
 	if err != nil {
 		return fmt.Errorf("configure command execution tool: %w", err)
@@ -506,6 +524,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if useMemorySearch {
 		systemPrompt = projectGuidance.SystemPromptWithMemorySearch(codingSystemPrompt)
 	}
+	systemPrompt += "\n\nCONTEXT COMPACTION: You may call compact_context by itself when earlier conversation or tool output has become long and a concise handoff can preserve the active task. It makes an additional model request and is lossy, so use it selectively; the recent turns and full session record are retained."
 	if activePushBranch != "" {
 		systemPrompt += fmt.Sprintf("\n\nGit publishing is explicitly enabled for branch %q only. Review the diff and run relevant tests before committing. Commit and push only when the user explicitly requested it. Use git_commit before git_push; git_push can only target this branch on origin and cannot force-push or create a pull request.", activePushBranch)
 	}
@@ -526,7 +545,11 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	session.ToolOutputs = toolOutputStore
 	session.BeforeTool = configuredToolPolicy(runtimeConfig)
 	session.Limits = agent.Limits{MaxTurns: runtimeConfig.MaxTurns, MaxToolCalls: runtimeConfig.MaxToolCalls, MaxToolResultBytes: runtimeConfig.MaxToolResultBytes, ToolTimeout: time.Duration(runtimeConfig.ToolTimeoutMS) * time.Millisecond}
-	session.Context = agent.WindowContextManager{MaxTokens: runtimeConfig.MaxContextTokens, SummaryTokens: runtimeConfig.SummaryTokens}
+	session.Context = agent.WindowContextManager{
+		MaxTokens:                 runtimeConfig.MaxContextTokens,
+		CompactionThresholdTokens: runtimeConfig.EffectiveContextCompactionThresholdTokens(),
+		SummaryTokens:             runtimeConfig.SummaryTokens,
+	}
 	session.OnEvent = eventSink
 	ctx, cancel := signalContext()
 	defer cancel()
@@ -585,7 +608,14 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		"tool_output_artifacts_dir": filepath.Join(sessionDir, "tool_outputs"),
 		"memory_write":              memoryWrite,
 		"turns":                     result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
-		"output_tokens": result.OutputTokens, "finished_at": time.Now().UTC(), "error": errorString(runErr),
+		"output_tokens": result.OutputTokens, "cache_read_input_tokens": result.CacheReadInputTokens,
+		"cache_creation_input_tokens": result.CacheCreationInputTokens, "context_compactions": result.ContextCompactions,
+		"context_compaction_input_tokens":     result.ContextCompactionInputTokens,
+		"context_compaction_output_tokens":    result.ContextCompactionOutputTokens,
+		"max_context_tokens":                  runtimeConfig.MaxContextTokens,
+		"context_compaction_threshold_tokens": runtimeConfig.EffectiveContextCompactionThresholdTokens(),
+		"summary_tokens":                      runtimeConfig.SummaryTokens,
+		"finished_at":                         time.Now().UTC(), "error": errorString(runErr),
 	}, "", "  ")
 	if writeErr := os.WriteFile(filepath.Join(runDir, "run.json"), metadata, 0o600); writeErr != nil && runErr == nil {
 		runErr = writeErr
@@ -596,7 +626,12 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"), "push_branch": activePushBranch,
 			"turns": result.Turns, "tool_calls": result.ToolCalls,
 			"input_tokens": result.InputTokens, "output_tokens": result.OutputTokens,
-			"memory_write": memoryWrite,
+			"cache_read_input_tokens":          result.CacheReadInputTokens,
+			"cache_creation_input_tokens":      result.CacheCreationInputTokens,
+			"context_compactions":              result.ContextCompactions,
+			"context_compaction_input_tokens":  result.ContextCompactionInputTokens,
+			"context_compaction_output_tokens": result.ContextCompactionOutputTokens,
+			"memory_write":                     memoryWrite,
 		}
 		if runErr != nil {
 			completion["type"] = "run_failed"
@@ -701,7 +736,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /model, /diff, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
+	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /model, /diff, /tree, /branch <entry-id>, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
 	input := make(chan inputEvent, 1)
 	var scanner *bufio.Scanner
 	if len(inputScanners) > 0 {
@@ -822,7 +857,20 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintln(os.Stderr, "\nAbort requested; session will remain open.")
 				}
 			case line == "/help":
-				fmt.Fprintln(os.Stderr, "Enter a coding instruction. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /model shows or switches models between turns; /diff shows the patch; /abort stops the active turn; /exit saves and ends the session.")
+				fmt.Fprintln(os.Stderr, "Enter a coding instruction. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /model shows or switches models between turns; /diff shows the patch; /tree lists conversation branches; /branch <entry-id> moves to an earlier point and starts a new branch; /abort stops the active turn; /exit saves and ends the session.")
+			case line == "/tree":
+				printSessionTree(session)
+			case line == "/branch" || strings.HasPrefix(line, "/branch "):
+				entryID := strings.TrimSpace(strings.TrimPrefix(line, "/branch"))
+				if activeDone != nil {
+					fmt.Fprintln(os.Stderr, "Wait for the current turn to finish before branching.")
+				} else if entryID == "" {
+					fmt.Fprintln(os.Stderr, "Usage: /branch <entry-id> (see /tree)")
+				} else if err := session.BranchFrom(entryID); err != nil {
+					fmt.Fprintf(os.Stderr, "Could not branch session: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "Moved to entry %s. Enter a new instruction to continue on this branch.\n", entryID)
+				}
 			case line == "/model" || strings.HasPrefix(line, "/model "):
 				if activeDone != nil {
 					fmt.Fprintln(os.Stderr, "Wait for the current turn to finish before changing models.")
@@ -911,6 +959,47 @@ func addResult(total *agent.Result, current agent.Result) {
 	total.ToolCalls += current.ToolCalls
 	total.InputTokens += current.InputTokens
 	total.OutputTokens += current.OutputTokens
+	total.CacheReadInputTokens += current.CacheReadInputTokens
+	total.CacheCreationInputTokens += current.CacheCreationInputTokens
+	total.ContextCompactions += current.ContextCompactions
+	total.ContextCompactionInputTokens += current.ContextCompactionInputTokens
+	total.ContextCompactionOutputTokens += current.ContextCompactionOutputTokens
+}
+
+func printSessionTree(session *agent.Session) {
+	entries := session.Entries()
+	head := session.HeadID()
+	if len(entries) == 0 {
+		fmt.Fprintln(os.Stderr, "This session has no conversation entries yet.")
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Session history (use the full entry ID with /branch):")
+	for _, entry := range entries {
+		marker := " "
+		if entry.ID == head {
+			marker = "*"
+		}
+		detail := entry.Type
+		if entry.Type == "model_change" {
+			detail += ": " + entry.ModelID
+		} else if entry.Message != nil {
+			for _, block := range entry.Message.Content {
+				if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+					detail += ": " + truncateText(strings.TrimSpace(block.Text), 88)
+					break
+				}
+			}
+		}
+		fmt.Fprintf(os.Stderr, "%s %s  %s  %s\n", marker, entry.ID, entry.CreatedAt.Local().Format("2006-01-02 15:04:05"), detail)
+	}
+}
+
+func truncateText(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 func configuredToolPolicy(runtimeConfig config.Runtime) agent.ToolPolicy {

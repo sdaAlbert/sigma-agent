@@ -11,6 +11,7 @@ import (
 type PreparedContext struct {
 	System          string
 	Messages        []Message
+	Compacted       bool
 	DroppedMessages int
 	EstimatedBefore int
 	EstimatedAfter  int
@@ -23,8 +24,9 @@ type ContextPreparer interface {
 // WindowContextManager keeps the canonical transcript intact and sends a compact,
 // extractive summary plus the newest complete turns to the provider.
 type WindowContextManager struct {
-	MaxTokens     int
-	SummaryTokens int
+	MaxTokens                 int
+	CompactionThresholdTokens int
+	SummaryTokens             int
 }
 
 func (w WindowContextManager) Prepare(system string, messages []Message) (PreparedContext, error) {
@@ -32,16 +34,20 @@ func (w WindowContextManager) Prepare(system string, messages []Message) (Prepar
 	if maxTokens <= 0 {
 		maxTokens = 24000
 	}
+	compactionThreshold := w.CompactionThresholdTokens
+	if compactionThreshold <= 0 || compactionThreshold > maxTokens {
+		compactionThreshold = maxTokens
+	}
 	summaryBudget := w.SummaryTokens
 	if summaryBudget <= 0 {
 		summaryBudget = 800
 	}
 	merged := mergeAdjacentMessages(messages)
 	before := estimateTextTokens(system) + estimateMessageTokens(merged)
-	if before <= maxTokens {
+	if before <= compactionThreshold {
 		return PreparedContext{System: system, Messages: merged, EstimatedBefore: before, EstimatedAfter: before}, nil
 	}
-	baseBudget := maxTokens - estimateTextTokens(system) - summaryBudget
+	baseBudget := compactionThreshold - estimateTextTokens(system) - summaryBudget
 	if baseBudget < 128 {
 		return PreparedContext{}, errors.New("system prompt leaves too little room for conversation context")
 	}
@@ -71,7 +77,7 @@ func (w WindowContextManager) Prepare(system string, messages []Message) (Prepar
 			break
 		}
 		if start < 0 {
-			return PreparedContext{}, fmt.Errorf("latest complete turn exceeds context budget of %d estimated tokens after tool-result compaction", maxTokens)
+			return PreparedContext{}, fmt.Errorf("latest complete turn exceeds compaction budget of %d estimated tokens after tool-result compaction", compactionThreshold)
 		}
 	}
 	summary := summarizeMessages(merged[:start], summaryBudget)
@@ -82,11 +88,11 @@ func (w WindowContextManager) Prepare(system string, messages []Message) (Prepar
 	}
 	retained := mergeAdjacentMessages(merged[start:])
 	after := estimateTextTokens(preparedSystem) + estimateMessageTokens(retained)
-	if after > maxTokens {
-		return PreparedContext{}, fmt.Errorf("compacted context is still over budget: %d > %d estimated tokens", after, maxTokens)
+	if after > compactionThreshold {
+		return PreparedContext{}, fmt.Errorf("compacted context is still over budget: %d > %d estimated tokens", after, compactionThreshold)
 	}
 	return PreparedContext{
-		System: preparedSystem, Messages: retained, DroppedMessages: start,
+		System: preparedSystem, Messages: retained, Compacted: true, DroppedMessages: start,
 		EstimatedBefore: before, EstimatedAfter: after,
 	}, nil
 }
@@ -205,12 +211,21 @@ func estimateTextTokens(text string) int {
 }
 
 func summarizeMessages(messages []Message, maxTokens int) string {
+	if maxTokens <= 0 {
+		return ""
+	}
+	initialRequest := ""
 	var records []string
 	for _, message := range messages {
 		for _, block := range message.Content {
 			switch {
 			case message.Role == "user" && block.Type == "text":
-				records = append(records, "User: "+truncateRunes(strings.TrimSpace(block.Text), 220))
+				text := strings.TrimSpace(block.Text)
+				if initialRequest == "" && text != "" {
+					initialRequest = "Original user request: " + text
+					continue
+				}
+				records = append(records, "User: "+truncateRunes(text, 220))
 			case message.Role == "assistant" && block.Type == "text":
 				records = append(records, "Agent: "+truncateRunes(strings.TrimSpace(block.Text), 180))
 			case block.Type == "tool_use":
@@ -220,21 +235,54 @@ func summarizeMessages(messages []Message, maxTokens int) string {
 			}
 		}
 	}
-	if len(records) == 0 {
-		return ""
+	pinnedBudget := maxTokens * 2 / 3
+	pinned := truncateTextToTokens(initialRequest, pinnedBudget)
+	remainingBudget := maxTokens - estimateTextTokens(pinned)
+	if pinned != "" {
+		remainingBudget--
 	}
-	for len(records) > 1 && estimateTextTokens(strings.Join(records, "\n")) > maxTokens {
+	if remainingBudget < 0 {
+		remainingBudget = 0
+	}
+	if len(records) == 0 {
+		return pinned
+	}
+	for len(records) > 1 && estimateTextTokens(strings.Join(records, "\n")) > remainingBudget {
 		records = records[1:]
 	}
 	joined := strings.Join(records, "\n")
-	for estimateTextTokens(joined) > maxTokens {
-		runes := []rune(joined)
-		if len(runes) <= 1 {
-			return ""
-		}
-		joined = "…" + string(runes[len(runes)/2:])
+	joined = truncateTextToTokens(joined, remainingBudget)
+	if pinned == "" {
+		return joined
 	}
-	return joined
+	if joined == "" {
+		return pinned
+	}
+	return pinned + "\n" + joined
+}
+
+func truncateTextToTokens(text string, maxTokens int) string {
+	if maxTokens <= 0 {
+		return ""
+	}
+	if estimateTextTokens(text) <= maxTokens {
+		return text
+	}
+	runes := []rune(text)
+	low, high := 0, len(runes)
+	for low < high {
+		mid := low + (high-low+1)/2
+		candidate := string(runes[:mid]) + "…"
+		if estimateTextTokens(candidate) <= maxTokens {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	if low == 0 {
+		return "…"
+	}
+	return string(runes[:low]) + "…"
 }
 
 func truncateRunes(text string, maxRunes int) string {

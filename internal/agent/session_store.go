@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,17 +26,19 @@ func ValidSessionID(id string) bool { return validSessionID.MatchString(id) }
 // PendingTools are persisted before any handler runs so recovery never repeats an
 // operation whose outcome may be unknown.
 type SessionSnapshot struct {
-	Version      int            `json:"version"`
-	ID           string         `json:"id"`
-	System       string         `json:"system_prompt"`
-	Messages     []Message      `json:"messages"`
-	Steering     []Message      `json:"steering_queue,omitempty"`
-	FollowUps    []Message      `json:"follow_up_queue,omitempty"`
-	PendingTools []ContentBlock `json:"pending_tools,omitempty"`
-	Entries      []SessionEntry `json:"entries,omitempty"`
-	Head         string         `json:"head,omitempty"`
-	ModelID      string         `json:"model_id,omitempty"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	Version            int            `json:"version"`
+	ID                 string         `json:"id"`
+	System             string         `json:"system_prompt"`
+	Messages           []Message      `json:"messages"`
+	CompactionSummary  string         `json:"compaction_summary,omitempty"`
+	CompactionBoundary int            `json:"compaction_boundary,omitempty"`
+	Steering           []Message      `json:"steering_queue,omitempty"`
+	FollowUps          []Message      `json:"follow_up_queue,omitempty"`
+	PendingTools       []ContentBlock `json:"pending_tools,omitempty"`
+	Entries            []SessionEntry `json:"entries,omitempty"`
+	Head               string         `json:"head,omitempty"`
+	ModelID            string         `json:"model_id,omitempty"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 // SessionEntry is one immutable point in a session tree. Message and model-change
@@ -58,6 +61,38 @@ type SessionStore interface {
 type FileSessionStore struct {
 	Directory string
 	mu        sync.Mutex
+}
+
+type SavedSession struct {
+	ID        string    `json:"id"`
+	ModelID   string    `json:"model_id,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Messages  int       `json:"messages"`
+}
+
+// List returns valid session snapshots ordered from newest to oldest.
+func (s *FileSessionStore) List() ([]SavedSession, error) {
+	entries, err := os.ReadDir(s.Directory)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	var sessions []SavedSession
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if !ValidSessionID(id) {
+			continue
+		}
+		snapshot, err := s.Load(id)
+		if err != nil {
+			continue
+		}
+		sessions = append(sessions, SavedSession{ID: id, ModelID: snapshot.ModelID, UpdatedAt: snapshot.UpdatedAt, Messages: len(snapshot.Messages)})
+	}
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt) })
+	return sessions, nil
 }
 
 func NewFileSessionStore(directory string) (*FileSessionStore, error) {
@@ -149,6 +184,7 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 	session := &Session{
 		ID: snapshot.ID, System: snapshot.System, Model: model, Tools: tools, Store: store,
 		messages: cloneMessages(snapshot.Messages), steering: cloneMessages(snapshot.Steering),
+		compactionSummary: snapshot.CompactionSummary, compactionBoundary: snapshot.CompactionBoundary,
 		followUps: cloneMessages(snapshot.FollowUps), pendingTools: append([]ContentBlock(nil), snapshot.PendingTools...),
 		entries: cloneSessionEntries(snapshot.Entries), head: snapshot.Head, modelID: snapshot.ModelID,
 	}
@@ -165,6 +201,10 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 			return nil, err
 		}
 		session.messages = messages
+	}
+	if session.compactionSummary == "" || session.compactionBoundary < 0 || session.compactionBoundary > len(session.messages) {
+		session.compactionSummary = ""
+		session.compactionBoundary = 0
 	}
 	needsSave := snapshot.Version != sessionSchemaVersion
 	if len(session.pendingTools) > 0 {
@@ -188,6 +228,7 @@ func (s *Session) snapshotLocked() SessionSnapshot {
 	return SessionSnapshot{
 		Version: sessionSchemaVersion, ID: s.ID, System: s.System,
 		Messages: cloneMessages(s.messages), Steering: cloneMessages(s.steering),
+		CompactionSummary: s.compactionSummary, CompactionBoundary: s.compactionBoundary,
 		FollowUps: cloneMessages(s.followUps), PendingTools: append([]ContentBlock(nil), s.pendingTools...),
 		Entries: cloneSessionEntries(s.entries), Head: s.head, ModelID: s.modelID,
 		UpdatedAt: time.Now().UTC(),
@@ -313,11 +354,16 @@ func (s *Session) BranchFrom(entryID string) error {
 	if err != nil {
 		return err
 	}
+	if len(messages) > 0 && !validTranscriptSuffix(messages) {
+		return fmt.Errorf("session entry %q ends inside an incomplete tool exchange and cannot be a branch point", entryID)
+	}
 	previousMessages, previousHead := s.messages, s.head
 	previousSteering, previousFollowUps := s.steering, s.followUps
+	previousCompactionSummary, previousCompactionBoundary := s.compactionSummary, s.compactionBoundary
 	previousModelID := s.modelID
 	s.messages, s.head = messages, entryID
 	s.steering, s.followUps = nil, nil
+	s.compactionSummary, s.compactionBoundary = "", 0
 	for current := entryID; current != ""; {
 		entry := s.entryByID(current)
 		if entry.Type == "model_change" {
@@ -329,6 +375,7 @@ func (s *Session) BranchFrom(entryID string) error {
 	if err := s.persistLocked(); err != nil {
 		s.messages, s.head = previousMessages, previousHead
 		s.steering, s.followUps = previousSteering, previousFollowUps
+		s.compactionSummary, s.compactionBoundary = previousCompactionSummary, previousCompactionBoundary
 		s.modelID = previousModelID
 		return fmt.Errorf("persist session branch: %w", err)
 	}
@@ -339,6 +386,12 @@ func (s *Session) Entries() []SessionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneSessionEntries(s.entries)
+}
+
+func (s *Session) HeadID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.head
 }
 
 func (s *Session) entryByID(id string) SessionEntry {

@@ -28,16 +28,35 @@ type vectorConfig struct {
 	client    *http.Client
 }
 
+type localEmbeddingSettings struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	BaseURL  string `json:"base_url"`
+}
+
 func newVectorConfig() *vectorConfig {
-	if strings.TrimSpace(os.Getenv("SIGMA_AGENT_EMBEDDING_MODEL")) == "" {
-		return nil
+	var settings localEmbeddingSettings
+	if data, err := os.ReadFile(filepath.Join(".secrets", "embedding-config.json")); err == nil {
+		_ = json.Unmarshal(data, &settings)
 	}
 	provider := strings.TrimSpace(os.Getenv("SIGMA_AGENT_EMBEDDING_PROVIDER"))
+	if provider == "" {
+		provider = strings.TrimSpace(settings.Provider)
+	}
 	if provider == "" {
 		provider = "huggingface"
 	}
 	base := strings.TrimRight(strings.TrimSpace(os.Getenv("SIGMA_AGENT_EMBEDDING_BASE_URL")), "/")
 	model := strings.TrimSpace(os.Getenv("SIGMA_AGENT_EMBEDDING_MODEL"))
+	if base == "" {
+		base = strings.TrimRight(strings.TrimSpace(settings.BaseURL), "/")
+	}
+	if model == "" {
+		model = strings.TrimSpace(settings.Model)
+	}
+	if model == "" {
+		return nil
+	}
 	key := strings.TrimSpace(os.Getenv("SIGMA_AGENT_EMBEDDING_API_KEY"))
 	if key == "" && provider == "openai-compatible" {
 		if data, err := os.ReadFile(filepath.Join(".secrets", "embedding-api-key")); err == nil {

@@ -358,8 +358,10 @@ type sseEnvelope struct {
 	Message struct {
 		Content []ContentBlock `json:"content"`
 		Usage   struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 	ContentBlock ContentBlock `json:"content_block"`
@@ -370,8 +372,10 @@ type sseEnvelope struct {
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
 	Error struct {
 		Type    string `json:"type"`
@@ -401,8 +405,10 @@ func decodeMessagesStream(body io.Reader, onEvent func(ModelEvent)) (ModelRespon
 		}
 		switch event.Type {
 		case "message_start":
-			response.InputTokens = event.Message.Usage.InputTokens
+			response.InputTokens = event.Message.Usage.InputTokens + event.Message.Usage.CacheReadInputTokens + event.Message.Usage.CacheCreationInputTokens
 			response.OutputTokens = event.Message.Usage.OutputTokens
+			response.CacheReadInputTokens = event.Message.Usage.CacheReadInputTokens
+			response.CacheCreationInputTokens = event.Message.Usage.CacheCreationInputTokens
 		case "content_block_start":
 			indices[event.Index] = len(response.Content)
 			block := event.ContentBlock
@@ -456,11 +462,17 @@ func decodeMessagesStream(body io.Reader, onEvent func(ModelEvent)) (ModelRespon
 			}
 		case "message_delta":
 			response.StopReason = event.Delta.StopReason
-			if event.Usage.InputTokens != 0 {
-				response.InputTokens = event.Usage.InputTokens
+			if event.Usage.InputTokens != 0 || event.Usage.CacheReadInputTokens != 0 || event.Usage.CacheCreationInputTokens != 0 {
+				response.InputTokens = event.Usage.InputTokens + event.Usage.CacheReadInputTokens + event.Usage.CacheCreationInputTokens
 			}
 			if event.Usage.OutputTokens != 0 {
 				response.OutputTokens = event.Usage.OutputTokens
+			}
+			if event.Usage.CacheReadInputTokens != 0 {
+				response.CacheReadInputTokens = event.Usage.CacheReadInputTokens
+			}
+			if event.Usage.CacheCreationInputTokens != 0 {
+				response.CacheCreationInputTokens = event.Usage.CacheCreationInputTokens
 			}
 		case "error":
 			message := event.Error.Message

@@ -1,3 +1,5 @@
 {
-  "memory_enabled": false
+  "context_compaction_threshold_tokens": 24000,
+  "memory_enabled": false,
+  "memory_auto_write": false
 }

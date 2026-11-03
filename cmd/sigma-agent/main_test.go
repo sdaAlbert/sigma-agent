@@ -88,7 +88,7 @@ func TestInteractiveSessionSteersActiveRunAtSafeTurn(t *testing.T) {
 	workspace := t.TempDir()
 	finished := make(chan error, 1)
 	go func() {
-		_, runErr := interactiveSession(ctx, session, workspace, "start the task", false, "", config.Defaults())
+		_, runErr := interactiveSession(ctx, session, workspace, "start the task", false, "", config.Runtime{})
 		finished <- runErr
 	}()
 	steeringQueued := make(chan struct{}, 2)
