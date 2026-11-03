@@ -16,9 +16,8 @@
 | go-zero PR #1456 | Two attempts were interrupted; the user chose not to resume on 2026-11-03. | No finalized evaluator result. | Abandoned with no score; excluded from denominators. [Record](results/2026-11-03-multiswe-go-zero-1456-abandoned.md) |
 | go-zero PR #1792 | No run report or matching benchmark artifacts found. | A previous reference to deleting/running “1792” appears to have been a typo for #1783; the recorded successful task is PR #1783 / issue #1729. | Not run based on the available local evidence. |
 
-## Separate experiments, not issue-fix scores
+## Other evaluator controls, not issue-fix scores
 
-- **VibeMemBench `google__yamlfmt-42`:** the paired memory/no-memory run is not a Go-zero issue. Both evaluator arms were invalidated by overlapping test patches before tests ran. Keep its artifacts separate; this dataset was explicitly left in place.
 - **PR #2032 gold controls:** demonstrate that the official evaluator can score the task, but are reference controls, not Agent successes.
 - **PR #2283 gold control:** validates the test image/evaluator; it is not an Agent run.
 
@@ -30,4 +29,4 @@ Do not present these runs as a stable pass rate or as proof of parity with Pi. F
 
 ## Cleanup record
 
-Cleanup was attempted on 2026-11-02 for two superseded #2283 evaluator patch variants (`candidate/` and `candidate-normalized/`) and an unreferenced duplicate checkout under `var/benchmark-data/pi-go-zero-2283-2026-11-02/workspace/`. The desktop filesystem policy blocked the recursive deletion, so **these three directories are still present** (about 25 MB combined). The canonical evaluator report, run transcripts, benchmark datasets, Sigma patches, and VibeMemBench data remain untouched.
+Cleanup was attempted on 2026-11-02 for two superseded #2283 evaluator patch variants (`candidate/` and `candidate-normalized/`) and an unreferenced duplicate checkout under `var/benchmark-data/pi-go-zero-2283-2026-11-02/workspace/`. The desktop filesystem policy blocked the recursive deletion, so **these three directories are still present** (about 25 MB combined). The canonical evaluator report, run transcripts, benchmark datasets, and Sigma patches remain untouched.
