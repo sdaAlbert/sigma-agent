@@ -76,6 +76,41 @@ override the file. The effective compaction threshold is written to `run.json`;
 each `context_compacted` event records estimated tokens before and after
 compaction. The HTTP service passes the same config path to each task worker.
 
+## Packages and MCP servers
+
+`config.json` holds the runtime limits. Packages and MCP servers are
+configured separately, because they are installed artifacts rather than
+tunable limits.
+
+- Packages are installed with `sigma-agent --install npm:<name>`, listed with
+  `sigma-agent --list-packages`, and recorded in a scope registry
+  (`~/.sigma-agent/packages.json` for the user scope,
+  `<repo>/.sigma-agent/packages.json` for the project scope).
+- MCP servers are configured in `mcp.json`, using the `mcpServers` shape shared
+  by other MCP clients. Sigma Agent reads `~/.sigma-agent/mcp.json` and
+  `<repo>/.sigma-agent/mcp.json`, and also reads `<repo>/.pi/mcp.json`.
+
+```json
+{
+  "mcpServers": {
+    "web": {
+      "command": "node",
+      "args": ["./dist/mcp-cli.js"],
+      "package": "pi-web-access"
+    }
+  }
+}
+```
+
+A server that names a `package` starts with the package directory as its
+working directory, and `./`-prefixed arguments are resolved against the package
+root. Server tools are exposed as `mcp__<server>__<tool>` and pass through the
+configured tool policy. `sigma-agent --list-mcp` connects to every enabled
+server and prints the tools it contributes.
+
+See [Packages and MCP servers](PACKAGES.md) for the package format, the
+supported sources, and the current limits.
+
 ## External command tools
 
 `command_tools` can expose trusted local executables as Agent tools. Each call

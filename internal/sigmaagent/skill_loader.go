@@ -16,9 +16,22 @@ type skillLocation struct {
 	standaloneRootMarkdown bool
 }
 
+// PackageSkills describes the Skill directories contributed by an installed
+// package. The package directory bounds the Skill resources so a Skill can
+// only read files that ship with its own package.
+type PackageSkills struct {
+	// Root is the package directory that bounds the Skill resources.
+	Root string
+	// Dirs are the directories that hold SKILL.md files.
+	Dirs []string
+	// Source names the package in diagnostics.
+	Source string
+}
+
 // discoverSkills follows the portable Pi/Agent Skills directory layouts.
-// Project Skills take precedence over user Skills with the same name.
-func discoverSkills(projectRoot string) ([]SkillSummary, error) {
+// Project Skills take precedence over user Skills with the same name. Skills
+// contributed by installed packages are searched last.
+func discoverSkills(projectRoot string, packageSkills []PackageSkills) ([]SkillSummary, error) {
 	locations := []skillLocation{
 		{path: filepath.Join(projectRoot, ".agents", "skills"), boundary: projectRoot, source: "project .agents/skills"},
 		{path: filepath.Join(projectRoot, ".pi", "skills"), boundary: projectRoot, source: "project .pi/skills", standaloneRootMarkdown: true},
@@ -28,6 +41,11 @@ func discoverSkills(projectRoot string) ([]SkillSummary, error) {
 			skillLocation{path: filepath.Join(home, ".agents", "skills"), boundary: home, source: "user .agents/skills"},
 			skillLocation{path: filepath.Join(home, ".pi", "agent", "skills"), boundary: home, source: "user .pi/agent/skills", standaloneRootMarkdown: true},
 		)
+	}
+	for _, packageSkill := range packageSkills {
+		for _, dir := range packageSkill.Dirs {
+			locations = append(locations, skillLocation{path: dir, boundary: packageSkill.Root, source: "package " + packageSkill.Source})
+		}
 	}
 
 	var skills []SkillSummary

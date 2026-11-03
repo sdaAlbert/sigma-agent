@@ -90,6 +90,8 @@ Docker 命令容器默认无法访问外网。如果任务需要下载依赖，�
 go run ./cmd/sigma-agent --repo C:\work\target-repository --interactive
 ```
 
+要在同一个 TUI 中完成 setup 和对话，运行 `go run ./cmd/sigma-agent --tui --repo C:\work\target-repository`。仓库/模型/凭据设置、多行任务输入、流式输出和会话命令都在 TUI 内；按 `Ctrl+Enter` 提交，界面使用主屏并保留终端 scrollback。
+
 在 `You>` 提示符中输入任务。Sigma 运行时，可以输入普通文本或使用 `/steer <text>` 在下一个安全轮次边界加入指令；`/followup <text>` 用于排队后续任务。`/diff` 查看补丁摘要，`/tree` 查看会话历史，`/branch <entry-id>` 从较早的完整节点继续，`/abort` 取消当前轮次，`/exit` 保存并退出。任务退出时会打印 session ID；下次在 setup 提示中用 `/resume <id>` 恢复。完整命令列表见[使用指南](docs/USAGE.md)。
 
 例如：
@@ -163,6 +165,46 @@ API 端点如下：
 任务状态、消息和事件日志会写入本地。服务重启后可以恢复排队任务，也可以从保存的 session 继续中断任务。`--max-concurrent` 设置 worker 数量（1–32），超过并发容量的任务进入队列等待。请求/响应格式和 SSE 重放细节见[架构说明](docs/ARCHITECTURE.md)。
 
 **服务边界：** HTTP 服务是单进程本地原型，没有身份认证，默认只监听 loopback；不要直接暴露到网络。`--serve` 模式不提供发布和 GitHub PR 创建能力。
+
+## 包与 MCP 服务器
+
+Sigma Agent 可以安装包、连接 MCP 服务器。包贡献 Agent Skills，MCP 服务器贡献工具，工具以 `mcp__<server>__<tool>` 的形式暴露给模型。
+
+```powershell
+# 安装包到用户级作用域（~/.sigma-agent/packages/）
+go run ./cmd/sigma-agent --install npm:pi-web-access
+
+# 安装到指定仓库的项目级作用域
+go run ./cmd/sigma-agent --repo . --local --install npm:pi-web-access
+
+# 列出已安装的包
+go run ./cmd/sigma-agent --list-packages
+
+# 连接已配置的 MCP 服务器并列出其工具
+go run ./cmd/sigma-agent --list-mcp
+```
+
+MCP 服务器在 `mcp.json` 中配置，使用其他 MCP 客户端通用的 `mcpServers` 结构，现成配置可以直接复用。服务器可以从已安装的包启动：
+
+```json
+{
+  "mcpServers": {
+    "web": {
+      "command": "node",
+      "args": ["./dist/mcp-cli.js"],
+      "package": "pi-web-access"
+    }
+  }
+}
+```
+
+Sigma Agent 读取用户级 `~/.sigma-agent/mcp.json` 和项目级 `<repo>/.sigma-agent/mcp.json`，同时也会读取 `<repo>/.pi/mcp.json`。后读取的配置会覆盖同名服务器。包按项目级优先、用户级回退的顺序查找，仓库可以固定自己的包版本，也可以直接使用用户级安装。包来源支持 `npm:<name>`、`git:<repo>` 和本地路径。安装或卸载项目级包需要指定 `--repo <path> --local`。
+
+`--list-mcp` 会逐个启动已启用的 stdio 服务器、列出工具并关闭服务器。配置错误或启动失败会显示警告，其他服务器仍可用。MCP 工具遵循 Sigma 配置的工具权限策略，并以 `mcp__<server>__<tool>` 命名；需要清洗特殊字符的名称会附加稳定短后缀，避免重名。
+
+MCP 服务器是以当前用户权限运行的程序，安装包也会执行包管理器的安装脚本，只应安装可信的包。包提供的工具仍然走配置的工具策略，可以被 `tool_permissions` 拒绝。
+
+包格式、支持的来源和当前限制见[包与 MCP 服务器](docs/PACKAGES.md)：包里的扩展模块只列出不执行，且不支持 HTTP 型 MCP 服务器。
 
 ## 仓库长期记忆 RAG 与 Skills
 

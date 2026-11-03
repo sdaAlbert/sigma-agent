@@ -127,8 +127,9 @@ Sigma can load portable Agent Skills from project and user directories:
 | --- | --- |
 | Project | `.agents/skills/` and `.pi/skills/` |
 | User | `~/.agents/skills/` and `~/.pi/agent/skills/` |
+| Package | the `skills/` directory of an installed package |
 
-Directories containing `SKILL.md` are discovered recursively. In `.agents/skills/`, root Markdown files are ignored while nested Markdown files with valid Skill frontmatter can also be Skills. For compatibility with Pi, `.pi/skills/` and `~/.pi/agent/skills/` accept standalone root Markdown Skills. If project and user Skills share a name, the project Skill takes precedence.
+Directories containing `SKILL.md` are discovered recursively. In `.agents/skills/`, root Markdown files are ignored while nested Markdown files with valid Skill frontmatter can also be Skills. For compatibility with Pi, `.pi/skills/` and `~/.pi/agent/skills/` accept standalone root Markdown Skills. If project and user Skills share a name, the project Skill takes precedence. A Skill contributed by an installed package is searched last and is bounded by its package directory, so it can only read reference files that ship with that package.
 
 Example Skill layout:
 
@@ -156,7 +157,9 @@ user-invocable: true
 
 Sigma provides only each available Skill's name and description to the model initially. When relevant, the model calls `read_skill` to load `SKILL.md`. It can then call `read_skill_resource` with the exact Skill name and a relative path, such as `references/test-matrix.md`, to load a small text reference or template. The resource reader is restricted to that Skill directory, rejects symlinks and path traversal, and supports text formats such as Markdown, JSON, YAML, TOML, CSV, XML, HTML, and SVG. Files are capped at 32 KiB.
 
-Sigma does not install Pi npm/Git packages or execute Skill scripts when loading a Skill. A loaded Skill may describe scripts, but reading it does not launch them; commands still have to go through the normal Agent tools and Docker/tool-permission controls. Standalone root Markdown Skills have no isolated companion directory, so `read_skill_resource` is available only to Skills loaded from a directory. Set `skills_enabled` to `false` to disable project and user Skill discovery.
+Sigma does not execute Skill scripts when loading a Skill. A loaded Skill may describe scripts, but reading it does not launch them; commands still have to go through the normal Agent tools and Docker/tool-permission controls. Standalone root Markdown Skills have no isolated companion directory, so `read_skill_resource` is available only to Skills loaded from a directory. Set `skills_enabled` to `false` to disable project and user Skill discovery.
+
+Sigma can install npm, git, and local packages that contribute Skills and MCP servers. See [packages and MCP servers](PACKAGES.md).
 
 ## 7. Other ways to run Sigma
 

@@ -54,7 +54,27 @@ func main() {
 	sessionID := flag.String("session-id", "", "use this id for a new session")
 	eventFile := flag.String("event-file", "", "append agent lifecycle events to this JSONL file")
 	messageFile := flag.String("message-file", "", "read durable task messages from this JSONL file")
+	installSource := flag.String("install", "", "install a package (npm:<name>, git:<repo>, or a local path) and exit")
+	uninstallSource := flag.String("uninstall", "", "remove a package from the registry and exit")
+	listInstalled := flag.Bool("list-packages", false, "list the installed packages and exit")
+	listMCPServers := flag.Bool("list-mcp", false, "connect to the configured MCP servers, list their tools, and exit")
+	localScope := flag.Bool("local", false, "install or remove the package in the project scope instead of the user scope")
 	flag.Parse()
+	if *installSource != "" && *uninstallSource != "" {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --install and --uninstall cannot be combined")
+		os.Exit(2)
+	}
+	if (*installSource != "" || *uninstallSource != "") && *localScope && strings.TrimSpace(*repoArg) == "" {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --local requires --repo")
+		os.Exit(2)
+	}
+	if *installSource != "" || *uninstallSource != "" || *listInstalled || *listMCPServers {
+		if err := runPackageCommand(*installSource, *uninstallSource, *listInstalled, *listMCPServers, *localScope, *repoArg); err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *pushBranch != "" && (*indexMemory || *evalMemory) {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --push-branch cannot be combined with memory indexing or evaluation")
 		os.Exit(2)
@@ -447,7 +467,25 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		tools = append(tools, sigmaagent.GitPublishToolsWithBackground(workspace, activePushBranch, backgroundTasks)...)
 	}
 	tools = append(tools, agent.ReadToolOutputTool(toolOutputStore, runtimeConfig.MaxToolResultBytes))
-	projectGuidance, err := sigmaagent.LoadProjectGuidance(workspace)
+	packageScopes, err := packageScopes(repo)
+	if err != nil {
+		return fmt.Errorf("resolve package scopes: %w", err)
+	}
+	mcpTools, shutdownMCPServers, err := startMCPServers(context.Background(), packageScopes)
+	if err != nil {
+		// A broken MCP configuration must not take the session down. The
+		// failure is reported and the run continues without those tools.
+		fmt.Fprintln(os.Stderr, "sigma-agent: warning: MCP servers are unavailable:", err)
+		shutdownMCPServers = func() {}
+		mcpTools = nil
+	}
+	defer shutdownMCPServers()
+	tools = append(tools, mcpTools...)
+	contributedSkills, err := packageSkills(packageScopes)
+	if err != nil {
+		return fmt.Errorf("load package skills: %w", err)
+	}
+	projectGuidance, err := sigmaagent.LoadProjectGuidanceWithPackages(workspace, contributedSkills)
 	if err != nil {
 		return fmt.Errorf("load repository skills and memory: %w", err)
 	}

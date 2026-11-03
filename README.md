@@ -90,6 +90,8 @@ Docker command containers start without outbound network access. If the task nee
 go run ./cmd/sigma-agent --repo C:\work\target-repository --interactive
 ```
 
+For the integrated setup and chat UI, run `go run ./cmd/sigma-agent --tui --repo C:\work\target-repository`. Setup, credential entry, multiline task input, streamed output, and session commands all stay in the TUI. Press `Ctrl+Enter` to submit; the main-screen renderer keeps terminal scrollback.
+
 Enter a task at the `You>` prompt. While Sigma is working, enter text or `/steer <text>` to guide its next safe turn; `/followup <text>` queues a later request. `/diff` summarizes the patch, `/tree` shows session history, `/branch <entry-id>` continues from an earlier complete point, `/abort` cancels the active turn, and `/exit` saves the session. The session ID is printed when the run exits; use `/resume <id>` at the next setup prompt to continue it. See the [user guide](docs/USAGE.md) for the full command reference.
 
 For example:
@@ -163,6 +165,66 @@ The service provides these endpoints:
 Task state, messages, and event logs are persisted locally so queued tasks can be restored and interrupted sessions can be resumed after a process restart. `--max-concurrent` sets the worker count (1–32); tasks beyond that capacity wait in the queue. See [architecture](docs/ARCHITECTURE.md) for request/response details and SSE replay behavior.
 
 **Service boundary:** The HTTP service is a single-process local prototype and has no authentication. It binds to loopback by default. Do not expose it to a network as-is. Publishing and GitHub PR creation are not available through `--serve`.
+
+## Packages and MCP servers
+
+Sigma Agent can install packages and connect to MCP servers. Packages
+contribute Agent Skills, and an MCP server contributes tools that are exposed
+to the model as `mcp__<server>__<tool>`.
+
+```powershell
+# Install a package into the user scope (~/.sigma-agent/packages/)
+go run ./cmd/sigma-agent --install npm:pi-web-access
+
+# Install into one repository's project scope
+go run ./cmd/sigma-agent --repo . --local --install npm:pi-web-access
+
+# List the installed packages
+go run ./cmd/sigma-agent --list-packages
+
+# Connect to the configured MCP servers and list their tools
+go run ./cmd/sigma-agent --list-mcp
+```
+
+MCP servers are configured in `mcp.json`, using the `mcpServers` shape shared
+by other MCP clients, so an existing configuration can be reused as is. A
+server can start from an installed package:
+
+```json
+{
+  "mcpServers": {
+    "web": {
+      "command": "node",
+      "args": ["./dist/mcp-cli.js"],
+      "package": "pi-web-access"
+    }
+  }
+}
+```
+
+Sigma Agent reads `~/.sigma-agent/mcp.json` for the user scope and
+`<repo>/.sigma-agent/mcp.json` for the project scope; `<repo>/.pi/mcp.json` is
+read as well. Later configuration files override earlier entries with the
+same server name. Packages are resolved project-first, then user-wide, so a
+project can pin its own copy while still using packages installed for the user.
+Package sources are `npm:<name>`, `git:<repo>`, or a local path. Project
+installation and removal require `--repo <path> --local`.
+
+Use `--list-mcp` to start each enabled stdio server, inspect its tools, and
+shut it down. A server with invalid configuration or a failed startup is
+reported as a warning; other configured servers remain available. MCP tools
+run through Sigma's configured tool permission policy. Tool names use the
+`mcp__<server>__<tool>` namespace; names containing characters that need
+sanitizing receive a short stable suffix to avoid collisions.
+
+An MCP server is a program that runs with the permissions of the current user,
+and installing a package runs the package manager's install scripts. Only
+install packages you trust. Package-provided tools still pass through the
+configured tool policy.
+
+See [packages and MCP servers](docs/PACKAGES.md) for the package format, the
+supported sources, and the current limits: package extension modules are
+listed but not executed, and HTTP MCP servers are not supported.
 
 ## Repository-memory RAG and Skills
 

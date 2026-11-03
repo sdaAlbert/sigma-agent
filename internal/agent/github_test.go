@@ -69,7 +69,7 @@ func TestReplaceEnvOverridesGitHubToolsetVariables(t *testing.T) {
 		"GITHUB_TOOLSETS":  "issues,repos,pull_requests",
 		"GITHUB_READ_ONLY": "1",
 	})
-	want := []string{"PATH=/usr/bin", "OTHER=1", "GITHUB_TOOLSETS=issues,repos,pull_requests", "GITHUB_READ_ONLY=1"}
+	want := []string{"PATH=/usr/bin", "OTHER=1", "GITHUB_READ_ONLY=1", "GITHUB_TOOLSETS=issues,repos,pull_requests"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("replaceEnv() = %#v, want %#v", got, want)
 	}

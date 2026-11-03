@@ -70,6 +70,13 @@ type MemoryEntry struct {
 // the optional .sigma-agent/MEMORY.md. Symlinks are ignored and inputs are
 // bounded to keep local content from consuming unbounded context.
 func LoadProjectGuidance(root string) (ProjectGuidance, error) {
+	return LoadProjectGuidanceWithPackages(root, nil)
+}
+
+// LoadProjectGuidanceWithPackages discovers Agent Skills and reads the
+// optional .sigma-agent/MEMORY.md. Skills contributed by installed packages
+// are searched after the project and user Skills.
+func LoadProjectGuidanceWithPackages(root string, packageSkills []PackageSkills) (ProjectGuidance, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return ProjectGuidance{}, err
@@ -83,7 +90,7 @@ func LoadProjectGuidance(root string) (ProjectGuidance, error) {
 		return ProjectGuidance{}, fmt.Errorf("project guidance root is not a directory: %s", root)
 	}
 	guidance := ProjectGuidance{root: filepath.Clean(absolute)}
-	guidance.Skills, err = discoverSkills(guidance.root)
+	guidance.Skills, err = discoverSkills(guidance.root, packageSkills)
 	if err != nil {
 		return ProjectGuidance{}, err
 	}
