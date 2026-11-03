@@ -1,6 +1,6 @@
 # Sigma Agent user guide
 
-This guide covers the local interactive CLI: configuring a model, selecting a repository, starting a task, continuing a session, and changing runtime permissions. The HTTP task API and low-level settings have separate guides linked at the end.
+This guide covers Sigma's local interactive TUI: configuring a model, selecting a repository, starting a task, continuing a session, and changing runtime permissions. The HTTP task API and low-level settings have separate guides linked at the end.
 
 ## 1. Start Sigma
 
@@ -17,17 +17,17 @@ go build -o sigma-agent.exe ./cmd/sigma-agent
 .\sigma-agent.exe
 ```
 
-The first command starts the setup prompt. Sigma needs Go 1.26+, Git, Docker Desktop, and an API key for one supported model provider. Run `/help` at the setup prompt to display the available setup commands.
+The default command starts the integrated setup screen. Sigma needs Go 1.26+, Git, Docker Desktop, and an API key for one supported model provider. Run `/help` in the TUI to display setup commands. Press `Ctrl+Enter` to submit a task or setup command.
 
 ## 2. Configure the model
 
-At the `Sigma>` setup prompt, configure a provider key. For example:
+In the TUI setup screen, configure a provider key. For example:
 
 ```text
 /login minimax
 ```
 
-Sigma asks for the key using a hidden input prompt. It saves credentials in the per-user configuration directory, outside the repository. On Windows the file is `%APPDATA%\sigma-agent\model-auth.json`; credentials in this file are plaintext, so protect your Windows account and do not copy the file into the repository. For scripts or managed environments, use the provider's environment variable instead.
+Sigma masks the key while you type and saves it in the per-user configuration directory, outside the repository. On Windows the file is `%APPDATA%\sigma-agent\model-auth.json`; credentials in this file are plaintext, so protect your Windows account and do not copy the file into the repository. For scripts or managed environments, use the provider's environment variable instead.
 
 Supported providers:
 
@@ -53,19 +53,25 @@ During an interactive coding session, `/model` displays the current selection an
 
 ## 3. Select a repository and start a task
 
-Choose a local Git repository with `/repo`. The worktree should be clean before starting:
+Choose a local Git repository with `/repo` in the TUI. The worktree should be clean before starting:
 
 ```text
 /repo C:\work\target-repository
 ```
 
-You can type a task directly at the setup prompt to start immediately, or use `/start` to open an empty interactive session and enter tasks at `You>`:
+Type a task in the multiline input and press `Ctrl+Enter` to start, or use `/start` to open an empty interactive session:
 
 ```text
 Fix issue #123. Inspect the relevant code and repository instructions, implement the smallest appropriate fix, run the relevant tests, and review the complete diff. Do not commit or push.
 ```
 
 Sigma creates a detached Git worktree for the task. Its edits remain separate from the original checkout. Docker is used for repository commands and test execution; local model API calls run from the Sigma process.
+
+## Integrated TUI
+
+Run `go run ./cmd/sigma-agent --tui` to configure and use Sigma in one Bubble Tea interface. The setup screen accepts the same `/repo`, `/model`, `/login`, `/logout`, `/session`, `/resume`, `/network`, `/publish`, and `/github-write` commands. Type a task and press `Ctrl+Enter`, or use `/start` to open an empty session. In chat, multiline input is submitted with `Ctrl+Enter`; `/tree`, `/branch`, `/diff`, `/model`, `/steer`, `/followup`, `/abort`, and `/exit` are handled in the TUI. API keys entered after `/login` are masked on screen.
+
+TUI shortcuts: `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and file paths (`@path` in prompts and paths after `/repo`), `Up`/`Down` browse prompt history at the start/end of the input, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
 If the task requires downloading project dependencies, Docker networking is off by default. In setup, opt in for the session with:
 

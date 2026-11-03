@@ -14,8 +14,8 @@ Sigma is a Go coding agent for working on issues in existing repositories. It co
 
 - **Built to improve issue-fixing results:** Sigma is being developed to help coding agents solve real repository issues more reliably, not just to reproduce Pi's harness in Go. Its coding-specific focus is to ground changes in the repository's actual setup and verify each patch before finishing.
 - **Repository-aware execution and verification:** The Agent can inspect project manifests and CI instructions, prepare a reusable Docker toolchain with `prepare_environment`, and run repository commands in a resource-bounded container. After edits, the runtime gates completion on the relevant tests and a Git diff review.
-- **A complete issue workflow:** Each task uses a detached Git worktree and a persistent session. The CLI brings together code browsing, edits, repository commands, tests, diff review, resume, and optional publishing.
-- **Backend execution interfaces:** Use the terminal REPL, one-shot CLI/JSONL integration, or a local HTTP task API with a bounded worker pool, persisted task state, SSE events, steering, cancellation, and resume.
+- **A complete issue workflow:** Each task uses a detached Git worktree and a persistent session. The integrated TUI and CLI bring together code browsing, edits, repository commands, tests, diff review, resume, and optional publishing.
+- **Backend execution interfaces:** Use the integrated terminal TUI, one-shot CLI/JSONL integration, or a local HTTP task API with a bounded worker pool, persisted task state, SSE events, steering, cancellation, and resume.
 - **Repository-memory RAG (an experimental focus):** Sigma can retrieve reviewed facts across issues in the same repository, such as test setup constraints, architecture decisions, compatibility rules, and recurring pitfalls. It retrieves memory facts—not source-code chunks—using BM25 plus optional embeddings/Qdrant and rank fusion. Whether this improves issue-resolution results remains to be tested.
 - **Deliberate access controls:** GitHub MCP tools are read-only by default. Pushing a feature branch and opening a pull request require explicit setup and opt-in.
 
@@ -27,7 +27,7 @@ Sigma takes architectural inspiration from [Pi](https://github.com/earendil-work
 | --- | --- | --- |
 | Main goal | Minimal, customizable coding-agent harness | Go-native runtime for repository tasks and backend integrations |
 | Runtime | TypeScript / Node.js | Go executable; Docker runs repository commands |
-| Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Interactive terminal REPL, one-shot CLI/JSONL, HTTP/SSE task API |
+| Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Integrated terminal TUI, one-shot CLI/JSONL, HTTP/SSE task API |
 | Customization | Extensions, Skills, prompt templates, themes, and shareable packages; see the [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) for customization and interaction modes | Agent Skills directory/frontmatter subset with on-demand references, trusted command-tool adapter, and GitHub MCP; not a Pi extension/package runtime |
 | Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | Repository command/test tools use built-in Docker execution; each task also gets a detached Git worktree |
 | Environment preparation | Integrate the local toolchain or configure a container/sandbox separately | Agent can inspect repository setup files and prepare a cached Docker image with a selected toolchain and system packages |
@@ -78,7 +78,7 @@ go build -o sigma-agent.exe ./cmd/sigma-agent
 .\sigma-agent.exe
 ```
 
-At the setup prompt, use `/login minimax` to save a model key, `/model list` to see supported providers and key status, `/model <provider>/<model-id>` to select a model, and `/repo <path>` to choose a clean local checkout. Use `/model save` to make the selection the default for new sessions, then type a task or run `/start`. Provider keys can also be supplied through environment variables for scripted use. The complete [user guide](docs/USAGE.md) covers setup and interactive commands; [configuration](docs/CONFIGURATION.md) documents providers, credentials, runtime limits, and Docker settings.
+In the TUI setup screen, use `/login minimax` to save a model key, `/model list` to see supported providers and key status, `/model <provider>/<model-id>` to select a model, and `/repo <path>` to choose a clean local checkout. Use `/model save` to make the selection the default for new sessions, then type a task or run `/start`. Provider keys can also be supplied through environment variables for scripted use. The complete [user guide](docs/USAGE.md) covers setup and interactive commands; [configuration](docs/CONFIGURATION.md) documents providers, credentials, runtime limits, and Docker settings.
 
 Docker command containers start without outbound network access. If the task needs to download dependencies, enable networking deliberately with `/network on` for that session; see the configuration guide for the security and caching behavior.
 
@@ -92,7 +92,9 @@ go run ./cmd/sigma-agent --repo C:\work\target-repository --interactive
 
 For the integrated setup and chat UI, run `go run ./cmd/sigma-agent --tui --repo C:\work\target-repository`. Setup, credential entry, multiline task input, streamed output, and session commands all stay in the TUI. Press `Ctrl+Enter` to submit; the main-screen renderer keeps terminal scrollback.
 
-Enter a task at the `You>` prompt. While Sigma is working, enter text or `/steer <text>` to guide its next safe turn; `/followup <text>` queues a later request. `/diff` summarizes the patch, `/tree` shows session history, `/branch <entry-id>` continues from an earlier complete point, `/abort` cancels the active turn, and `/exit` saves the session. The session ID is printed when the run exits; use `/resume <id>` at the next setup prompt to continue it. See the [user guide](docs/USAGE.md) for the full command reference.
+Type a task in the multiline TUI input and press `Ctrl+Enter`. While Sigma is working, submit text or `/steer <text>` to guide its next safe turn; `/followup <text>` queues a later request. `/diff` summarizes the patch, `/tree` shows session history, `/branch <entry-id>` continues from an earlier complete point, `/abort` cancels the active turn, and `/exit` saves the session. The session ID is shown in the TUI; use `/resume <id>` at the next setup screen to continue. See the [user guide](docs/USAGE.md) for the full command reference.
+
+TUI shortcuts: `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and paths (`@path` in a prompt or a path after `/repo`), `Up`/`Down` browse prompt history at the input boundaries, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` expands or folds tool output.
 
 For example:
 
