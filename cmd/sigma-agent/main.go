@@ -465,7 +465,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		projectGuidance.Skills = nil
 	}
 	if len(projectGuidance.Skills) > 0 {
-		tools = append(tools, projectGuidance.SkillTool())
+		tools = append(tools, projectGuidance.SkillTool(), projectGuidance.SkillResourceTool())
 	}
 	if runtimeConfig.WebSearchEnabled {
 		searchProvider, ok := model.(interface {
@@ -562,7 +562,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	var result agent.Result
 	if interactive {
 		var interactiveErr error
-		result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, setupInput...)
+		result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, setupInput...)
 		if interactiveErr != nil {
 			runErr = interactiveErr
 		}
@@ -724,7 +724,7 @@ func onlyProjectMemoryDirty(status string) bool {
 	return true
 }
 
-func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, inputScanners ...*bufio.Scanner) (agent.Result, error) {
+func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance sigmaagent.ProjectGuidance, inputScanners ...*bufio.Scanner) (agent.Result, error) {
 	type inputEvent struct {
 		line string
 		err  error
@@ -736,7 +736,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /model, /diff, /tree, /branch <entry-id>, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
+	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /model, /diff, /tree, /branch <entry-id>, /skill:<name> <task>, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
 	input := make(chan inputEvent, 1)
 	var scanner *bufio.Scanner
 	if len(inputScanners) > 0 {
@@ -857,7 +857,28 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintln(os.Stderr, "\nAbort requested; session will remain open.")
 				}
 			case line == "/help":
-				fmt.Fprintln(os.Stderr, "Enter a coding instruction. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /model shows or switches models between turns; /diff shows the patch; /tree lists conversation branches; /branch <entry-id> moves to an earlier point and starts a new branch; /abort stops the active turn; /exit saves and ends the session.")
+				fmt.Fprintln(os.Stderr, "Enter a coding instruction. Use /skill:<name> <task> to explicitly invoke a Skill. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /model shows or switches models between turns; /diff shows the patch; /tree lists conversation branches; /branch <entry-id> moves to an earlier point and starts a new branch; /abort stops the active turn; /exit saves and ends the session.")
+			case strings.HasPrefix(line, "/skill:"):
+				invocation := strings.TrimPrefix(line, "/skill:")
+				name, task, ok := strings.Cut(invocation, " ")
+				if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(task) == "" {
+					fmt.Fprintln(os.Stderr, "Usage: /skill:<name> <task>")
+					continue
+				}
+				prompt, err := projectGuidance.ExplicitSkillPrompt(strings.TrimSpace(name), task)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Could not invoke Skill: %v\n", err)
+					continue
+				}
+				if activeDone != nil {
+					if err := session.Steer(prompt); err != nil {
+						fmt.Fprintf(os.Stderr, "Could not queue Skill task: %v\n", err)
+					} else {
+						fmt.Fprintln(os.Stderr, "Skill task queued for the next safe turn.")
+					}
+				} else {
+					startRun(prompt, false)
+				}
 			case line == "/tree":
 				printSessionTree(session)
 			case line == "/branch" || strings.HasPrefix(line, "/branch "):
