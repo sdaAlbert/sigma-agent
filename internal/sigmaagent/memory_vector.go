@@ -134,14 +134,57 @@ func uniqueMemoryTerms(terms []string) []string {
 	return unique
 }
 
+// rankMemoryHybrid combines lexical and semantic candidate ranks with
+// reciprocal-rank fusion. Scores from BM25 and cosine similarity are not
+// directly comparable, so only each result's rank contributes.
+func rankMemoryHybrid(lexical, semantic []memorySearchHit, topK int) []memorySearchHit {
+	scores := make(map[string]float64, len(lexical)+len(semantic))
+	entries := make(map[string]MemoryEntry, len(lexical)+len(semantic))
+	for rank, hit := range lexical {
+		if hit.Entry.ID == "" {
+			continue
+		}
+		entries[hit.Entry.ID] = hit.Entry
+		scores[hit.Entry.ID] += 1 / float64(60+rank+1)
+	}
+	for rank, hit := range semantic {
+		if hit.Entry.ID == "" {
+			continue
+		}
+		entries[hit.Entry.ID] = hit.Entry
+		scores[hit.Entry.ID] += 1 / float64(60+rank+1)
+	}
+	ranked := make([]memorySearchHit, 0, len(scores))
+	for id, score := range scores {
+		ranked = append(ranked, memorySearchHit{Entry: entries[id], Score: score})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].Score == ranked[j].Score {
+			if ranked[i].Entry.Source == ranked[j].Entry.Source {
+				return ranked[i].Entry.Line < ranked[j].Entry.Line
+			}
+			return ranked[i].Entry.Source < ranked[j].Entry.Source
+		}
+		return ranked[i].Score > ranked[j].Score
+	})
+	if topK > 0 && len(ranked) > topK {
+		ranked = ranked[:topK]
+	}
+	return ranked
+}
+
 // indexMemory syncs reviewed Markdown facts into a separate derived Qdrant
 // collection. MEMORY.md remains the source of truth.
 func (v *vectorConfig) indexMemory(ctx context.Context, root string) (int, error) {
-	entries, err := LoadMemoryEntries(root)
+	repoID, err := repositoryID(root)
 	if err != nil {
 		return 0, err
 	}
-	repoID, err := repositoryID(root)
+	return v.indexMemoryForRepo(ctx, root, repoID)
+}
+
+func (v *vectorConfig) indexMemoryForRepo(ctx context.Context, root, repoID string) (int, error) {
+	entries, err := loadMemoryEntriesWithRepoID(root, repoID)
 	if err != nil {
 		return 0, err
 	}
@@ -209,16 +252,20 @@ func (v *vectorConfig) ensureMemoryRepositoryIndex(ctx context.Context) error {
 }
 
 func (v *vectorConfig) searchMemory(ctx context.Context, root, query string, topK int) ([]memorySearchHit, error) {
-	entries, err := LoadMemoryEntries(root)
+	repoID, err := repositoryID(root)
+	if err != nil {
+		return nil, err
+	}
+	return v.searchMemoryForRepo(ctx, root, repoID, query, topK)
+}
+
+func (v *vectorConfig) searchMemoryForRepo(ctx context.Context, root, repoID, query string, topK int) ([]memorySearchHit, error) {
+	entries, err := loadMemoryEntriesWithRepoID(root, repoID)
 	if err != nil {
 		return nil, err
 	}
 	if len(entries) == 0 {
-		return nil, errors.New("no reviewed entries found in .sigma-agent/MEMORY.md")
-	}
-	repoID, err := repositoryID(root)
-	if err != nil {
-		return nil, err
+		return nil, errors.New("no entries found in .sigma-agent/MEMORY.md")
 	}
 	queryVectors, err := v.embeddings(ctx, []string{query})
 	if err != nil {
@@ -230,7 +277,7 @@ func (v *vectorConfig) searchMemory(ctx context.Context, root, query string, top
 	indexed, err := v.searchMemoryVectors(ctx, repoID, queryVectors[0], topK)
 	if err != nil {
 		if strings.Contains(err.Error(), "HTTP 404") {
-			return nil, errors.New("memory vector index is missing; run Sigma Agent --index for this repository first")
+			return nil, errors.New("memory vector index is missing; run Sigma Agent --index-memory for this repository first")
 		}
 		return nil, err
 	}

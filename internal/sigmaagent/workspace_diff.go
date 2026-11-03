@@ -10,7 +10,11 @@ import (
 )
 
 // WorkspaceDiff returns the working tree diff, including new non-ignored files.
-func WorkspaceDiff(root string) (string, error) {
+func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
+	base := "HEAD"
+	if len(baseCommit) > 0 && strings.TrimSpace(baseCommit[0]) != "" {
+		base = baseCommit[0]
+	}
 	list := exec.Command("git", "ls-files", "--others", "--exclude-standard", "-z")
 	list.Dir = root
 	untrackedOutput, err := list.Output()
@@ -19,7 +23,7 @@ func WorkspaceDiff(root string) (string, error) {
 	}
 	files := splitNUL(untrackedOutput)
 	if len(files) == 0 {
-		return runWorkspaceDiff(root, "")
+		return runWorkspaceDiff(root, "", base)
 	}
 
 	indexCommand := exec.Command("git", "rev-parse", "--git-path", "index")
@@ -58,18 +62,20 @@ func WorkspaceDiff(root string) (string, error) {
 	if output, err := add.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("prepare untracked files for diff: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return runWorkspaceDiff(root, gitIndexEnv)
+	return runWorkspaceDiff(root, gitIndexEnv, base)
 }
 
-func runWorkspaceDiff(root, gitIndexEnv string) (string, error) {
-	diff := exec.Command("git", "diff", "--no-ext-diff", "--binary", "--unified=3", "HEAD")
+func runWorkspaceDiff(root, gitIndexEnv, base string) (string, error) {
+	diff := exec.Command("git", "diff", "--no-ext-diff", "--binary", "--unified=3", base)
 	diff.Dir = root
 	if gitIndexEnv != "" {
 		diff.Env = append(os.Environ(), gitIndexEnv)
 	}
-	output, err := diff.CombinedOutput()
+	var stderr bytes.Buffer
+	diff.Stderr = &stderr
+	output, err := diff.Output()
 	if err != nil {
-		return "", fmt.Errorf("collect Git diff: %w: %s", err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("collect Git diff: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return string(output), nil
 }

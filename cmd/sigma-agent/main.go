@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,7 +20,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
@@ -29,26 +29,22 @@ import (
 
 func main() {
 	serve := flag.Bool("serve", false, "run the HTTP/SSE task service")
-	index := flag.Bool("index", false, "incrementally synchronize repository code chunks into Qdrant")
-	indexMemory := flag.Bool("index-memory", false, "synchronize reviewed repository memory into Qdrant without indexing code")
-	evalRetrieval := flag.Bool("eval-retrieval", false, "evaluate BM25 and optional hybrid retrieval on a path-labeled SWE-bench dataset")
-	retrievalDataset := flag.String("retrieval-dataset", "var/benchmark-data/swebench_bm25_13k_dev.json", "JSON retrieval cases; prepare with scripts/prepare_swebench_retrieval.py")
-	retrievalRepoCache := flag.String("retrieval-repo-cache", "var/benchmark-data/repos", "cache for repositories used by --eval-retrieval")
-	retrieveQuery := flag.String("retrieve", "", "inspect BM25 or hybrid code retrieval results without calling a model")
-	retrieveTopK := flag.Int("top-k", 8, "maximum code chunks returned by --retrieve")
+	indexMemory := flag.Bool("index-memory", false, "synchronize repository memory into Qdrant")
+	evalMemory := flag.Bool("eval-memory", false, "compare BM25, vector, and hybrid retrieval on labeled repository-memory queries")
+	memoryDataset := flag.String("memory-dataset", "evals/memory-retrieval-v1.json", "labeled memory retrieval queries")
+	memoryTopK := flag.Int("memory-top-k", 5, "number of memory results used for retrieval metrics")
 	configPath := flag.String("config", "config.json", "JSON file with tunable runtime limits")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")
 	maxConcurrent := flag.Int("max-concurrent", 2, "maximum concurrent agent tasks when --serve is enabled")
-	repoArg := flag.String("repo", "", "clean Git repository to work on")
+	repoArg := flag.String("repo", "", "Git repository to work on (defaults to the current directory in interactive setup)")
 	task := flag.String("task", "", "coding task for the agent, or an additional instruction when resuming")
 	interactive := flag.Bool("interactive", false, "start a persistent terminal conversation (default when no task or resume is given)")
 	jsonOutput := flag.Bool("json", false, "write Agent lifecycle events and the final run result as JSONL to stdout")
 	resumeID := flag.String("resume", "", "resume a persisted session by ID; omit --task to continue it")
 	githubMCP := flag.Bool("github-mcp", true, "enable read-only GitHub MCP tools when credentials are configured (default true)")
-	githubWrite := flag.Bool("github-write", false, "push the completed task branch and open a pull request; requires --push-branch and --github-mcp")
-	pushBranch := flag.String("push-branch", "", "feature branch to push and open a pull request from; required with --github-write")
-	baseBranch := flag.String("base-branch", "main", "branch that a pull request is opened against")
-	allowContainerNetwork := flag.Bool("allow-container-network", false, "allow outbound network in the test container so package managers can download dependencies")
+	githubWrite := flag.Bool("github-write", false, "advanced: enable GitHub PR creation at startup; interactive users can use /github-write")
+	pushBranch := flag.String("push-branch", "", "advanced: configure a publish branch at startup; interactive users can use /publish")
+	allowContainerNetwork := flag.Bool("allow-container-network", false, "advanced: allow container internet access at startup; interactive users can use /network")
 	keep := flag.Bool("keep-workspace", true, "keep the session worktree after a successful run")
 	maxTurns := flag.Int("max-turns", 0, "override config: maximum assistant turns")
 	maxToolCalls := flag.Int("max-tool-calls", 0, "override config: maximum tool calls per task")
@@ -58,6 +54,18 @@ func main() {
 	eventFile := flag.String("event-file", "", "append agent lifecycle events to this JSONL file")
 	messageFile := flag.String("message-file", "", "read durable task messages from this JSONL file")
 	flag.Parse()
+	if *pushBranch != "" && (*indexMemory || *evalMemory) {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --push-branch cannot be combined with memory indexing or evaluation")
+		os.Exit(2)
+	}
+	if *githubWrite && (*pushBranch == "" || !*githubMCP) {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --github-write requires --push-branch and --github-mcp")
+		os.Exit(2)
+	}
+	if *githubWrite && !agent.GitHubMCPConfigured() {
+		fmt.Fprintln(os.Stderr, "sigma-agent: --github-write requires a configured GitHub token")
+		os.Exit(2)
+	}
 	runtimeConfig, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
@@ -79,85 +87,62 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sigma-agent: invalid runtime config:", err)
 		os.Exit(2)
 	}
-	if *allowContainerNetwork {
-		runtimeConfig.AllowContainerNetwork = true
-	}
-	if err := validateGitHubWrite(*githubWrite, *githubMCP, *pushBranch); err != nil {
-		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-		os.Exit(2)
-	}
-	if *index || *indexMemory {
+	if *indexMemory {
 		if strings.TrimSpace(*repoArg) == "" {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --index and --index-memory require --repo")
+			fmt.Fprintln(os.Stderr, "sigma-agent: --index-memory requires --repo")
 			os.Exit(2)
 		}
-		if *index && *indexMemory {
-			fmt.Fprintln(os.Stderr, "sigma-agent: choose either --index or --index-memory")
+		memoryCount, err := sigmaagent.IndexRepositoryMemory(*repoArg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Indexed %d repository memory entries into Qdrant.\n", memoryCount)
+		return
+	}
+	if *evalMemory {
+		if strings.TrimSpace(*repoArg) == "" {
+			fmt.Fprintln(os.Stderr, "sigma-agent: --eval-memory requires --repo")
 			os.Exit(2)
 		}
-		if *indexMemory {
-			memoryCount, err := sigmaagent.IndexRepositoryMemory(*repoArg)
+		if *memoryTopK < 1 || *memoryTopK > 20 {
+			fmt.Fprintln(os.Stderr, "sigma-agent: --memory-top-k must be from 1 to 20")
+			os.Exit(2)
+		}
+		datasetPath := *memoryDataset
+		if !filepath.IsAbs(datasetPath) {
+			workingDir, err := os.Getwd()
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 				os.Exit(1)
 			}
-			fmt.Printf("Indexed %d reviewed memory entries into Qdrant.\n", memoryCount)
-			return
-		}
-		codeCount, memoryCount, err := sigmaagent.IndexRepositoryWithMemory(*repoArg)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Indexed %d code chunks and %d reviewed memory entries into Qdrant.\n", codeCount, memoryCount)
-		return
-	}
-	if *evalRetrieval {
-		workingDir, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-			os.Exit(1)
-		}
-		datasetPath := *retrievalDataset
-		if !filepath.IsAbs(datasetPath) {
 			datasetPath = filepath.Join(workingDir, datasetPath)
 		}
-		cases, err := sigmaagent.LoadRetrievalCases(datasetPath)
+		data, err := os.ReadFile(datasetPath)
 		if err == nil {
-			var evaluation sigmaagent.RetrievalEvaluation
-			cachePath := *retrievalRepoCache
-			if !filepath.IsAbs(cachePath) {
-				cachePath = filepath.Join(workingDir, cachePath)
-			}
-			evaluation, err = sigmaagent.EvaluateRetrievalDataset(cachePath, cases, 5)
+			var cases []sigmaagent.MemoryRetrievalCase
+			err = json.Unmarshal(data, &cases)
 			if err == nil {
-				_ = json.NewEncoder(os.Stdout).Encode(evaluation)
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+				defer cancel()
+				var evaluation sigmaagent.MemoryRetrievalEvaluation
+				evaluation, err = sigmaagent.EvaluateMemoryRetrieval(ctx, *repoArg, cases, *memoryTopK)
+				if err == nil {
+					err = json.NewEncoder(os.Stdout).Encode(evaluation)
+				}
 			}
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
 		}
-		return
-	}
-	if *retrieveQuery != "" {
-		if strings.TrimSpace(*repoArg) == "" {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --retrieve requires --repo")
-			os.Exit(2)
-		}
-		if *retrieveTopK < 1 || *retrieveTopK > 12 {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --top-k must be from 1 to 12")
-			os.Exit(2)
-		}
-		results, err := sigmaagent.RetrieveCode(*repoArg, *retrieveQuery, *retrieveTopK, runtimeConfig.MaxRetrievalQueryBytes)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-			os.Exit(1)
-		}
-		fmt.Println(results)
 		return
 	}
 	if *serve {
+		if *pushBranch != "" {
+			fmt.Fprintln(os.Stderr, "sigma-agent: --push-branch is available only for direct CLI sessions, not --serve")
+			os.Exit(2)
+		}
 		if err := server.ListenAndServe(*addr, *maxConcurrent, *configPath); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
@@ -169,43 +154,56 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --json requires a one-shot --task or --resume invocation; interactive mode is not supported")
 		os.Exit(2)
 	}
-	if *githubWrite && interactiveMode {
-		fmt.Fprintln(os.Stderr, "sigma-agent: --github-write requires a one-shot --task or --resume run")
-		os.Exit(2)
+	if *allowContainerNetwork {
+		runtimeConfig.AllowContainerNetwork = true
+	}
+	var setupInput *bufio.Scanner
+	modelSelection := agent.ModelSelection{}
+	modelSelectionExplicit := false
+	if interactiveMode && strings.TrimSpace(*task) == "" {
+		defaultRepo := strings.TrimSpace(*repoArg)
+		if defaultRepo == "" {
+			defaultRepo, err = os.Getwd()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+				os.Exit(1)
+			}
+		}
+		setup, start, input, setupErr := interactiveSetup(interactiveSetupOptions{
+			repo: defaultRepo, sessionID: *sessionID, resumeID: *resumeID,
+			pushBranch: *pushBranch, githubWrite: *githubWrite,
+			allowNetwork: runtimeConfig.AllowContainerNetwork,
+			githubMCP:    *githubMCP,
+		})
+		if setupErr != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", setupErr)
+			os.Exit(1)
+		}
+		if !start {
+			return
+		}
+		setupInput = input
+		modelSelection = setup.model
+		modelSelectionExplicit = setup.modelExplicit
+		*repoArg = setup.repo
+		*sessionID = setup.sessionID
+		*resumeID = setup.resumeID
+		*pushBranch = setup.pushBranch
+		*githubWrite = setup.githubWrite
+		runtimeConfig.AllowContainerNetwork = setup.allowNetwork
+		*task = setup.initialPrompt
 	}
 	if strings.TrimSpace(*repoArg) == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, *githubWrite, *pushBranch, *baseBranch); err != nil {
+	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *githubWrite, *sessionID, *pushBranch, *eventFile, *messageFile, interactiveMode, *jsonOutput, modelSelection, modelSelectionExplicit, setupInput); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
 }
 
-// validateGitHubWrite checks that an explicitly authorized GitHub write scope
-// is complete. GitHub write access is only granted together with a named
-// feature branch and with the GitHub MCP server enabled.
-func validateGitHubWrite(githubWrite, githubMCP bool, pushBranch string) error {
-	if !githubWrite {
-		if strings.TrimSpace(pushBranch) != "" {
-			return errors.New("--push-branch requires --github-write")
-		}
-		return nil
-	}
-	if !githubMCP {
-		return errors.New("--github-write requires --github-mcp")
-	}
-	if strings.TrimSpace(pushBranch) == "" {
-		return errors.New("--github-write requires --push-branch")
-	}
-	return nil
-}
-
-func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, githubWrite bool, pushBranch, baseBranch string) error {
-	if githubWrite && !agent.GitHubMCPConfigured() {
-		return errors.New("--github-write requires GITHUB_PERSONAL_ACCESS_TOKEN or .secrets/github-pat")
-	}
+func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP, githubWrite bool, requestedSessionID, requestedPushBranch, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel agent.ModelSelection, modelExplicit bool, setupInput ...*bufio.Scanner) error {
 	repo, err := gitOutput(repoArg, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("resolve Git repository: %w", err)
@@ -234,6 +232,13 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	}
 	sessionID := strings.TrimSpace(resumeID)
 	newSession := sessionID == ""
+	activeModelSelection := requestedModel
+	if activeModelSelection.Provider == "" {
+		activeModelSelection, err = defaultModelSelection()
+		if err != nil {
+			return err
+		}
+	}
 	if newSession {
 		sessionID = strings.TrimSpace(requestedSessionID)
 		if sessionID == "" {
@@ -247,7 +252,16 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	}
 	sessionDir := filepath.Join(sessionsDir, sessionID)
 	workspace := filepath.Join(sessionDir, "workspace")
+	var restoredSnapshot *agent.SessionSnapshot
+	if !newSession {
+		snapshot, loadErr := store.Load(sessionID)
+		if loadErr != nil {
+			return fmt.Errorf("load session %s: %w", sessionID, loadErr)
+		}
+		restoredSnapshot = &snapshot
+	}
 	startingCommit := ""
+	activePushBranch := ""
 	removeWorkspaceOnSuccess := true
 	var runErr error
 	keepWorkspaceAfterRun := keep
@@ -259,12 +273,18 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		}
 	}()
 	if newSession {
-		status, err := gitOutput(repo, "status", "--porcelain")
+		status, err := gitOutput(repo, "status", "--porcelain=v1", "--untracked-files=all")
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(status) != "" {
-			return errors.New("source repository must have a clean working tree")
+		if !onlyProjectMemoryDirty(status) {
+			return errors.New("source repository must be clean except for .sigma-agent/MEMORY.md")
+		}
+		if requestedPushBranch != "" {
+			if err := validateNewPushBranch(repo, requestedPushBranch); err != nil {
+				return err
+			}
+			activePushBranch = requestedPushBranch
 		}
 		commit, err := gitOutput(repo, "rev-parse", "HEAD")
 		if err != nil {
@@ -278,7 +298,18 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 			return fmt.Errorf("create detached task worktree: %w", err)
 		}
 		worktreeCreated = true
-		metadata, _ := json.MarshalIndent(map[string]string{"repo": repo, "starting_commit": startingCommit}, "", "  ")
+		if activePushBranch != "" {
+			if _, err := gitOutput(workspace, "checkout", "-b", activePushBranch); err != nil {
+				return fmt.Errorf("create publish branch %q in task worktree: %w", activePushBranch, err)
+			}
+		}
+		if err := sigmaagent.CopyProjectMemory(repo, workspace); err != nil {
+			return fmt.Errorf("copy project memory into task worktree: %w", err)
+		}
+		metadata, _ := json.MarshalIndent(map[string]string{
+			"repo": repo, "starting_commit": startingCommit, "push_branch": activePushBranch,
+			"model_provider": activeModelSelection.Provider, "model_id": activeModelSelection.Model,
+		}, "", "  ")
 		if err := os.WriteFile(filepath.Join(sessionDir, "metadata.json"), metadata, 0o600); err != nil {
 			return err
 		}
@@ -286,6 +317,9 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		var metadata struct {
 			Repo           string `json:"repo"`
 			StartingCommit string `json:"starting_commit"`
+			PushBranch     string `json:"push_branch"`
+			ModelProvider  string `json:"model_provider"`
+			ModelID        string `json:"model_id"`
 		}
 		data, err := os.ReadFile(filepath.Join(sessionDir, "metadata.json"))
 		if err != nil {
@@ -296,6 +330,28 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		}
 		if filepath.Clean(metadata.Repo) != filepath.Clean(repo) {
 			return errors.New("resume repository does not match the session's original repository")
+		}
+		if !modelExplicit && metadata.ModelProvider != "" && metadata.ModelID != "" {
+			activeModelSelection = agent.ModelSelection{Provider: metadata.ModelProvider, Model: metadata.ModelID}
+		}
+		if !modelExplicit && restoredSnapshot != nil {
+			if providerText, modelID, ok := strings.Cut(restoredSnapshot.ModelID, "/"); ok {
+				if provider, valid := agent.NormalizeModelProvider(providerText); valid && modelID != "" {
+					activeModelSelection = agent.ModelSelection{Provider: provider, Model: modelID}
+				}
+			}
+		}
+		if requestedPushBranch != "" && requestedPushBranch != metadata.PushBranch {
+			return errors.New("--push-branch must match the branch configured when this session was created")
+		}
+		if metadata.PushBranch != "" {
+			currentBranch, err := gitOutput(workspace, "branch", "--show-current")
+			if err != nil || strings.TrimSpace(currentBranch) != metadata.PushBranch {
+				return errors.New("saved publish branch does not match the session worktree")
+			}
+			if requestedPushBranch != "" {
+				activePushBranch = metadata.PushBranch
+			}
 		}
 		startingCommit = metadata.StartingCommit
 		if _, err := os.Stat(workspace); err != nil {
@@ -347,16 +403,30 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		}
 	}
 
-	model, err := agent.NewMiniMaxMessagesModelFromEnv()
+	model, err := agent.NewConfiguredModel(activeModelSelection)
 	if err != nil {
 		return err
 	}
-	model.MaxRetries = runtimeConfig.MaxRetries
-	model.MaxOutputTokens = runtimeConfig.ModelOutputTokens
-	model.Client.Timeout = time.Duration(runtimeConfig.ModelTimeoutMS) * time.Millisecond
-	tools, err := sigmaagent.BuiltinTools(workspace, runtimeConfig.GoTestImage, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, runtimeConfig.AllowContainerNetwork)
+	if configurable, ok := model.(interface {
+		ConfigureRuntime(int, int, time.Duration)
+	}); ok {
+		configurable.ConfigureRuntime(runtimeConfig.MaxRetries, runtimeConfig.ModelOutputTokens, time.Duration(runtimeConfig.ModelTimeoutMS)*time.Millisecond)
+	}
+	backgroundTasks, err := sigmaagent.NewBackgroundCommandManager(workspace, runtimeConfig.CommandExecutionImage, filepath.Join(sessionDir, "background_tasks"), startingCommit, runtimeConfig.AllowContainerNetwork)
+	if err != nil {
+		return fmt.Errorf("configure background task manager: %w", err)
+	}
+	tools, err := sigmaagent.BuiltinToolsWithNetwork(workspace, runtimeConfig.GoTestImage, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, startingCommit)
 	if err != nil {
 		return err
+	}
+	commandTools, err := sigmaagent.CommandExecutionToolsWithEnvironmentPreparation(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, startingCommit)
+	if err != nil {
+		return fmt.Errorf("configure command execution tool: %w", err)
+	}
+	tools = append(tools, commandTools...)
+	if activePushBranch != "" {
+		tools = append(tools, sigmaagent.GitPublishToolsWithBackground(workspace, activePushBranch, backgroundTasks)...)
 	}
 	tools = append(tools, agent.ReadToolOutputTool(toolOutputStore, runtimeConfig.MaxToolResultBytes))
 	projectGuidance, err := sigmaagent.LoadProjectGuidance(workspace)
@@ -380,24 +450,29 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		tools = append(tools, projectGuidance.SkillTool())
 	}
 	if runtimeConfig.WebSearchEnabled {
-		tools = append(tools, sigmaagent.WebSearchTool(model.WebSearch))
+		searchProvider, ok := model.(interface {
+			WebSearch(context.Context, string) (string, error)
+		})
+		if !ok {
+			return fmt.Errorf("web_search is only supported with the MiniMax provider; current model is %s/%s", activeModelSelection.Provider, activeModelSelection.Model)
+		}
+		tools = append(tools, sigmaagent.WebSearchTool(searchProvider.WebSearch))
 	}
 	githubMCPEnabled := githubMCP && agent.GitHubMCPConfigured()
-	githubWriteOptions := agent.GitHubWriteOptions{}
-	var githubClient *agent.GitHubMCP
-	if githubWrite {
-		repository, err := agent.OriginRepository(repo, "origin")
-		if err != nil {
-			return fmt.Errorf("resolve origin repository for --github-write: %w", err)
-		}
-		githubWriteOptions = agent.GitHubWriteOptions{
-			Repository: repository,
-			HeadBranch: strings.TrimSpace(pushBranch),
-			BaseBranch: strings.TrimSpace(baseBranch),
-		}
-	}
 	if githubMCPEnabled {
-		client, err := agent.StartGitHubMCPWithWrite(context.Background(), githubWriteOptions)
+		githubOptions := agent.GitHubMCPOptions{}
+		if githubWrite {
+			remoteURL, remoteErr := gitOutput(repo, "remote", "get-url", "origin")
+			if remoteErr != nil {
+				return fmt.Errorf("resolve origin for pull request creation: %w", remoteErr)
+			}
+			owner, repository, parseErr := parseGitHubRepository(remoteURL)
+			if parseErr != nil {
+				return parseErr
+			}
+			githubOptions = agent.GitHubMCPOptions{AllowCreatePullRequest: true, Owner: owner, Repository: repository, HeadBranch: activePushBranch}
+		}
+		client, err := agent.StartGitHubMCP(context.Background(), githubOptions)
 		if err != nil {
 			return err
 		}
@@ -406,7 +481,6 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 				fmt.Fprintln(os.Stderr, "warning: close GitHub MCP server:", err)
 			}
 		}()
-		githubClient = client
 		githubTools, err := client.Tools(context.Background())
 		if err != nil {
 			return err
@@ -432,14 +506,16 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if useMemorySearch {
 		systemPrompt = projectGuidance.SystemPromptWithMemorySearch(codingSystemPrompt)
 	}
+	if activePushBranch != "" {
+		systemPrompt += fmt.Sprintf("\n\nGit publishing is explicitly enabled for branch %q only. Review the diff and run relevant tests before committing. Commit and push only when the user explicitly requested it. Use git_commit before git_push; git_push can only target this branch on origin and cannot force-push or create a pull request.", activePushBranch)
+	}
+	if githubWrite {
+		systemPrompt += "\n\nGitHub pull request creation is explicitly enabled only for this repository and the configured feature branch. Create a pull request only when the user explicitly asks, after the branch is pushed and verification is complete. Do not merge it."
+	}
 	if newSession {
 		session = &agent.Session{ID: sessionID, System: systemPrompt, Store: store}
 	} else {
-		snapshot, err := store.Load(sessionID)
-		if err != nil {
-			return fmt.Errorf("load session %s: %w", sessionID, err)
-		}
-		session, err = agent.RestoreSession(snapshot, model, registry, store)
+		session, err = agent.RestoreSession(*restoredSnapshot, model, registry, store)
 		if err != nil {
 			return err
 		}
@@ -463,7 +539,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	var result agent.Result
 	if interactive {
 		var interactiveErr error
-		result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession)
+		result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, setupInput...)
 		if interactiveErr != nil {
 			runErr = interactiveErr
 		}
@@ -475,7 +551,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if runErr != nil {
 		keepWorkspaceAfterRun = true
 	}
-	patch, diffErr := sigmaagent.WorkspaceDiff(workspace)
+	patch, diffErr := sigmaagent.WorkspaceDiff(workspace, startingCommit)
 	if diffErr != nil && runErr == nil {
 		runErr = fmt.Errorf("collect patch: %w", diffErr)
 	}
@@ -486,10 +562,28 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if writeErr := os.WriteFile(filepath.Join(runDir, "transcript.json"), transcript, 0o600); writeErr != nil && runErr == nil {
 		runErr = writeErr
 	}
+	memoryWrite := sigmaagent.MemoryWriteReport{Status: "disabled"}
+	if runtimeConfig.MemoryEnabled && runtimeConfig.MemoryAutoWrite {
+		switch {
+		case interactive:
+			memoryWrite.Status = "skipped_interactive"
+		case runErr != nil:
+			memoryWrite.Status = "skipped_unsuccessful_run"
+		default:
+			memoryWrite = sigmaagent.CaptureSuccessfulRunMemory(context.Background(), model, repo, runID, task, patch, session.Messages())
+			event := agent.Event{At: time.Now().UTC(), Type: "memory_write_completed", Session: sessionID}
+			if memoryWrite.Warning != "" {
+				event.Error = memoryWrite.Warning
+			}
+			eventSink(event)
+		}
+	}
 	metadata, _ := json.MarshalIndent(map[string]any{
-		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": model.ModelID(),
+		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": activePushBranch,
+		"github_write_enabled": githubWrite, "allow_container_network": runtimeConfig.AllowContainerNetwork,
 		"github_mcp_enabled":        githubMCPEnabled,
 		"tool_output_artifacts_dir": filepath.Join(sessionDir, "tool_outputs"),
+		"memory_write":              memoryWrite,
 		"turns":                     result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
 		"output_tokens": result.OutputTokens, "finished_at": time.Now().UTC(), "error": errorString(runErr),
 	}, "", "  ")
@@ -499,9 +593,10 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if jsonOutput {
 		completion := map[string]any{
 			"protocol_version": 1, "type": "run_completed", "status": "completed", "run_id": runID, "session_id": sessionID,
-			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"),
+			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"), "push_branch": activePushBranch,
 			"turns": result.Turns, "tool_calls": result.ToolCalls,
 			"input_tokens": result.InputTokens, "output_tokens": result.OutputTokens,
+			"memory_write": memoryWrite,
 		}
 		if runErr != nil {
 			completion["type"] = "run_failed"
@@ -516,6 +611,9 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if !jsonOutput {
 		fmt.Fprintf(os.Stderr, "\n\nRun artifacts: %s\nPatch: %s\n", runDir, filepath.Join(runDir, "result.patch"))
 		fmt.Fprintf(os.Stderr, "Session ID: %s\nSession snapshot: %s\n", sessionID, filepath.Join(sessionsDir, sessionID+".json"))
+		if activePushBranch != "" {
+			fmt.Fprintf(os.Stderr, "Publish branch: %s (origin)\n", activePushBranch)
+		}
 		if keep || runErr != nil {
 			fmt.Fprintf(os.Stderr, "Task worktree kept at: %s\n", workspace)
 		}
@@ -523,78 +621,75 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if runErr != nil {
 		return runErr
 	}
-	if githubWrite {
-		// The branch push is performed by the runtime, not by the model, so the
-		// authorized branch is the only branch that can be published.
-		pushOptions := agent.PushBranchOptions{
-			Branch:     strings.TrimSpace(pushBranch),
-			Remote:     "origin",
-			BaseBranch: strings.TrimSpace(baseBranch),
-		}
-		if err := agent.PushBranch(repo, workspace, pushOptions); err != nil {
-			return fmt.Errorf("push feature branch: %w", err)
-		}
-		if !jsonOutput {
-			fmt.Fprintf(os.Stderr, "Pushed feature branch: %s\n", pushOptions.Branch)
-		}
-		if githubClient == nil {
-			return errors.New("GitHub MCP client is unavailable after the feature branch was pushed")
-		}
-		title := pullRequestTitle(task, result.Text)
-		body := pullRequestBody(task, result.Text)
-		pr, err := githubClient.CreatePullRequest(context.Background(), githubWriteOptions, title, body)
-		if err != nil {
-			return fmt.Errorf("feature branch was pushed but pull request creation failed: %w", err)
-		}
-		if !jsonOutput {
-			fmt.Fprintf(os.Stderr, "Created pull request: %s\n", pr)
-		}
-	}
 	return nil
 }
 
-func pullRequestTitle(task, summary string) string {
-	text := strings.TrimSpace(task)
-	if text == "" {
-		text = strings.TrimSpace(summary)
+func defaultModelSelection() (agent.ModelSelection, error) {
+	selection, err := agent.LoadDefaultModelSelection()
+	if err != nil {
+		return agent.ModelSelection{}, err
 	}
-	text = strings.Join(strings.Fields(strings.SplitN(text, "\n", 2)[0]), " ")
-	if text == "" {
-		text = "Apply Sigma Agent changes"
-	}
-	if !strings.HasPrefix(strings.ToLower(text), "sigma agent:") {
-		text = "Sigma Agent: " + text
-	}
-	return truncateUTF8(text, 256)
-}
-
-func pullRequestBody(task, summary string) string {
-	const maxSection = 24000
-	truncate := func(value string) string {
-		if len(value) > maxSection {
-			return truncateUTF8(value, maxSection) + "\n\n[truncated]"
+	if selection.Provider == "" {
+		modelID := strings.TrimSpace(os.Getenv("SIGMA_AGENT_MODEL"))
+		if modelID == "" {
+			modelID = agent.DefaultModelForProvider("minimax")
 		}
-		return value
+		selection = agent.ModelSelection{Provider: "minimax", Model: modelID}
 	}
-	return "## Task\n\n" + truncate(strings.TrimSpace(task)) + "\n\n## Sigma Agent summary\n\n" + truncate(strings.TrimSpace(summary)) + "\n\nCreated by Sigma Agent. Review the changes and run the repository's checks before merging."
+	return selection, nil
 }
 
-func truncateUTF8(value string, maxBytes int) string {
-	if len(value) <= maxBytes {
-		return value
-	}
-	var result strings.Builder
-	result.Grow(maxBytes)
-	for _, r := range value {
-		if result.Len()+utf8.RuneLen(r) > maxBytes {
-			break
+func parseModelCommand(value string, current agent.Model) (agent.ModelSelection, string, error) {
+	currentSelection := agent.ModelSelection{Provider: "minimax", Model: agent.DefaultModelForProvider("minimax")}
+	if current != nil {
+		modelID := current.ModelID()
+		if providerText, id, ok := strings.Cut(modelID, "/"); ok {
+			if provider, valid := agent.NormalizeModelProvider(providerText); valid && id != "" {
+				currentSelection = agent.ModelSelection{Provider: provider, Model: id}
+			}
+		} else if modelID != "" {
+			currentSelection.Model = modelID
 		}
-		result.WriteRune(r)
 	}
-	return result.String()
+	value = strings.TrimSpace(value)
+	if value == "" || value == "list" {
+		return currentSelection, "show", nil
+	}
+	if value == "save" {
+		return currentSelection, "save", nil
+	}
+	providerText, modelID, ok := strings.Cut(value, "/")
+	provider, valid := agent.NormalizeModelProvider(providerText)
+	if !valid || !ok || strings.TrimSpace(modelID) == "" {
+		return agent.ModelSelection{}, "", errors.New("usage: /model <provider>/<model-id>, /model list, or /model save")
+	}
+	hasKey, err := agent.ModelProviderHasAPIKey(provider)
+	if err != nil {
+		return agent.ModelSelection{}, "", err
+	}
+	if !hasKey {
+		return agent.ModelSelection{}, "", fmt.Errorf("no %s API key is configured; restart the interactive session and use /login %s", provider, provider)
+	}
+	return agent.ModelSelection{Provider: provider, Model: strings.TrimSpace(modelID)}, "switch", nil
 }
 
-func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool) (agent.Result, error) {
+func onlyProjectMemoryDirty(status string) bool {
+	for _, line := range strings.Split(strings.TrimSpace(status), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) < 4 || strings.TrimSpace(line[:2]) == "" {
+			return false
+		}
+		path := strings.TrimSpace(line[3:])
+		if path != filepath.ToSlash(filepath.Join(".sigma-agent", "MEMORY.md")) {
+			return false
+		}
+	}
+	return true
+}
+
+func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, inputScanners ...*bufio.Scanner) (agent.Result, error) {
 	type inputEvent struct {
 		line string
 		err  error
@@ -606,11 +701,17 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /diff, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
+	fmt.Fprintf(os.Stderr, "\nSigma Agent interactive session %s\nCommands: /help, /model, /diff, /abort, /exit\nWhile the Agent is running, enter text to steer its next turn.\n", session.ID)
 	input := make(chan inputEvent, 1)
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
+	var scanner *bufio.Scanner
+	if len(inputScanners) > 0 {
+		scanner = inputScanners[0]
+	}
+	if scanner == nil {
+		scanner = bufio.NewScanner(os.Stdin)
 		scanner.Buffer(make([]byte, 4096), 1024*1024)
+	}
+	go func() {
 		for scanner.Scan() {
 			select {
 			case input <- inputEvent{line: scanner.Text()}:
@@ -721,9 +822,45 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintln(os.Stderr, "\nAbort requested; session will remain open.")
 				}
 			case line == "/help":
-				fmt.Fprintln(os.Stderr, "Enter a coding instruction. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /diff shows the patch; /abort stops the active turn; /exit saves and ends the session.")
+				fmt.Fprintln(os.Stderr, "Enter a coding instruction. During an active turn, plain text or /steer <text> queues guidance for the next safe turn. /followup <text> runs after the current task settles. /model shows or switches models between turns; /diff shows the patch; /abort stops the active turn; /exit saves and ends the session.")
+			case line == "/model" || strings.HasPrefix(line, "/model "):
+				if activeDone != nil {
+					fmt.Fprintln(os.Stderr, "Wait for the current turn to finish before changing models.")
+					continue
+				}
+				selection, action, err := parseModelCommand(strings.TrimSpace(strings.TrimPrefix(line, "/model")), session.Model)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					continue
+				}
+				switch action {
+				case "show":
+					printModelOptions(selection)
+				case "save":
+					if err := agent.SaveDefaultModelSelection(selection); err != nil {
+						fmt.Fprintf(os.Stderr, "Could not save default model: %v\n", err)
+					} else {
+						fmt.Fprintf(os.Stderr, "Saved default model %s/%s.\n", selection.Provider, selection.Model)
+					}
+				case "switch":
+					model, err := agent.NewConfiguredModel(selection)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						continue
+					}
+					if configurable, ok := model.(interface {
+						ConfigureRuntime(int, int, time.Duration)
+					}); ok {
+						configurable.ConfigureRuntime(runtimeConfig.MaxRetries, runtimeConfig.ModelOutputTokens, time.Duration(runtimeConfig.ModelTimeoutMS)*time.Millisecond)
+					}
+					if err := session.SetModel(model); err != nil {
+						fmt.Fprintf(os.Stderr, "Could not switch model: %v\n", err)
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "Switched to %s/%s.\n", selection.Provider, selection.Model)
+				}
 			case line == "/diff":
-				diff, err := gitOutput(workspace, "diff", "--stat", "HEAD")
+				diff, err := gitOutput(workspace, "diff", "--stat", startingCommit)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)
 				} else if strings.TrimSpace(diff) == "" {
@@ -787,6 +924,65 @@ func configuredToolPolicy(runtimeConfig config.Runtime) agent.ToolPolicy {
 		}
 		return nil
 	}
+}
+
+func validateNewPushBranch(repo, branch string) error {
+	if strings.TrimSpace(branch) != branch || branch == "" || strings.HasPrefix(branch, "-") {
+		return errors.New("--push-branch must be a non-empty Git branch name")
+	}
+	switch strings.ToLower(branch) {
+	case "main", "master", "develop", "trunk":
+		return fmt.Errorf("refusing to publish directly to protected branch name %q", branch)
+	}
+	checked, err := gitOutput(repo, "check-ref-format", "--branch", branch)
+	if err != nil || strings.TrimSpace(checked) != branch {
+		return fmt.Errorf("invalid --push-branch %q", branch)
+	}
+	if _, err := gitOutput(repo, "remote", "get-url", "origin"); err != nil {
+		return errors.New("--push-branch requires a Git remote named origin")
+	}
+	if defaultBranch, err := gitOutput(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		defaultBranch = strings.TrimPrefix(strings.TrimSpace(defaultBranch), "origin/")
+		if branch == defaultBranch {
+			return fmt.Errorf("refusing to publish directly to origin's default branch %q", branch)
+		}
+	}
+	if _, err := gitOutput(repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		return fmt.Errorf("local branch %q already exists; choose a new feature branch", branch)
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return fmt.Errorf("check local branch %q: %w", branch, err)
+		}
+	}
+	remoteRef, err := gitOutput(repo, "ls-remote", "--heads", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return fmt.Errorf("cannot confirm whether origin branch %q is available; check local Git credentials and network access", branch)
+	}
+	if strings.TrimSpace(remoteRef) != "" {
+		return fmt.Errorf("remote branch %q already exists; choose a new feature branch", branch)
+	}
+	return nil
+}
+
+func parseGitHubRepository(remote string) (string, string, error) {
+	remote = strings.TrimSpace(remote)
+	path := ""
+	if strings.HasPrefix(remote, "git@github.com:") {
+		path = strings.TrimPrefix(remote, "git@github.com:")
+	} else {
+		parsed, err := url.Parse(remote)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
+			return "", "", errors.New("--github-write currently supports an origin remote hosted on github.com")
+		}
+		path = strings.TrimPrefix(parsed.Path, "/")
+	}
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("cannot read owner/repository from origin URL %q", remote)
+	}
+	return parts[0], parts[1], nil
 }
 
 func gitOutput(directory string, args ...string) (string, error) {

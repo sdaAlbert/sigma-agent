@@ -18,7 +18,7 @@ const maxInvestigationReportBytes = 6 * 1024
 // read-only repository tools. The parent receives a bounded final report.
 func (w workspace) delegateInvestigationTool(model agent.Model, parentTools []agent.Tool, toolOutputs agent.ToolOutputStore) agent.Tool {
 	allowed := map[string]bool{
-		"list_files": true, "search_code": true, "retrieve_code": true,
+		"list_files": true, "search_code": true,
 		"read_file": true, "git_diff": true, "search_memory": true,
 	}
 	childTools := make([]agent.Tool, 0, len(allowed))

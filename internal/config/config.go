@@ -23,22 +23,25 @@ type Runtime struct {
 	ModelTimeoutMS         int               `json:"model_timeout_ms"`
 	MaxRetries             int               `json:"max_retries"`
 	GoTestImage            string            `json:"go_test_image"`
+	CommandExecutionImage  string            `json:"command_execution_image"`
+	AllowContainerNetwork  bool              `json:"allow_container_network"`
 	SkillsEnabled          bool              `json:"skills_enabled"`
 	MemoryEnabled          bool              `json:"memory_enabled"`
+	MemoryAutoWrite        bool              `json:"memory_auto_write"`
 	WebSearchEnabled       bool              `json:"web_search_enabled"`
-	AllowContainerNetwork  bool              `json:"allow_container_network"`
 	DefaultToolPermission  string            `json:"default_tool_permission"`
 	ToolPermissions        map[string]string `json:"tool_permissions,omitempty"`
 }
 
 func Defaults() Runtime {
 	return Runtime{
-		MaxTurns: 32, MaxToolCalls: 64, MaxContextTokens: 64000,
+		MaxTurns: 128, MaxToolCalls: 256, MaxContextTokens: 64000,
 		SummaryTokens: 800, MaxToolResultBytes: 16 * 1024,
 		MaxRetrievalQueryBytes: 8 * 1024,
-		ModelOutputTokens:      16384, ToolTimeoutMS: 60000,
+		ModelOutputTokens:      16384, ToolTimeoutMS: 600000,
 		ModelTimeoutMS: 120000, MaxRetries: 2,
-		GoTestImage: "golang:1.26", SkillsEnabled: true, MemoryEnabled: true, DefaultToolPermission: "allow",
+		GoTestImage: "golang:1.26", CommandExecutionImage: "golang:1.26",
+		SkillsEnabled: true, MemoryEnabled: true, MemoryAutoWrite: false, DefaultToolPermission: "allow",
 	}
 }
 
@@ -101,8 +104,14 @@ func (c Runtime) Validate() error {
 	if c.MaxRetries < 0 || c.MaxRetries > 10 {
 		return errors.New("max_retries must be between 0 and 10")
 	}
+	if c.MemoryAutoWrite && !c.MemoryEnabled {
+		return errors.New("memory_auto_write requires memory_enabled")
+	}
 	if c.GoTestImage == "" || strings.TrimSpace(c.GoTestImage) != c.GoTestImage || strings.ContainsAny(c.GoTestImage, " \t\r\n") || strings.HasPrefix(c.GoTestImage, "-") {
 		return errors.New("go_test_image must be a non-empty Docker image reference without whitespace")
+	}
+	if c.CommandExecutionImage == "" || strings.TrimSpace(c.CommandExecutionImage) != c.CommandExecutionImage || strings.ContainsAny(c.CommandExecutionImage, " \t\r\n") || strings.HasPrefix(c.CommandExecutionImage, "-") {
+		return errors.New("command_execution_image must be a non-empty Docker image reference without whitespace")
 	}
 	if !validToolPermission(c.DefaultToolPermission) {
 		return errors.New("default_tool_permission must be 'allow' or 'deny'")
