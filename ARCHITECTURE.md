@@ -1,6 +1,6 @@
 # Go Agent Runtime
 
-This runtime uses Pi Agent as an architecture reference, not as a dependency. It keeps the agent loop, transcript, tool lifecycle, policy hooks, cancellation, and event model in Go, while speaking directly to MiniMax's Anthropic-compatible Messages API.
+This runtime uses Pi Agent as an architecture reference, not as a dependency. It keeps the agent loop, transcript, tool lifecycle, policy hooks, cancellation, and event model in Go. Provider adapters normalize Anthropic Messages and OpenAI Chat Completions-compatible APIs into Sigma's model interface; the interactive CLI exposes `/login` for model and GitHub credentials and `/model` for model selection.
 
 ## Runtime flow
 
@@ -26,7 +26,8 @@ Prompt / steering / follow-up
        native Go tools     GitHub read-only MCP
                 \             /
                  bounded execution
-                (parallel reads; serialized writes/tests)
+          (parallel reads; path-locked writes;
+                 serialized shell/tests)
                        |
                        v
                   tool_result messages
@@ -51,6 +52,8 @@ go run ./cmd/sigma-agent --repo C:\path\to\clean\repo --interactive --resume <se
 
 Within the session, enter a coding instruction at `You>`. While the Agent is running, enter plain text or `/steer <text>` to queue guidance for its next safe turn; `/followup <text>` queues a later instruction. `/diff` shows the current patch summary, `/abort` cancels the active turn, `/help` lists commands, and `/exit` saves and exits. The session ID and worktree path are printed after exit. This is a terminal REPL, not a full-screen TUI; one-shot CLI and HTTP/SSE service modes remain available.
 
+`run_command` supports foreground execution plus `action=start`, `action=list`, `action=status`, and `action=stop` for detached Docker commands. Job metadata is stored under the session directory and survives `--resume`; one task can run at a time and expires after 30 minutes. Read-only repository tools remain available while it runs. File edits, shell commands, tests, diffs, and Git publishing wait until the job completes or is stopped, because the container shares the session worktree.
+
 For process integrations that only need to submit a task and consume progress, `--json` writes one JSON object per stdout line, each with `protocol_version: 1`. Agent lifecycle events are wrapped as `{"type":"agent_event","event":...}`; the final record is `run_completed` or `run_failed` and includes the session ID and artifact paths. The existing session store persists state exactly as it does for CLI runs, so a client can later resume with `--resume <session-id>`. This mode is intentionally one-shot; bidirectional control while a task is running remains in the HTTP task API.
 
 ## HTTP task lifecycle
@@ -69,25 +72,29 @@ The service binds to loopback by default and stores task records and event logs 
 
 The HTTP API accepts a task with `POST /tasks`, reports state through `GET /tasks/{id}`, and streams lifecycle/model/tool events through `GET /tasks/{id}/events`. `POST /tasks/{id}/messages` accepts `{"message":"...","mode":"steer"}` or `{"message":"...","mode":"follow_up"}`. Steering is inserted at the next safe Agent turn boundary; follow-up runs after the current request would otherwise settle. Messages are durably queued and deduplicated across worker restarts. Sending a message to a completed task queues continuation of its saved session. SSE reconnects replay events after `Last-Event-ID`; that resumes event delivery, while session continuation resumes Agent work. The runtime currently exposes these interfaces through HTTP and CLI without a browser chat client.
 
-## Retrieval flow
+## Source browsing and repository-memory retrieval
+
+Current source is explored with ordinary file listing, literal search, and bounded reads. Sigma Agent does not chunk, embed, or store source files in Qdrant.
+
+Long-term memory is a separate, opt-in retrieval path:
 
 ```text
-source files -> 80-line chunks / 12-line overlap -> hash IDs -> embed changed chunks -> Qdrant sync
-query -> BM25 ranks -----------------------------------------------\
-query -> embedding -> Qdrant vector ranks (including vector-only hits) +-> reciprocal-rank fusion -> retrieve_code
+.sigma-agent/MEMORY.md -> parse facts + provenance -> embed facts -> Qdrant sigma_agent_memory
+query -> local BM25 ranks ----------------------------------------------\
+query -> embedding -> repository-filtered vector ranks -------------------+-> RRF -> search_memory
 ```
 
-BM25 remains available without external services. The optional path uses Hugging Face feature extraction by default (or a configured OpenAI-compatible embedding endpoint) and Qdrant REST. Re-indexing embeds new or changed chunks, upserts them, and only then removes stale chunk IDs, so a failed embedding/upsert leaves the previous index searchable. At query time, vector candidates must match the current working-tree chunk hash before source text is returned; vector-service failures fall back to BM25.
+The Markdown file remains the source of truth. `--index-memory --repo <path>` syncs only its facts into the derived Qdrant collection. At runtime, the `search_memory` tool combines local BM25 with vector candidates using reciprocal-rank fusion; Qdrant filters by exact repository ID. If embedding/Qdrant is unavailable or no vector candidates match, it falls back to BM25. Returned facts retain source, category, and date; current source and tests take precedence. When `memory_auto_write` is enabled, a successful non-interactive run gets a separate bounded post-run model call that may append up to three facts; failed/interrupted runs do not write. Markdown stays outside the result patch, and vector indexing is refreshed after additions.
 
-The retrieval evaluation uses the public `princeton-nlp/SWE-bench_bm25_13K` dev split. `python scripts/prepare_swebench_retrieval.py` downloads the 225 dev rows through Hugging Face's dataset viewer, excludes SQLFluff, and writes 175 issue cases across five Python repositories to `var/benchmark-data/swebench_bm25_13k_dev.json`. Relevant paths are extracted from each gold patch and interpreted against its base commit; added files are omitted because they do not exist in that retrieval snapshot. This measures file-level Recall@5/MRR, not whether Sigma Agent can successfully resolve issues. The dataset's `13K` denotes the BM25 context token budget, not the number of examples. `go run ./cmd/sigma-agent --eval-retrieval` caches the source repositories under `var/benchmark-data/repos`, checks out each pinned commit, and evaluates BM25; it also evaluates hybrid retrieval when embedding configuration is present. Gold patch paths are a useful proxy for relevance, with the limitation that changed files are not always all necessary retrieval context.
+The labeled retrieval harness is `evals/memory-retrieval-v1.json`, paired with a six-fact isolated fixture repository. `--eval-memory` compares BM25, dense vector, and hybrid RRF with Recall@K and MRR using actual configured embeddings. This small fixture checks retrieval and metric plumbing only. A separate matched evaluation on fresh Go issues is needed to establish repair value; historical #1969/#2537 runs are not a clean memory ablation.
 
 ## Skills and repository memory
 
 At startup, Sigma Agent scans only `.agents/skills/**/SKILL.md` below the task worktree. It parses bounded YAML frontmatter and adds each valid Skill's name and one-line description to the system context. If a description matches the task, the model can call `read_skill` with the exact Skill name to load its Markdown body (up to 12 KiB). The tool cannot read arbitrary paths or companion files, and loading a Skill does not run scripts. Set `skills_enabled` to `false` to run a no-Skill ablation; repository memory remains independently enabled.
 
-The optional `.sigma-agent/MEMORY.md` is read from the current repository worktree with a 16 KiB source-file limit, but its contents are never injected wholesale into the prompt. It stores short, human-reviewed durable facts shared across sessions; session snapshots remain separate recovery state, and the code index remains separate current-source retrieval. Memory should capture expensive-to-rediscover test procedures, architecture decisions, compatibility rules, and recurring pitfalls—not source code or task transcripts. New entries use `- YYYY-MM-DD | kind: testing | source: path | fact`; supported kinds are `testing`, `architecture`, `compatibility`, `pitfall`, and `workflow`. When entries exist, the Agent gets `search_memory`: local BM25 works without services, while configured embeddings and Qdrant add vector search. Vector failures or empty/stale results fall back to local BM25. `memory_enabled: false` disables both memory instructions and the `search_memory` tool without changing code retrieval. Agent edit tools cannot modify the file.
+The optional `.sigma-agent/MEMORY.md` is read from the current repository worktree with a 16 KiB source-file limit, but its contents are never injected wholesale into the prompt. It stores short durable facts shared across sessions; session snapshots remain separate recovery state, and source browsing remains separate. Memory should capture expensive-to-rediscover test procedures, architecture decisions, compatibility rules, and recurring pitfalls—not source code or task transcripts. New entries use `- YYYY-MM-DD | kind: testing | source: path | fact`; supported kinds are `testing`, `architecture`, `compatibility`, `pitfall`, and `workflow`. When entries exist, the Agent gets `search_memory`: local BM25 works without services, while configured embeddings and Qdrant add vector search and RRF. Vector failures or empty results fall back to local BM25. `memory_enabled: false` disables memory instructions and the `search_memory` tool. Agent edit tools cannot modify the file.
 
-`--index --repo <path>` synchronizes code chunks to `sigma_agent_code` and reviewed facts to the separate `sigma_agent_memory` collection in the same Qdrant service. `--index-memory --repo <path>` syncs only memory. Vector search applies exact `repo_id` filtering, returns kind, provenance, and review age, and checks hits against current Markdown hashes before use. Entries older than 180 days are marked for revalidation. The prompt asks the Agent to verify retrieved facts against current code/tests, treats memory as untrusted reference data, and gives current source and user instructions precedence. No automatic memory writing is implemented. Symlink paths are rejected so project context cannot escape the worktree.
+`--index-memory --repo <path>` synchronizes memory facts to `sigma_agent_memory`; no code collection or code indexing command exists. Vector search applies exact `repo_id` filtering and returns kind, provenance, and age. Entries older than 180 days are marked for revalidation. The prompt asks the Agent to verify retrieved facts against current code/tests, treats memory as untrusted reference data, and gives current source and user instructions precedence. Automatic capture is controlled by `memory_auto_write` and must remain disabled in controlled memory/no-memory evaluations to prevent cross-task leakage. Symlink paths are rejected so project context cannot escape the worktree.
 
 ## Pi concepts to reproduce in Go
 
@@ -104,7 +111,7 @@ The optional `.sigma-agent/MEMORY.md` is read from the current repository worktr
 
 ## Initial scope and limits
 
-The current Go milestone implements local resumable sessions with streaming, tool policies, bounded retry/cancel, a JSONL event journal, an extractive context window, and a read-only GitHub MCP adapter that activates when credentials are configured. It also has a Pi-style terminal REPL, a loopback HTTP/SSE task service with bounded workers and persisted task records, an optional Qdrant-backed hybrid code retriever, on-demand project Skills, and human-reviewed read-only repository memory. Retrieval can be measured on 175 path-labeled, non-SQLFluff SWE-bench BM25 dev cases; hybrid gains and memory utility are not yet measured. One matched Skill smoke verified the workflow but showed no better result and used more tokens/calls; broader task-quality effects remain unmeasured. Workspace tools remain an allowlist with fixed Docker test profiles. Multi-host workers, authentication, model-generated compaction, agent-authored memory, and production-grade queue guarantees are not implied by this milestone.
+The current Go milestone implements local resumable sessions with streaming, tool policies, bounded retry/cancel, a JSONL event journal, an extractive context window, and GitHub MCP issue/repository/PR context. Direct CLI sessions can opt in to commit and push one explicitly named new feature branch using local Git credentials; `--github-write` adds only pull-request creation, scoped to the checkout's `origin` repository and that branch, and never merges. It also has a Pi-style terminal REPL, a loopback HTTP/SSE task service with bounded workers and persisted task records, ordinary source browsing, on-demand project Skills, optional repository memory with a memory-only Qdrant index, and opt-in post-run memory capture. Coding tasks can use fixed Go test profiles or run repository-native Linux commands in a configured, resource-limited Docker image. Containers are offline by default; `--allow-container-network` lets the Agent download project dependencies and run Go tests with module downloads. Host packages and external service stacks still need to be present/prepared separately. The six-query labeled retrieval harness has not yet been run with a live embedding service. One matched Skill smoke verified the workflow but showed no better result and used more tokens/calls; broader task-quality effects remain unmeasured. Multi-host workers, authentication, model-generated compaction, independent memory-quality evaluation, and production-grade queue guarantees are not implied by this milestone.
 
 The Go module has no Agent SDK dependency. The archived TypeScript/Pi prototype is not part of the Go runtime's execution path.
 

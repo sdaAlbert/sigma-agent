@@ -2,8 +2,6 @@ package sigmaagent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -31,6 +29,9 @@ func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T)
 	}
 	if !strings.Contains(guidance.SystemPrompt("base"), "go-issue-workflow") || !strings.Contains(guidance.SystemPrompt("base"), "Use when fixing a Go issue.") {
 		t.Fatal("system prompt does not expose the skill name and description")
+	}
+	if !strings.Contains(guidance.SystemPrompt("base"), "ordered execution path") || !strings.Contains(guidance.SystemPrompt("base"), "route/method matching") {
+		t.Fatal("system prompt does not require tracing dispatch and short-circuit boundaries")
 	}
 
 	tool := guidance.SkillTool()
@@ -64,14 +65,18 @@ func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 		t.Fatal("empty skill registry should reject lookup")
 	}
 
-	tools, err := BuiltinTools(root, "", 0, nil, nil, false)
+	tools, err := BuiltinTools(root, "", 0, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	findTool(t, tools, "search_memory")
 	for _, name := range []string{"edit_file", "apply_patch"} {
 		tool := findTool(t, tools, name)
-		if _, err := tool.Handle(context.Background(), json.RawMessage(`{"path":".sigma-agent/MEMORY.md","expected_sha256":"0000000000000000000000000000000000000000000000000000000000000000","old_text":"x","new_text":"y","content":"changed"}`)); err == nil {
+		input := `{"path":".sigma-agent/MEMORY.md","old_text":"x","new_text":"y"}`
+		if name == "apply_patch" {
+			input = `{"path":".sigma-agent/MEMORY.md","content":"changed"}`
+		}
+		if _, err := tool.Handle(context.Background(), json.RawMessage(input)); err == nil {
 			t.Fatalf("%s should not modify project memory", name)
 		}
 	}
@@ -138,15 +143,14 @@ func TestWritingToolsRejectProjectGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256Hex(data)
-	tools, err := BuiltinTools(root, "", 0, nil, nil, false)
+	tools, err := BuiltinTools(root, "", 0, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{".agents/skills/go-issue-workflow/SKILL.md", ".sigma-agent/MEMORY.md"} {
 		for _, name := range []string{"edit_file", "apply_patch"} {
 			tool := findTool(t, tools, name)
-			args := map[string]any{"path": path, "expected_sha256": sum, "old_text": "package", "new_text": "changed", "content": "changed"}
+			args := map[string]any{"path": path, "old_text": "package", "new_text": "changed", "content": "changed"}
 			raw, _ := json.Marshal(args)
 			if _, err := tool.Handle(context.Background(), raw); err == nil {
 				t.Fatalf("%s unexpectedly accepted write to %s", name, path)
@@ -167,11 +171,6 @@ func writeFixture(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 func findTool(t *testing.T, tools []agent.Tool, name string) agent.Tool {

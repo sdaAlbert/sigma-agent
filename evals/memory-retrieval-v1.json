@@ -1,0 +1,62 @@
+[
+  {
+    "id": "offline-go-tests-zh",
+    "query": "容器里跑 Go 测试不能联网、依赖下载失败时应该怎么准备？",
+    "relevant": [
+      {
+        "source": "`CONFIGURATION.md` (run_tests)",
+        "fact_contains": "no external egress"
+      }
+    ]
+  },
+  {
+    "id": "embedding-credential-boundary-en",
+    "query": "I configured the MiniMax chat API key. What else is needed for vector memory search?",
+    "relevant": [
+      {
+        "source": "`CONFIGURATION.md` (embedding settings)",
+        "fact_contains": "does not configure embeddings"
+      }
+    ]
+  },
+  {
+    "id": "memory-source-of-truth-zh",
+    "query": "Agent 会不会自动把刚修好的 issue 经验写进长期记忆？最终以哪里为准？",
+    "relevant": [
+      {
+        "source": "`CONFIGURATION.md` (repository memory)",
+        "fact_contains": "does not write memory automatically"
+      }
+    ]
+  },
+  {
+    "id": "repo-isolation-en",
+    "query": "Will Qdrant results from another clone of the same GitHub repository appear in this workspace?",
+    "relevant": [
+      {
+        "source": "`CONFIGURATION.md` (repository identity)",
+        "fact_contains": "separate clones do not share"
+      }
+    ]
+  },
+  {
+    "id": "stale-memory-zh",
+    "query": "长期记忆放了半年以上，还能直接当成当前项目规则吗？",
+    "relevant": [
+      {
+        "source": "`ARCHITECTURE.md` (repository memory)",
+        "fact_contains": "older than 180 days require revalidation"
+      }
+    ]
+  },
+  {
+    "id": "memory-vs-source-en",
+    "query": "Where should the agent look for the implementation details of the current issue?",
+    "relevant": [
+      {
+        "source": "`ARCHITECTURE.md` (workspace tools)",
+        "fact_contains": "not a code index"
+      }
+    ]
+  }
+]

@@ -19,6 +19,7 @@ import (
 )
 
 type MiniMaxMessagesModel struct {
+	Provider        string
 	Model           string
 	BaseURL         string
 	APIKey          string
@@ -58,6 +59,7 @@ func NewMiniMaxMessagesModelFromEnv() (*MiniMaxMessagesModel, error) {
 		return nil, fmt.Errorf("set ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, or MINIMAX_API_KEY, or save the key in .secrets/minimax-api-key")
 	}
 	return &MiniMaxMessagesModel{
+		Provider:        "minimax",
 		Model:           model,
 		BaseURL:         baseURL,
 		APIKey:          apiKey,
@@ -67,7 +69,18 @@ func NewMiniMaxMessagesModelFromEnv() (*MiniMaxMessagesModel, error) {
 	}, nil
 }
 
-func (m *MiniMaxMessagesModel) ModelID() string { return m.Model }
+func (m *MiniMaxMessagesModel) ModelID() string {
+	if m.Provider != "" {
+		return m.Provider + "/" + m.Model
+	}
+	return m.Model
+}
+
+func (m *MiniMaxMessagesModel) ConfigureRuntime(maxRetries, maxOutputTokens int, timeout time.Duration) {
+	m.MaxRetries = maxRetries
+	m.MaxOutputTokens = maxOutputTokens
+	m.Client = &http.Client{Timeout: timeout}
+}
 
 // WebSearch runs MiniMax's hosted web_search server tool and returns the
 // final answer with source metadata for the agent to inspect.
@@ -103,7 +116,7 @@ func (m *MiniMaxMessagesModel) WebSearch(ctx context.Context, query string) (str
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("anthropic-version", "2023-06-01")
-	setMessagesAuth(request, m.BaseURL, m.APIKey)
+	setMessagesAuthForProvider(request, m.Provider, m.BaseURL, m.APIKey)
 	response, err := m.Client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -223,7 +236,7 @@ func (m *MiniMaxMessagesModel) Stream(ctx context.Context, system string, messag
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Accept", "text/event-stream")
 		request.Header.Set("anthropic-version", "2023-06-01")
-		setMessagesAuth(request, m.BaseURL, m.APIKey)
+		setMessagesAuthForProvider(request, m.Provider, m.BaseURL, m.APIKey)
 		response, err := m.Client.Do(request)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -243,7 +256,7 @@ func (m *MiniMaxMessagesModel) Stream(ctx context.Context, system string, messag
 			retryAfter := response.Header.Get("Retry-After")
 			response.Body.Close()
 			if readErr != nil {
-				return ModelResponse{}, fmt.Errorf("read MiniMax error response: %w", readErr)
+				return ModelResponse{}, fmt.Errorf("read %s error response: %w", m.providerName(), readErr)
 			}
 			message := strings.TrimSpace(string(responseBody))
 			quotaError := response.StatusCode == http.StatusPaymentRequired || isQuotaExhaustion(message)
@@ -266,13 +279,25 @@ func (m *MiniMaxMessagesModel) Stream(ctx context.Context, system string, messag
 				message = message[:1000] + "…"
 			}
 			if quotaError {
-				return ModelResponse{}, fmt.Errorf("MiniMax account quota or balance is exhausted (HTTP %d); check provider usage/billing: %s", response.StatusCode, message)
+				return ModelResponse{}, fmt.Errorf("%s account quota or balance is exhausted (HTTP %d); check provider usage/billing: %s", m.providerName(), response.StatusCode, message)
 			}
-			return ModelResponse{}, fmt.Errorf("MiniMax API returned HTTP %d: %s", response.StatusCode, message)
+			return ModelResponse{}, fmt.Errorf("%s API returned HTTP %d: %s", m.providerName(), response.StatusCode, message)
 		}
 		defer response.Body.Close()
-		return decodeMiniMaxStream(response.Body, onEvent)
+		return decodeMessagesStream(response.Body, onEvent)
 	}
+}
+
+func (m *MiniMaxMessagesModel) providerName() string {
+	if strings.TrimSpace(m.Provider) == "" {
+		return "MiniMax"
+	}
+	for _, provider := range supportedModelProviders {
+		if provider.ID == m.Provider {
+			return provider.Name
+		}
+	}
+	return m.Provider
 }
 
 func isPromptTooLong(status int, message string) bool {
@@ -354,7 +379,7 @@ type sseEnvelope struct {
 	} `json:"error"`
 }
 
-func decodeMiniMaxStream(body io.Reader, onEvent func(ModelEvent)) (ModelResponse, error) {
+func decodeMessagesStream(body io.Reader, onEvent func(ModelEvent)) (ModelResponse, error) {
 	response := ModelResponse{}
 	indices := make(map[int]int)
 	partialInputs := make(map[int]*strings.Builder)
@@ -442,7 +467,7 @@ func decodeMiniMaxStream(body io.Reader, onEvent func(ModelEvent)) (ModelRespons
 			if message == "" {
 				message = event.Error.Type
 			}
-			return fmt.Errorf("MiniMax stream error: %s", message)
+			return fmt.Errorf("model stream error: %s", message)
 		}
 		return nil
 	}
@@ -519,10 +544,12 @@ func waitRetry(ctx context.Context, delay time.Duration) error {
 func messagesEndpoint(baseURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid SIGMA_AGENT_BASE_URL / ANTHROPIC_BASE_URL")
+		return "", errors.New("invalid provider base URL")
 	}
 	trimmed := strings.TrimRight(parsed.Path, "/")
-	if !strings.HasSuffix(trimmed, "/v1/messages") {
+	if strings.HasSuffix(trimmed, "/v1") {
+		trimmed += "/messages"
+	} else if !strings.HasSuffix(trimmed, "/v1/messages") {
 		trimmed += "/v1/messages"
 	}
 	parsed.Path = trimmed
@@ -530,6 +557,18 @@ func messagesEndpoint(baseURL string) (string, error) {
 }
 
 func setMessagesAuth(request *http.Request, baseURL, apiKey string) {
+	setMessagesAuthForProvider(request, "minimax", baseURL, apiKey)
+}
+
+func setMessagesAuthForProvider(request *http.Request, provider, baseURL, apiKey string) {
+	if provider == "anthropic" {
+		if apiKey == strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) && apiKey != "" {
+			request.Header.Set("Authorization", "Bearer "+apiKey)
+			return
+		}
+		request.Header.Set("x-api-key", apiKey)
+		return
+	}
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err == nil {
 		host := strings.ToLower(parsed.Hostname())

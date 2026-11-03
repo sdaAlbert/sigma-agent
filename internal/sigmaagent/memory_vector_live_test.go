@@ -71,7 +71,7 @@ func TestMemoryIndexAndSearchIsRepositoryScoped(t *testing.T) {
 	if len(hits) != 1 || !strings.Contains(hits[0].Entry.Text, "Queue recovery") {
 		t.Fatalf("repo A search returned cross-repository or unexpected entries: %#v", hits)
 	}
-	toolResult, err := workspace{root: repoA}.searchMemoryTool(v, defaultMaxRetrievalQueryBytes).Handle(ctx, json.RawMessage(`{"query":"How is queue recovery tested?"}`))
+	toolResult, err := workspace{root: repoA}.searchMemoryTool(v, defaultMaxMemoryQueryBytes).Handle(ctx, json.RawMessage(`{"query":"How is queue recovery tested?"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

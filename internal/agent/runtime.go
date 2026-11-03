@@ -19,9 +19,17 @@ type ToolDefinition struct {
 
 type ToolHandler func(context.Context, json.RawMessage) (string, error)
 
+type toolTurnContextKey struct{}
+
+// ToolTurn returns the assistant turn in which the current tool call was made.
+func ToolTurn(ctx context.Context) (int, bool) {
+	turn, ok := ctx.Value(toolTurnContextKey{}).(int)
+	return turn, ok
+}
+
 type Tool struct {
 	Definition    ToolDefinition
-	ExecutionMode string // "parallel" for independent reads; otherwise calls are serialized.
+	ExecutionMode string // "parallel" for independent reads; "parallel_write" for path-locked mutations; otherwise serialized.
 	Validate      func(json.RawMessage) error
 	Handle        ToolHandler
 }
@@ -122,7 +130,7 @@ type Limits struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxTurns: 32, MaxToolCalls: 64, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
+	return Limits{MaxTurns: 64, MaxToolCalls: 256, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
 }
 
 type Result struct {
@@ -317,6 +325,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	}
 	toolOrder := 0
 	lastWriteOrder, lastTestOrder, lastDiffOrder := 0, 0, 0
+	lastTestPassed := false
 	reviewOnly := false
 	outputContinuationRetries := 0
 	const maxOutputContinuationRetries = 2
@@ -334,12 +343,19 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			finalizationTurn = turn
 		}
 		finalizationPhase := turn >= finalizationTurn
-		reviewNeeded := lastWriteOrder > 0 && (lastTestOrder <= lastWriteOrder || lastDiffOrder <= lastWriteOrder)
-		if !reviewNeeded {
-			reviewOnly = false
+		testsNeeded := lastWriteOrder > 0 && lastTestOrder <= lastWriteOrder
+		diffNeeded := lastWriteOrder > 0 && lastDiffOrder <= lastWriteOrder
+		reviewNeeded := testsNeeded || diffNeeded
+		verificationComplete := lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && lastDiffOrder > lastWriteOrder && lastTestPassed
+		reviewOnly = reviewNeeded && !(lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && !lastTestPassed)
+		if lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && !lastTestPassed {
+			systemPrompt += "\n\nLATEST TEST RESULT FAILED: inspect the first actionable compiler or test failure, make a targeted correction, then rerun the relevant test and inspect git_diff again. Do not finish with a newly introduced compile failure. If the failure is demonstrably pre-existing or environmental, preserve the evidence and report that limitation."
 		}
 		if reviewNeeded {
-			systemPrompt += "\n\nREQUIRED REVIEW: Source changes were made in this run. Before finishing, run run_tests and inspect git_diff after the latest successful edit. If a test cannot run, keep its output as evidence and report why."
+			systemPrompt += "\n\nREQUIRED REVIEW: Source changes were made in this run. Complete the checks still outstanding after the latest successful edit. The runtime exposes only missing checks; do not repeat a completed check. Use run_tests for Go profiles or run_command with purpose=test for repository-native checks; inspect the result status and git_diff. If a test cannot run, keep its output as evidence and report why."
+		}
+		if verificationComplete {
+			systemPrompt += "\n\nVERIFICATION COMPLETE: The current source revision has passed its required test command and its diff has been inspected. Do not rerun tests or git_diff without a new source edit. If the inspection revealed a concrete defect, make a targeted edit; otherwise provide the final summary now."
 		}
 		if finalizationPhase {
 			remaining := limits.MaxTurns - turn + 1
@@ -357,8 +373,8 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			}
 		}
 		toolDefinitions := s.Tools.Definitions()
-		if finalizationPhase {
-			toolDefinitions = finalizationToolDefinitions(toolDefinitions, reviewOnly)
+		if finalizationPhase || reviewOnly || verificationComplete {
+			toolDefinitions = finalizationToolDefinitions(toolDefinitions, reviewOnly, testsNeeded, diffNeeded, verificationComplete)
 		}
 		response, err := s.Model.Stream(ctx, systemPrompt, requestMessages, toolDefinitions, func(modelEvent ModelEvent) {
 			s.emit(Event{Type: "model_" + modelEvent.Type, Turn: turn, Text: modelEvent.Text, Tool: modelEvent.Name})
@@ -415,23 +431,79 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				return result, err
 			}
 			result.ToolCalls += len(toolCalls)
-			toolResults, toolErr := s.executeTools(ctx, turn, finalizationTurn, reviewOnly, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
+			toolResults, toolErr := s.executeTools(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
 			for index, call := range toolCalls {
+				if index >= len(toolResults) {
+					continue
+				}
+				if isVerificationGateRejection(toolResults[index]) {
+					continue
+				}
 				toolOrder++
-				if index >= len(toolResults) || toolResults[index].IsError {
+				if call.Name == "run_tests" {
+					lastTestOrder = toolOrder
+					lastTestPassed = !toolResults[index].IsError && strings.Contains(toolResults[index].Content, "run_tests status=passed exit_code=0")
+					continue
+				}
+				if call.Name == "run_command" {
+					content := toolResults[index].Content
+					statusLine := ""
+					if marker := strings.Index(content, "SIGMA_RUN_COMMAND "); marker >= 0 {
+						statusLine = strings.SplitN(content[marker:], "\n", 2)[0]
+					}
+					workspaceChanged := strings.Contains(statusLine, "workspace_changed=true")
+					if workspaceChanged {
+						lastWriteOrder = toolOrder
+						reviewOnly = true
+					}
+					var commandInput struct {
+						Purpose string `json:"purpose"`
+						Action  string `json:"action"`
+					}
+					_ = json.Unmarshal(call.Input, &commandInput)
+					status := ""
+					responsePurpose, responseAction := "", ""
+					if marker := strings.Index(content, "SIGMA_RUN_COMMAND "); marker >= 0 {
+						for _, field := range strings.Fields(strings.SplitN(content[marker:], "\n", 2)[0]) {
+							if strings.HasPrefix(field, "status=") {
+								status = strings.TrimPrefix(field, "status=")
+							} else if strings.HasPrefix(field, "purpose=") {
+								responsePurpose = strings.TrimPrefix(field, "purpose=")
+							} else if strings.HasPrefix(field, "action=") {
+								responseAction = strings.TrimPrefix(field, "action=")
+							}
+						}
+					}
+					if commandInput.Purpose == "" {
+						commandInput.Purpose = responsePurpose
+					}
+					if commandInput.Action == "" {
+						commandInput.Action = responseAction
+						if commandInput.Action == "" {
+							commandInput.Action = "run"
+						}
+					}
+					if commandInput.Purpose == "test" && commandInput.Action != "start" && status != "running" {
+						lastTestOrder = toolOrder
+						lastTestPassed = !toolResults[index].IsError && !workspaceChanged && strings.Contains(statusLine, "status=passed") && strings.Contains(statusLine, "exit_code=0")
+					}
+					continue
+				}
+				if toolResults[index].IsError {
 					continue
 				}
 				switch call.Name {
 				case "create_file", "edit_file", "apply_patch":
 					lastWriteOrder = toolOrder
-					reviewOnly = false
-				case "run_tests":
-					lastTestOrder = toolOrder
+					reviewOnly = true
 				case "git_diff":
 					lastDiffOrder = toolOrder
 				}
 			}
 			if lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && lastDiffOrder > lastWriteOrder {
+				// A completed verification pass can reveal a defect that needs a
+				// targeted fix. Permit that fix even near the run limit; the next
+				// turn will require tests and a diff again after the new write.
 				reviewOnly = false
 			}
 			if len(toolResults) > 0 {
@@ -454,7 +526,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		s.emit(Event{Type: "turn_end", Turn: turn})
 		if lastWriteOrder > 0 && (lastTestOrder <= lastWriteOrder || lastDiffOrder <= lastWriteOrder) {
 			if turn == limits.MaxTurns {
-				return result, errors.New("implementation changes were not finalized: run_tests and git_diff must both run after the latest successful edit")
+				return result, fmt.Errorf("implementation changes were not finalized: %s must run after the latest successful edit", strings.Join(missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder), " and "))
 			}
 			reviewOnly = true
 			continue
@@ -477,16 +549,41 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			return result, nil
 		}
 	}
+	if lastWriteOrder > 0 && (lastTestOrder <= lastWriteOrder || lastDiffOrder <= lastWriteOrder) {
+		return result, fmt.Errorf("agent turn limit (%d) reached with unverified changes: %s did not run after the latest edit", limits.MaxTurns, strings.Join(missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder), " and "))
+	}
 	return result, fmt.Errorf("agent turn limit (%d) reached", limits.MaxTurns)
 }
 
-func finalizationToolDefinitions(definitions []ToolDefinition, reviewNeeded bool) []ToolDefinition {
-	allowed := map[string]bool{
-		"read_file": true, "create_file": true, "edit_file": true, "apply_patch": true,
-		"run_tests": true, "git_diff": true,
+func missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder int) []string {
+	var missing []string
+	if lastTestOrder <= lastWriteOrder {
+		missing = append(missing, "a relevant test command (run_tests or run_command with purpose=test)")
 	}
-	if reviewNeeded {
-		allowed = map[string]bool{"read_file": true, "run_tests": true, "git_diff": true}
+	if lastDiffOrder <= lastWriteOrder {
+		missing = append(missing, "git_diff")
+	}
+	return missing
+}
+
+func finalizationToolDefinitions(definitions []ToolDefinition, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool) []ToolDefinition {
+	allowed := map[string]bool{
+		"read_file": true, "record_change_contract": true, "create_file": true, "edit_file": true, "apply_patch": true,
+		"run_tests": true, "run_command": true, "git_diff": true,
+	}
+	if reviewOnly {
+		allowed = map[string]bool{
+			"run_tests":   testsNeeded,
+			"run_command": testsNeeded,
+			"git_diff":    diffNeeded,
+		}
+	} else if verificationComplete {
+		allowed = map[string]bool{
+			"read_file":   true,
+			"create_file": true,
+			"edit_file":   true,
+			"apply_patch": true,
+		}
 	}
 	filtered := make([]ToolDefinition, 0, len(definitions))
 	for _, definition := range definitions {
@@ -509,11 +606,20 @@ func (s *Session) hasMessageIDLocked(id string) bool {
 	return contains(s.messages) || contains(s.steering) || contains(s.followUps)
 }
 
-func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, reviewOnly bool, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
+func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
 	parallel := len(calls) > 1
+	mode := ""
 	for _, call := range calls {
 		tool, ok := s.Tools.byName[call.Name]
-		if !ok || tool.ExecutionMode != "parallel" {
+		if !ok || (tool.ExecutionMode != "parallel" && tool.ExecutionMode != "parallel_write") {
+			parallel = false
+			break
+		}
+		if mode == "" {
+			mode = tool.ExecutionMode
+		} else if mode != tool.ExecutionMode {
+			// Keep mixed read/write batches ordered. Pure reads and pure
+			// per-file writes each have their own safe concurrency policy.
 			parallel = false
 			break
 		}
@@ -525,13 +631,13 @@ func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, 
 			wg.Add(1)
 			go func(i int, call ContentBlock) {
 				defer wg.Done()
-				results[i] = s.executeTool(ctx, turn, finalizationTurn, reviewOnly, call, timeout, maxResultBytes)
+				results[i] = s.executeTool(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, call, timeout, maxResultBytes)
 			}(i, call)
 		}
 		wg.Wait()
 	} else {
 		for i, call := range calls {
-			results[i] = s.executeTool(ctx, turn, finalizationTurn, reviewOnly, call, timeout, maxResultBytes)
+			results[i] = s.executeTool(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, call, timeout, maxResultBytes)
 			if ctx.Err() != nil {
 				break
 			}
@@ -545,7 +651,7 @@ func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, 
 	return results, nil
 }
 
-func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, reviewOnly bool, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
+func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
 	tool, exists := s.Tools.byName[call.Name]
 	started := time.Now()
 	s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name})
@@ -559,12 +665,20 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 		return toolResult(call.ID, message, true)
 	}
 	if turn >= finalizationTurn && !isFinalizationTool(call.Name) {
-		message := "finalization phase only allows read_file, targeted file edits, run_tests, and git_diff"
+		message := "finalization phase only allows read_file, targeted file edits, run_tests, run_command, and git_diff"
 		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: message})
 		return toolResult(call.ID, message, true)
 	}
-	if turn >= finalizationTurn && reviewOnly && !isReviewTool(call.Name) {
-		message := "run_tests and git_diff after the latest edit before making further changes"
+	if reviewOnly && !reviewToolNeeded(call.Name, testsNeeded, diffNeeded) {
+		message := "verification phase only allows checks still outstanding after the latest edit; do not repeat completed checks"
+		if !testsNeeded && !diffNeeded {
+			message = "verification is complete; no further tools are allowed in the finalization phase"
+		}
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: message})
+		return toolResult(call.ID, message, true)
+	}
+	if verificationComplete && isVerificationCheck(call.Name, call.Input) {
+		message := "verification is complete for the unchanged source; make a targeted edit if needed or provide the final summary"
 		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, Duration: time.Since(started).Milliseconds(), Error: message})
 		return toolResult(call.ID, message, true)
 	}
@@ -581,6 +695,7 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	toolCtx = context.WithValue(toolCtx, toolTurnContextKey{}, turn)
 	var output string
 	var callErr error
 	if s.BeforeTool != nil {
@@ -625,18 +740,35 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 	return toolResult(call.ID, output, callErr != nil)
 }
 
-func isFinalizationTool(name string) bool {
+func reviewToolNeeded(name string, testsNeeded, diffNeeded bool) bool {
+	return name == "run_tests" && testsNeeded || name == "run_command" && testsNeeded || name == "git_diff" && diffNeeded
+}
+
+func isVerificationCheck(name string, input json.RawMessage) bool {
 	switch name {
-	case "read_file", "create_file", "edit_file", "apply_patch", "run_tests", "git_diff":
+	case "run_tests", "git_diff":
 		return true
+	case "run_command":
+		var command struct {
+			Purpose string `json:"purpose"`
+		}
+		return json.Unmarshal(input, &command) == nil && command.Purpose == "test"
 	default:
 		return false
 	}
 }
 
-func isReviewTool(name string) bool {
+func isVerificationGateRejection(result ContentBlock) bool {
+	if !result.IsError {
+		return false
+	}
+	return strings.Contains(result.Content, "verification phase only allows checks still outstanding") ||
+		strings.Contains(result.Content, "verification is complete for the unchanged source")
+}
+
+func isFinalizationTool(name string) bool {
 	switch name {
-	case "read_file", "run_tests", "git_diff":
+	case "read_file", "record_change_contract", "create_file", "edit_file", "apply_patch", "run_tests", "run_command", "git_diff":
 		return true
 	default:
 		return false
