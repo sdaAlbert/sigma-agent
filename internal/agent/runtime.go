@@ -391,10 +391,10 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			systemPrompt += "\n\nLATEST TEST RESULT FAILED: inspect the first actionable compiler or test failure, make a targeted correction, then rerun the relevant test and inspect git_diff again. Do not finish with a newly introduced compile failure. If the failure is demonstrably pre-existing or environmental, preserve the evidence and report that limitation."
 		}
 		if reviewNeeded {
-			systemPrompt += "\n\nREQUIRED REVIEW: Source changes were made in this run. Complete the checks still outstanding after the latest successful edit. The runtime exposes only missing verification checks; do not repeat a completed check. You may read relevant files and make a targeted correction when test or diff evidence shows a problem. Every new write makes both tests and git_diff outstanding again. Use run_command with purpose=test for the repository's native test command. If a test cannot run, keep its output as evidence and report why."
+			systemPrompt += "\n\nRECOMMENDED REVIEW: Source changes were made in this run. Run relevant tests and inspect git_diff before finishing. You may continue investigating, rerun checks, and make corrections as needed; a new edit makes earlier test and diff results stale. If a check cannot run, keep its output as evidence and report why."
 		}
 		if verificationComplete {
-			systemPrompt += "\n\nVERIFICATION COMPLETE: The current source revision has passed its required test command and its diff has been inspected. Do not rerun tests or git_diff without a new source edit. If the inspection revealed a concrete defect, make a targeted edit; otherwise provide the final summary now."
+			systemPrompt += "\n\nVERIFICATION STATUS: The current source revision has passed a test command and its diff has been inspected. These checks are not locked; continue investigating or rerun them if useful. If no further work is needed, provide the final summary."
 		}
 		if finalizationPhase {
 			remaining := limits.MaxTurns - turn + 1
@@ -404,7 +404,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			systemPrompt += fmt.Sprintf("\n\nCOMMAND PROGRESS RULE: Do not repeat an identical failed run_command unless the workspace or environment has changed. Inspect the failure, change the command or implementation, or report the blocker. The run pauses after %d identical failed calls without a workspace change.", limits.MaxRepeatedFailedCommands)
 		}
 		if inspectionBudgetExhausted {
-			systemPrompt += "\n\nFINALIZATION EXPLORATION BUDGET EXHAUSTED: No more repository searches, file reads, or non-test shell commands are available. Use evidence already gathered to make one targeted correction, run the required test, inspect git_diff, or report the concrete limitation. Do not create scratch files or keep probing the same issue."
+			systemPrompt += "\n\nFOCUSED EXPLORATION: You are in the final turns. Prefer focused investigation and act on useful new evidence; all tools remain available. Avoid repeating an unchanged probe without a reason."
 		}
 		systemPrompt, requestMessages := s.modelContext(systemPrompt)
 		if s.Context != nil {
@@ -421,9 +421,6 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		toolDefinitions := s.Tools.Definitions()
 		if finalizationPhase || reviewOnly || verificationComplete {
 			toolDefinitions = finalizationToolDefinitions(toolDefinitions, reviewOnly, testsNeeded, diffNeeded, verificationComplete)
-		}
-		if inspectionBudgetExhausted {
-			toolDefinitions = finalizationBudgetToolDefinitions(toolDefinitions, true)
 		}
 		toolDefinitions = requiredSkillBootstrapTools(toolDefinitions, s.pendingRequiredSkills())
 		response, err := s.Model.Stream(ctx, systemPrompt, requestMessages, toolDefinitions, func(modelEvent ModelEvent) {
@@ -546,9 +543,6 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				}
 				if turn >= finalizationTurn && isFinalizationInspectionTool(call.Name, call.Input) {
 					finalizationInspectionCalls++
-				}
-				if isVerificationGateRejection(toolResults[index]) {
-					continue
 				}
 				if toolCallChangedWorkspaceOrEnvironment(call, toolResults[index], s.Tools) {
 					clear(repeatedFailedCommands)
@@ -740,39 +734,9 @@ func missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder int) []str
 }
 
 func finalizationToolDefinitions(definitions []ToolDefinition, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool) []ToolDefinition {
-	allowed := map[string]bool{
-		"read_file": true, "record_change_contract": true, "create_file": true, "edit_file": true, "apply_patch": true,
-		"run_command": true, "git_diff": true,
-	}
-	if reviewOnly {
-		allowed = map[string]bool{
-			// Verification is a gate on completion, not a ban on repairing a
-			// defect discovered by a test or diff. Keep targeted correction tools
-			// available while exposing only checks that are still outstanding.
-			"read_file":              true,
-			"record_change_contract": true,
-			"create_file":            true,
-			"edit_file":              true,
-			"apply_patch":            true,
-			"run_command":            testsNeeded,
-			"git_diff":               diffNeeded,
-		}
-	} else if verificationComplete {
-		allowed = map[string]bool{
-			"read_file":              true,
-			"record_change_contract": true,
-			"create_file":            true,
-			"edit_file":              true,
-			"apply_patch":            true,
-		}
-	}
-	filtered := make([]ToolDefinition, 0, len(definitions))
-	for _, definition := range definitions {
-		if allowed[definition.Name] {
-			filtered = append(filtered, definition)
-		}
-	}
-	return filtered
+	// Review status is advisory. Keep the full toolset available so the model
+	// can investigate new evidence, rerun checks, or correct its work.
+	return definitions
 }
 
 func (s *Session) hasMessageIDLocked(id string) bool {
@@ -941,35 +905,6 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
-	s.mu.Lock()
-	inspectionBudgetExhausted := s.finalizationInspectionBudgetExhausted
-	s.mu.Unlock()
-	if finalizationInspectionCallBlocked(call.Name, call.Input, inspectionBudgetExhausted) {
-		message := "finalization exploration budget exhausted; use current evidence to edit, test, inspect git_diff, or report the limitation"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
-		return toolResult(call.ID, message, true)
-	}
-	if turn >= finalizationTurn && !isFinalizationTool(call.Name) {
-		message := "finalization phase only allows read_file, targeted file edits, run_command, and git_diff"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
-		return toolResult(call.ID, message, true)
-	}
-	if reviewOnly && !reviewToolNeeded(call.Name, call.Input, testsNeeded, diffNeeded) && !isReviewCorrectionTool(call.Name) {
-		message := "verification phase only allows checks still outstanding after the latest edit; do not repeat completed checks"
-		if call.Name == "run_command" && testsNeeded {
-			message = "repository tests are still outstanding; use run_command with purpose=test. Inspection and build commands are paused during verification."
-		}
-		if !testsNeeded && !diffNeeded {
-			message = "verification is complete; no further tools are allowed in the finalization phase"
-		}
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
-		return toolResult(call.ID, message, true)
-	}
-	if verificationComplete && isVerificationCheck(call.Name, call.Input) {
-		message := "verification is complete for the unchanged source; make a targeted edit if needed or provide the final summary"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
-		return toolResult(call.ID, message, true)
-	}
 	if !json.Valid(call.Input) {
 		message := "tool arguments are not valid JSON"
 		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
@@ -1037,54 +972,10 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 	return toolResult(call.ID, output, callErr != nil)
 }
 
-func reviewToolNeeded(name string, input json.RawMessage, testsNeeded, diffNeeded bool) bool {
-	if name == "run_command" {
-		if !testsNeeded {
-			return false
-		}
-		var command struct {
-			Purpose string `json:"purpose"`
-		}
-		return json.Unmarshal(input, &command) == nil && command.Purpose == "test"
-	}
-	return name == "git_diff" && diffNeeded
-}
-
-func isReviewCorrectionTool(name string) bool {
-	switch name {
-	case "read_file", "record_change_contract", "create_file", "edit_file", "apply_patch":
-		return true
-	default:
-		return false
-	}
-}
-
 const maxFinalizationInspectionCalls = 8
 
 func finalizationInspectionBudgetExhausted(finalizationPhase bool, inspectionCalls int) bool {
 	return finalizationPhase && inspectionCalls >= maxFinalizationInspectionCalls
-}
-
-func finalizationBudgetToolDefinitions(definitions []ToolDefinition, exhausted bool) []ToolDefinition {
-	if !exhausted {
-		return definitions
-	}
-	allowed := map[string]bool{
-		"read_file":              true,
-		"record_change_contract": true,
-		"create_file":            true,
-		"edit_file":              true,
-		"apply_patch":            true,
-		"run_command":            true,
-		"git_diff":               true,
-	}
-	filtered := make([]ToolDefinition, 0, len(allowed))
-	for _, definition := range definitions {
-		if allowed[definition.Name] {
-			filtered = append(filtered, definition)
-		}
-	}
-	return filtered
 }
 
 func isFinalizationInspectionTool(name string, input json.RawMessage) bool {
@@ -1099,13 +990,6 @@ func isFinalizationInspectionTool(name string, input json.RawMessage) bool {
 	default:
 		return false
 	}
-}
-
-func finalizationInspectionCallBlocked(name string, input json.RawMessage, exhausted bool) bool {
-	// File reads are targeted repairs/verification, not broad exploration. Keep
-	// them available after the exploration budget so an Agent can inspect a
-	// failing test location and make a bounded correction.
-	return exhausted && name != "read_file" && isFinalizationInspectionTool(name, input)
 }
 
 func requiredSkillBootstrapTools(definitions []ToolDefinition, pendingSkills []string) []ToolDefinition {
@@ -1160,37 +1044,6 @@ func (s *Session) markSkillLoaded(name string) {
 		s.loadedSkills = make(map[string]bool)
 	}
 	s.loadedSkills[name] = true
-}
-
-func isVerificationCheck(name string, input json.RawMessage) bool {
-	switch name {
-	case "git_diff":
-		return true
-	case "run_command":
-		var command struct {
-			Purpose string `json:"purpose"`
-		}
-		return json.Unmarshal(input, &command) == nil && command.Purpose == "test"
-	default:
-		return false
-	}
-}
-
-func isVerificationGateRejection(result ContentBlock) bool {
-	if !result.IsError {
-		return false
-	}
-	return strings.Contains(result.Content, "verification phase only allows checks still outstanding") ||
-		strings.Contains(result.Content, "verification is complete for the unchanged source")
-}
-
-func isFinalizationTool(name string) bool {
-	switch name {
-	case "read_file", "record_change_contract", "create_file", "edit_file", "apply_patch", "run_command", "git_diff":
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Session) emit(event Event) {

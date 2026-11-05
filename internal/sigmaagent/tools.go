@@ -458,9 +458,6 @@ func (w workspace) applyPatchTool() agent.Tool {
 		if err := decodeArgs(raw, &args); err != nil {
 			return "", err
 		}
-		if err := w.requireChangeContract(ctx); err != nil {
-			return "", err
-		}
 		if len(args.Content) > maxWholeFileReplacementBytes {
 			return "", fmt.Errorf("apply_patch replaces the whole file and accepts at most %d bytes; use edit_file for a localized change", maxWholeFileReplacementBytes)
 		}
@@ -524,9 +521,6 @@ func (w workspace) createFileTool() agent.Tool {
 		if err := decodeArgs(raw, &args); err != nil {
 			return "", err
 		}
-		if err := w.requireChangeContract(ctx); err != nil {
-			return "", err
-		}
 		if len(args.Content) > maxFileBytes {
 			return "", errors.New("content exceeds 1 MiB")
 		}
@@ -573,9 +567,6 @@ func (w workspace) editFileTool() agent.Tool {
 			NewText string `json:"new_text"`
 		}
 		if err := decodeArgs(raw, &args); err != nil {
-			return "", err
-		}
-		if err := w.requireChangeContract(ctx); err != nil {
 			return "", err
 		}
 		if args.OldText == "" || len(args.OldText) > 32768 || len(args.NewText) > 32768 {
