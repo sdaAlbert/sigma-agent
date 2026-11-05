@@ -83,3 +83,32 @@ func TestRunCommandDescribesTheConfiguredNetworkMode(t *testing.T) {
 		t.Fatalf("run_command description does not report the enabled network: %q", on.Definition.Description)
 	}
 }
+
+func TestWorkspaceCommandFilesystemScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		wantErr bool
+	}{
+		{name: "benchmark external enum source", command: `grep -n "__str__" /opt/miniconda3/envs/testbed/lib/python3.6/enum.py`, wantErr: true},
+		{name: "other absolute system path", command: `sed -n 1,20p /etc/passwd`, wantErr: true},
+		{name: "temporary directory", command: `cat /tmp/probe.py`, wantErr: true},
+		{name: "parent traversal", command: `cat ../../outside.txt`, wantErr: true},
+		{name: "home expansion", command: `cat ~/outside.txt`, wantErr: true},
+		{name: "environment based path", command: `cat "$CONDA_PREFIX/lib/python3.6/enum.py"`, wantErr: true},
+		{name: "workspace absolute path", command: `cat /workspace/django/db/models/query.py`},
+		{name: "workspace relative path", command: `python tests/runtests.py bulk_create --parallel=1`},
+		{name: "safe null redirection", command: `python tests/runtests.py bulk_create 2>/dev/null`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateCommandFilesystemScope(test.command, "workspace")
+			if test.wantErr && err == nil {
+				t.Fatalf("validateCommandFilesystemScope(%q) = nil, want error", test.command)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("validateCommandFilesystemScope(%q) error = %v", test.command, err)
+			}
+		})
+	}
+}

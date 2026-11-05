@@ -47,6 +47,15 @@ if ($allowCommandNetwork -ne $false) {
 if ($allowWebSearch -ne $false) {
     throw "Benchmark config must explicitly set web_search_enabled=false for the Agent run."
 }
+if ($config.disable_configured_mcp_servers -ne $true) {
+    throw "Benchmark config must explicitly set disable_configured_mcp_servers=true to prevent user MCP egress."
+}
+if ($config.disable_workflow_extensions -ne $true) {
+    throw "Benchmark config must explicitly set disable_workflow_extensions=true to prevent user-installed extensions from adding tools."
+}
+if ($config.command_filesystem_scope -ne "workspace") {
+    throw "Benchmark config must set command_filesystem_scope=workspace so run_command rejects explicit reads outside /workspace."
+}
 $commandImage = [string]$config.command_execution_image
 if ([string]::IsNullOrWhiteSpace($commandImage)) {
     throw "Config '$configFile' has no command_execution_image."

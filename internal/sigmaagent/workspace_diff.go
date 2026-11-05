@@ -2,6 +2,7 @@ package sigmaagent
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,7 +12,25 @@ import (
 
 const agentManagedMemoryPath = ".sigma-agent/MEMORY.md"
 
-// WorkspaceDiff returns the working tree diff, including new non-ignored files.
+// stageTaskChanges stages workspace changes without including Sigma-managed
+// memory in the candidate patch. Task worktrees are expected to begin with a
+// clean index, as benchmark sessions do.
+func stageTaskChanges(ctx context.Context, root string) error {
+	reset := exec.CommandContext(ctx, "git", "reset", "-q", "--", agentManagedMemoryPath)
+	reset.Dir = root
+	if output, err := reset.CombinedOutput(); err != nil {
+		return fmt.Errorf("exclude agent-managed memory from index: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	add := exec.CommandContext(ctx, "git", "add", "-A", "--", ".", ":(exclude)"+agentManagedMemoryPath)
+	add.Dir = root
+	if output, err := add.CombinedOutput(); err != nil {
+		return fmt.Errorf("stage task changes: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// WorkspaceDiff returns task changes, including new non-ignored files, while
+// omitting Sigma-managed repository memory from candidate patches.
 func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
 	base := "HEAD"
 	if len(baseCommit) > 0 && strings.TrimSpace(baseCommit[0]) != "" {

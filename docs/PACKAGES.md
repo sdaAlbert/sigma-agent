@@ -108,11 +108,11 @@ sigma.registerTool(
 
 Registered tools go through Sigma's normal Agent tool policy and execution
 loop. They run sequentially by default. Set `modifiesWorkspace: true` when a
-handler changes the task worktree so Sigma applies its normal test and diff
+handler changes the active repository workspace so Sigma applies its normal test and diff
 review gate. Tool names in the `mcp__` namespace are reserved for MCP adapters.
 The built-in GitHub MCP tools and configured `mcp.json` server tools are
-registered through this same host tool path; GitHub's server startup and
-repository/branch write restrictions remain enforced by Sigma.
+registered through this same host tool path; the built-in GitHub MCP integration
+is read-only.
 
 Extensions run as the current user with the same operating-system permissions
 as Sigma and can import packages installed alongside their module. Install and

@@ -26,6 +26,7 @@ type AnthropicMessagesModel struct {
 	Client          *http.Client
 	MaxRetries      int
 	MaxOutputTokens int
+	ReasoningEffort string
 }
 
 func NewMiniMaxMessagesModelFromEnv() (*AnthropicMessagesModel, error) {
@@ -80,6 +81,10 @@ func (m *AnthropicMessagesModel) ConfigureRuntime(maxRetries, maxOutputTokens in
 	m.MaxRetries = maxRetries
 	m.MaxOutputTokens = maxOutputTokens
 	m.Client = &http.Client{Timeout: timeout}
+}
+
+func (m *AnthropicMessagesModel) ConfigureReasoningEffort(effort string) {
+	m.ReasoningEffort = strings.TrimSpace(effort)
 }
 
 // WebSearch runs MiniMax's hosted web_search server tool and returns the
@@ -218,14 +223,25 @@ func (m *AnthropicMessagesModel) Stream(ctx context.Context, system string, mess
 	promptCompactions := 0
 	const maxPromptCompactions = 3
 	for {
+		var outputConfig *struct {
+			Effort string `json:"effort"`
+		}
+		if m.Provider == "minimax" && m.Model == "MiniMax-M3.1-Flash" && m.ReasoningEffort != "" {
+			outputConfig = &struct {
+				Effort string `json:"effort"`
+			}{Effort: m.ReasoningEffort}
+		}
 		body, err := json.Marshal(struct {
-			Model     string           `json:"model"`
-			MaxTokens int              `json:"max_tokens"`
-			System    string           `json:"system"`
-			Messages  []Message        `json:"messages"`
-			Tools     []ToolDefinition `json:"tools,omitempty"`
-			Stream    bool             `json:"stream"`
-		}{Model: m.Model, MaxTokens: outputTokenLimit(m.MaxOutputTokens), System: requestSystem, Messages: requestMessages, Tools: tools, Stream: true})
+			Model        string           `json:"model"`
+			MaxTokens    int              `json:"max_tokens"`
+			System       string           `json:"system"`
+			Messages     []Message        `json:"messages"`
+			Tools        []ToolDefinition `json:"tools,omitempty"`
+			Stream       bool             `json:"stream"`
+			OutputConfig *struct {
+				Effort string `json:"effort"`
+			} `json:"output_config,omitempty"`
+		}{Model: m.Model, MaxTokens: outputTokenLimit(m.MaxOutputTokens), System: requestSystem, Messages: requestMessages, Tools: tools, Stream: true, OutputConfig: outputConfig})
 		if err != nil {
 			return ModelResponse{}, fmt.Errorf("encode model request: %w", err)
 		}

@@ -8,13 +8,13 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-Sigma is a Go coding agent for working on issues in existing repositories. It connects a model to repository tools, runs project commands in Docker, and guides changes through inspection, implementation, testing, and diff review. Each task runs in a detached Git worktree, leaving the original checkout untouched.
+Sigma is a Go coding agent for working on issues in existing repositories. It connects a model to repository tools, runs project commands in Docker, and guides changes through inspection, implementation, testing, and diff review. New tasks work directly in the selected repository; Docker commands mount that same directory as `/workspace`.
 
 ## Why Sigma
 
 - **Built to improve issue-fixing results:** Sigma is being developed to help coding agents solve real repository issues more reliably, not just to reproduce Pi's harness in Go. Its coding-specific focus is to ground changes in the repository's actual setup and verify each patch before finishing.
 - **Repository-aware execution and verification:** The Agent can inspect project manifests and CI instructions, prepare a reusable Docker toolchain with `prepare_environment`, and run repository commands in a resource-bounded container. After edits, the runtime gates completion on the relevant tests and a Git diff review.
-- **A complete issue workflow:** Each task uses a detached Git worktree and a persistent session. The integrated TUI and CLI bring together code browsing, edits, repository commands, tests, diff review, resume, and optional publishing.
+- **A complete issue workflow:** Persistent sessions support code browsing, edits, repository commands, tests, diff review, and resume. Git remains ordinary Git: use shell commands or an optional Skill for a team-specific commit workflow.
 - **Backend execution interfaces:** Use the integrated terminal TUI, one-shot CLI/JSONL integration, or a local HTTP task API with a bounded worker pool, persisted task state, SSE events, steering, cancellation, and resume.
 - **Repository-memory RAG (an experimental focus):** Sigma can retrieve reviewed facts across issues in the same repository, such as test setup constraints, architecture decisions, compatibility rules, and recurring pitfalls. It retrieves memory facts—not source-code chunks—using BM25 plus optional embeddings/Qdrant and rank fusion. Whether this improves issue-resolution results remains to be tested.
 - **Deliberate access controls:** GitHub MCP tools are read-only by default. Pushing a feature branch and opening a pull request require explicit setup and opt-in.
@@ -29,9 +29,9 @@ Sigma takes architectural inspiration from [Pi](https://github.com/earendil-work
 | Runtime | TypeScript / Node.js | Go executable; Docker runs repository commands |
 | Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Integrated terminal TUI, one-shot CLI/JSONL, HTTP/SSE task API |
 | Customization | Extensions, Skills, prompt templates, themes, and shareable packages; see the [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) for customization and interaction modes | Package Skills, MCP tools, and a JavaScript workflow host for slash commands, Agent tools, notifications, confirmations, and read-only lifecycle events |
-| Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | Repository command/test tools use built-in Docker execution; each task also gets a detached Git worktree |
+| Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | File tools edit the selected checkout directly; repository commands/tests run in Docker with that checkout mounted writable |
 | Environment preparation | Integrate the local toolchain or configure a container/sandbox separately | Agent can inspect repository setup files and prepare a cached Docker image with a selected toolchain and system packages |
-| Coding focus and evidence | A broader, mature, customizable coding-agent harness with multiple interaction modes and an extension ecosystem | Sigma is purpose-built around repository issue repair: repository-aware Docker setup, isolated task worktrees, and runtime-gated test/diff verification. These are workflow and execution strengths; no matched evaluation currently shows a higher issue-resolution rate. Go benefits deployment and backend integration, not model reasoning by itself. |
+| Coding focus and evidence | A broader, mature, customizable coding-agent harness with multiple interaction modes and an extension ecosystem | Sigma is purpose-built around repository issue repair: repository-aware Docker setup and runtime-gated test/diff verification. These are workflow and execution strengths; no matched evaluation currently shows a higher issue-resolution rate. Go benefits deployment and backend integration, not model reasoning by itself. |
 
 ### Runtime outline
 
@@ -53,22 +53,23 @@ The model boundary supports Anthropic Messages and OpenAI Chat Completions-compa
 
 ## Docker execution sandbox and environment preparation
 
-In Sigma's repository-task workflow, `run_command` executes in Docker rather than invoking project commands directly on the host. The command container mounts the isolated task worktree as its writable workspace, drops Linux capabilities, enables `no-new-privileges`, and applies limits of 2 GiB RAM, 2 CPUs, 128 processes, and a five-minute command timeout. Command containers block external network access by default; `/network on` enables it for dependency downloads during the session. The task worktree and its caches persist between commands.
+In Sigma's repository-task workflow, `run_command` executes in Docker rather than invoking project commands directly on the host. The command container mounts the selected repository as `/workspace` with write access, drops Linux capabilities, enables `no-new-privileges`, and applies limits of 2 GiB RAM, 2 CPUs, 128 processes, and a five-minute command timeout. Command containers block external network access by default; `/network on` enables it for dependency downloads during the session. Package caches persist between commands.
 
 Before running a project command, the Agent can inspect the repository's Dockerfile, devcontainer, CI workflow, README, and dependency manifests. It can then call `prepare_environment` with a base image and setup command. Sigma builds and caches a derived image for later commands and session resumes. The Docker build context contains only the generated Dockerfile—not the repository source. If package downloads are required during setup, network access must be enabled deliberately.
 
-This is a **command-execution isolation boundary**, not a claim of a complete security sandbox for the whole Agent. Sigma's model client and repository file tools run in the Sigma process, and the task worktree is mounted read/write into Docker; a command can therefore change files in that task worktree. It cannot thereby change files outside the mounted worktree through that mount. Do not treat this as a hardened boundary for hostile multi-tenant workloads.
+This is a **command-execution isolation boundary**, not a complete sandbox for the whole Agent. Sigma's model client and repository file tools run in the Sigma process. The selected repository is mounted read/write into Docker, so both file tools and commands can change it immediately. The container mount does not expose other host directories, but do not treat this as a hardened boundary for hostile multi-tenant workloads.
 
 This is a useful integration difference from Pi's default: Pi's security guide says its built-in tools run with the Pi process's user permissions and that Pi does not include a built-in sandbox. Pi separately documents containerization and external isolation options such as Docker, Docker Sandboxes, OpenShell, and Gondolin. Sigma's distinction is that Docker command execution, bounded resources/network behavior, and reusable environment preparation are built into its repository-task workflow; it does not claim stronger isolation than every optional Pi setup. See Pi's [security guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md) and [containerization guide](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/containerization.md), plus Sigma's [Docker configuration details](docs/CONFIGURATION.md).
 
 ## Get started
 
-Requirements: Go 1.26+, Git, Docker Desktop, and an API key for a supported model provider. Sigma uses provider APIs; it does not include or download a model.
+Requirements: Git, Docker Desktop, and an API key for a supported model provider. Installing from this checkout also requires Go 1.26+; after installation, start Sigma as a normal command without `go run`.
 
-From the `go-runtime` directory, run from source:
+Install the command once from the `go-runtime` directory:
 
 ```powershell
-go run ./cmd/sigma-agent
+go install ./cmd/sigma-agent
+sigma-agent --version
 ```
 
 Or build a Windows executable:
@@ -80,6 +81,8 @@ go build -o sigma-agent.exe ./cmd/sigma-agent
 
 In the TUI setup screen, use `/login minimax` to save a model key, `/model list` to see supported providers and key status, `/model <provider>/<model-id>` to select a model, and `/repo <path>` to choose a clean local checkout. Use `/model save` to make the selection the default for new sessions, then type a task or run `/start`. Provider keys can also be supplied through environment variables for scripted use. The complete [user guide](docs/USAGE.md) covers setup and interactive commands; [configuration](docs/CONFIGURATION.md) documents providers, credentials, runtime limits, and Docker settings.
 
+After the one-time install, launch Sigma from any repository with `sigma-agent --tui`. If the current directory is not a Git repository, use `/repo <path>` in setup to select one.
+
 Docker command containers block outbound network access by default. Use `/network on` when a session needs to download dependencies; see the configuration guide for details.
 
 ## Use Sigma
@@ -87,12 +90,12 @@ Docker command containers block outbound network access by default. Use `/networ
 ### Interactive coding session
 
 ```powershell
-go run ./cmd/sigma-agent --repo C:\work\target-repository --interactive
+sigma-agent --repo C:\work\target-repository --interactive
 ```
 
-For the integrated setup and chat UI, run `go run ./cmd/sigma-agent --tui --repo C:\work\target-repository`. Setup, credential entry, multiline task input, streamed output, and session commands all stay in the TUI. Press `Ctrl+Enter` to submit; the main-screen renderer keeps terminal scrollback.
+For the integrated setup and chat UI, run `sigma-agent --tui --repo C:\work\target-repository`. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. Press `Enter` to submit and `Shift+Enter` to add a line.
 
-Type a task in the multiline TUI input and press `Ctrl+Enter`. While Sigma is working, submit text or `/steer <text>` to guide its next safe turn; `/followup <text>` queues a later request. `/diff` summarizes the patch, `/tree` shows session history, `/branch <entry-id>` continues from an earlier complete point, `/abort` cancels the active turn, and `/exit` saves the session. The session ID is shown in the TUI; use `/resume <id>` at the next setup screen to continue. See the [user guide](docs/USAGE.md) for the full command reference.
+Type a task in the TUI input and press `Enter`. Use `Shift+Enter` for a multiline prompt. While Sigma is working, submit text or `/steer <text>` to guide its next safe turn; `/followup <text>` queues a later request. `/diff` summarizes the patch, `/tree` opens session history so you can continue from an earlier point, `/abort` cancels the active turn, and `/exit` saves the session. The session ID is shown in the TUI; use `/resume <id>` at the next setup screen to continue. See the [user guide](docs/USAGE.md) for the full command reference.
 
 TUI shortcuts: `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and paths (`@path` in a prompt or a path after `/repo`), `Up`/`Down` browse prompt history at the input boundaries, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` expands or folds tool output.
 
@@ -102,20 +105,20 @@ For example:
 Fix issue #123. Inspect the relevant code and project instructions, implement the fix, run appropriate tests, and review the complete diff. Do not commit or push.
 ```
 
-Each task runs in a detached worktree. The original checkout is left untouched. For GitHub issue context, configure `/login github`; the GitHub MCP integration is read-only unless write actions are explicitly enabled.
+Every new task edits the selected checkout directly, so changes appear in your current working tree. Use Git commands in the Docker shell or your normal terminal to manage branches, commits, and pushes. Sigma's GitHub MCP integration is read-only and can provide issue, repository, and pull request context.
 
 ### One-shot CLI and process integration
 
 Run one task without entering the interactive REPL:
 
 ```powershell
-go run ./cmd/sigma-agent --repo C:\work\target-repository --task "Fix issue #123 and run the relevant tests"
+sigma-agent --repo C:\work\target-repository --task "Fix issue #123 and run the relevant tests"
 ```
 
 Add `--json` to write versioned JSONL lifecycle events and a final result to stdout:
 
 ```powershell
-go run ./cmd/sigma-agent --repo C:\work\target-repository --task "Fix issue #123" --json
+sigma-agent --repo C:\work\target-repository --task "Fix issue #123" --json
 ```
 
 The final JSONL record contains the session ID and artifact paths. A later process can continue that session with `--resume <session-id>`. This mode is one-shot; use the HTTP API below for bidirectional task control while the Agent is running.
@@ -125,7 +128,7 @@ The final JSONL record contains the session ID and artifact paths. A later proce
 Start the task service on loopback (default address `127.0.0.1:8080`):
 
 ```powershell
-go run ./cmd/sigma-agent --serve --max-concurrent 2
+sigma-agent --serve --max-concurrent 2
 ```
 
 Submit a task from PowerShell:
@@ -166,7 +169,7 @@ The service provides these endpoints:
 
 Task state, messages, and event logs are persisted locally so queued tasks can be restored and interrupted sessions can be resumed after a process restart. `--max-concurrent` sets the worker count (1–32); tasks beyond that capacity wait in the queue. See [architecture](docs/ARCHITECTURE.md) for request/response details and SSE replay behavior.
 
-**Service boundary:** The HTTP service is a single-process local prototype and has no authentication. It binds to loopback by default. Do not expose it to a network as-is. Publishing and GitHub PR creation are not available through `--serve`.
+**Service boundary:** The HTTP service is a single-process local prototype and has no authentication. It binds to loopback by default. Do not expose it to a network as-is. GitHub MCP access is read-only.
 
 ## Packages and MCP servers
 
@@ -176,16 +179,16 @@ to the model as `mcp__<server>__<tool>`.
 
 ```powershell
 # Install a package into the user scope (~/.sigma-agent/packages/)
-go run ./cmd/sigma-agent --install npm:pi-web-access
+sigma-agent --install npm:pi-web-access
 
 # Install into one repository's project scope
-go run ./cmd/sigma-agent --repo . --local --install npm:pi-web-access
+sigma-agent --repo . --local --install npm:pi-web-access
 
 # List the installed packages
-go run ./cmd/sigma-agent --list-packages
+sigma-agent --list-packages
 
 # Connect to the configured MCP servers and list their tools
-go run ./cmd/sigma-agent --list-mcp
+sigma-agent --list-mcp
 ```
 
 MCP servers are configured in `mcp.json`, using the `mcpServers` shape shared
@@ -248,7 +251,7 @@ Skills and long-term memory solve different problems:
 - A repository-root `AGENTS.md` is loaded as project guidance at the start of each session, up to 16 KiB. Use it for stable conventions and pointers. Sigma's automatic discovery reads only the repository-root file, not ancestor or nested `AGENTS.md` files. `project_instructions_file` can add a shared profile outside a task checkout.
 - Sigma discovers project `.agents/skills/` and `.pi/skills/`, plus user `~/.agents/skills/` and `~/.pi/agent/skills/`. It initially exposes Skill names and descriptions, then loads a matching body with `read_skill`; use `read_skill_resource` for a referenced Markdown guide or text template in that Skill directory. In an interactive session, `/skill:<name> <task>` explicitly invokes a Skill, including Skills marked `disable-model-invocation: true`.
 - Common Agent Skills fields (`name`, `description`, `license`, `compatibility`, `disable-model-invocation`, and `user-invocable`) are supported. Other frontmatter is tolerated, but Pi-specific `allowed-tools` permission behavior is not implemented; Sigma's configured tool policy remains authoritative. Loading a Skill or reference never automatically runs a bundled script. Only small text references/templates are readable; scripts and binary assets are not exposed through `read_skill_resource`.
-- `.sigma-agent/MEMORY.md` stores short, human-reviewed facts that may help across tasks in the same repository, with category, source, and date; BM25/vector search retrieves them on demand instead of injecting the whole file. `memory_file` plus a stable `memory_repository_id` lets independent task checkouts share one external memory source, copied only into isolated session worktrees. Session snapshots store recovery state; they are not long-term memory.
+- `.sigma-agent/MEMORY.md` stores short, human-reviewed facts that may help across tasks in the same repository, with category, source, and date; BM25/vector search retrieves them on demand instead of injecting the whole file. `memory_file` plus a stable `memory_repository_id` lets sessions share one external memory source; Sigma materializes it in the active workspace. Session snapshots store recovery state; they are not long-term memory.
 - Current source code and tests remain authoritative. Memory is a reference to verify, not a substitute for reading the code.
 - BM25 works locally. When embeddings and Qdrant are configured, Sigma adds repository-filtered vector candidates and combines rankings with reciprocal-rank fusion. Source files are not embedded or indexed by this memory feature.
 

@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -39,22 +38,20 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")
 	maxConcurrent := flag.Int("max-concurrent", 2, "maximum concurrent agent tasks when --serve is enabled")
 	repoArg := flag.String("repo", "", "Git repository to work on (defaults to the current directory in interactive setup)")
-	task := flag.String("task", "", "coding task for the agent, or an additional instruction when resuming")
+	task := flag.String("task", "", "coding task text for the agent (not a file path), or an additional instruction when resuming")
 	interactive := flag.Bool("interactive", false, "start a persistent terminal conversation (default when no task or resume is given)")
 	tui := flag.Bool("tui", false, "start the integrated terminal UI for setup and Agent interaction")
 	jsonOutput := flag.Bool("json", false, "write Agent lifecycle events and the final run result as JSONL to stdout")
 	resumeID := flag.String("resume", "", "resume a persisted session by ID; omit --task to continue it")
 	githubMCP := flag.Bool("github-mcp", true, "enable read-only GitHub MCP tools when credentials are configured (default true)")
-	githubWrite := flag.Bool("github-write", false, "advanced: enable GitHub PR creation at startup; interactive users can use /github-write")
-	pushBranch := flag.String("push-branch", "", "advanced: configure a publish branch at startup; interactive users can use /publish")
 	allowContainerNetwork := flag.Bool("allow-container-network", false, "advanced: allow container internet access at startup; interactive users can use /network")
-	keep := flag.Bool("keep-workspace", true, "keep the session worktree after a successful run")
 	maxTurns := flag.Int("max-turns", 0, "override config: maximum assistant turns")
 	maxToolCalls := flag.Int("max-tool-calls", 0, "override config: maximum tool calls per task")
 	contextTokens := flag.Int("context-tokens", 0, "override config: maximum estimated context tokens")
 	contextCompactionTokens := flag.Int("context-compaction-tokens", 0, "override config: proactively compact context above this estimated token count")
 	modelOutputTokens := flag.Int("model-output-tokens", 0, "override config: maximum model output tokens")
 	modelArg := flag.String("model", "", "override saved/session model using provider/model-id syntax")
+	showVersion := flag.Bool("version", false, "print the Sigma Agent version and exit")
 	sessionID := flag.String("session-id", "", "use this id for a new session")
 	eventFile := flag.String("event-file", "", "append agent lifecycle events to this JSONL file")
 	messageFile := flag.String("message-file", "", "read durable task messages from this JSONL file")
@@ -64,6 +61,10 @@ func main() {
 	listMCPServers := flag.Bool("list-mcp", false, "connect to the configured MCP servers, list their tools, and exit")
 	localScope := flag.Bool("local", false, "install or remove the package in the project scope instead of the user scope")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("sigma-agent v%s\n", sigmaAgentVersion)
+		return
+	}
 	if *installSource != "" && *uninstallSource != "" {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --install and --uninstall cannot be combined")
 		os.Exit(2)
@@ -78,18 +79,6 @@ func main() {
 			os.Exit(1)
 		}
 		return
-	}
-	if *pushBranch != "" && (*indexMemory || *evalMemory) {
-		fmt.Fprintln(os.Stderr, "sigma-agent: --push-branch cannot be combined with memory indexing or evaluation")
-		os.Exit(2)
-	}
-	if *githubWrite && (*pushBranch == "" || !*githubMCP) {
-		fmt.Fprintln(os.Stderr, "sigma-agent: --github-write requires --push-branch and --github-mcp")
-		os.Exit(2)
-	}
-	if *githubWrite && !agent.GitHubMCPConfigured() {
-		fmt.Fprintln(os.Stderr, "sigma-agent: --github-write requires a configured GitHub token")
-		os.Exit(2)
 	}
 	runtimeConfig, err := config.Load(*configPath)
 	if err != nil {
@@ -193,10 +182,6 @@ func main() {
 		os.Exit(2)
 	}
 	if *serve {
-		if *pushBranch != "" {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --push-branch is available only for direct CLI sessions, not --serve")
-			os.Exit(2)
-		}
 		if err := server.ListenAndServe(*addr, *maxConcurrent, *configPath); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
@@ -233,13 +218,12 @@ func main() {
 		}
 		setup := interactiveSetupOptions{
 			repo: defaultRepo, sessionID: *sessionID, resumeID: *resumeID,
-			pushBranch: *pushBranch, githubWrite: *githubWrite,
 			allowNetwork: runtimeConfig.AllowContainerNetwork,
 			githubMCP:    *githubMCP, model: selection, modelExplicit: modelExplicit,
 			initialPrompt: *task,
 		}
 		if err := startTUI(setup, func(options interactiveSetupOptions, bridge *tuiBridge) error {
-			return run(options.repo, options.initialPrompt, *keep, runtimeConfig, options.resumeID, options.githubMCP, options.githubWrite, options.sessionID, options.pushBranch, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge)
+			return run(options.repo, options.initialPrompt, runtimeConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge)
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
@@ -250,13 +234,13 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*repoArg, *task, *keep, runtimeConfig, *resumeID, *githubMCP, *githubWrite, *sessionID, *pushBranch, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil); err != nil {
+	if err := run(*repoArg, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
 }
 
-func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID string, githubMCP, githubWrite bool, requestedSessionID, requestedPushBranch, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
+func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
 	repo, err := gitOutput(repoArg, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("resolve Git repository: %w", err)
@@ -304,7 +288,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		return errors.New("invalid session id")
 	}
 	sessionDir := filepath.Join(sessionsDir, sessionID)
-	workspace := filepath.Join(sessionDir, "workspace")
+	workspace := repo
 	var restoredSnapshot *agent.SessionSnapshot
 	if !newSession {
 		snapshot, loadErr := store.Load(sessionID)
@@ -314,31 +298,9 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		restoredSnapshot = &snapshot
 	}
 	startingCommit := ""
-	activePushBranch := ""
-	removeWorkspaceOnSuccess := true
+	workspaceMode := "direct"
 	var runErr error
-	keepWorkspaceAfterRun := keep
-	worktreeCreated := false
-	defer func() {
-		if worktreeCreated && removeWorkspaceOnSuccess && !keepWorkspaceAfterRun && runErr == nil {
-			_, _ = gitOutput(repo, "worktree", "remove", "--force", workspace)
-			_, _ = gitOutput(repo, "worktree", "prune")
-		}
-	}()
 	if newSession {
-		status, err := gitOutput(repo, "status", "--porcelain=v1", "--untracked-files=all")
-		if err != nil {
-			return err
-		}
-		if !onlyProjectMemoryDirty(status) {
-			return errors.New("source repository must be clean except for .sigma-agent/MEMORY.md")
-		}
-		if requestedPushBranch != "" {
-			if err := validateNewPushBranch(repo, requestedPushBranch); err != nil {
-				return err
-			}
-			activePushBranch = requestedPushBranch
-		}
 		commit, err := gitOutput(repo, "rev-parse", "HEAD")
 		if err != nil {
 			return err
@@ -347,22 +309,9 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 			return err
 		}
-		if _, err := gitOutput(repo, "worktree", "add", "--detach", workspace, startingCommit); err != nil {
-			return fmt.Errorf("create detached task worktree: %w", err)
-		}
-		worktreeCreated = true
-		if activePushBranch != "" {
-			if _, err := gitOutput(workspace, "checkout", "-b", activePushBranch); err != nil {
-				return fmt.Errorf("create publish branch %q in task worktree: %w", activePushBranch, err)
-			}
-		}
-		if runtimeConfig.MemoryFile == "" {
-			if err := sigmaagent.CopyProjectMemory(repo, workspace); err != nil {
-				return fmt.Errorf("copy project memory into task worktree: %w", err)
-			}
-		}
 		metadata, _ := json.MarshalIndent(map[string]string{
-			"repo": repo, "starting_commit": startingCommit, "push_branch": activePushBranch,
+			"repo": repo, "starting_commit": startingCommit,
+			"workspace_mode": workspaceMode,
 			"model_provider": activeModelSelection.Provider, "model_id": activeModelSelection.Model,
 		}, "", "  ")
 		if err := os.WriteFile(filepath.Join(sessionDir, "metadata.json"), metadata, 0o600); err != nil {
@@ -372,7 +321,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		var metadata struct {
 			Repo           string `json:"repo"`
 			StartingCommit string `json:"starting_commit"`
-			PushBranch     string `json:"push_branch"`
+			WorkspaceMode  string `json:"workspace_mode"`
 			ModelProvider  string `json:"model_provider"`
 			ModelID        string `json:"model_id"`
 		}
@@ -386,6 +335,12 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		if filepath.Clean(metadata.Repo) != filepath.Clean(repo) {
 			return errors.New("resume repository does not match the session's original repository")
 		}
+		if metadata.WorkspaceMode != "direct" {
+			// Keep support for resuming sessions created before the direct-workspace
+			// migration. New sessions always use repo as the active workspace.
+			workspaceMode = "isolated"
+			workspace = filepath.Join(sessionDir, "workspace")
+		}
 		if !modelExplicit && metadata.ModelProvider != "" && metadata.ModelID != "" {
 			activeModelSelection = modelconfig.Selection{Provider: metadata.ModelProvider, Model: metadata.ModelID}
 		}
@@ -396,35 +351,20 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 				}
 			}
 		}
-		if requestedPushBranch != "" && requestedPushBranch != metadata.PushBranch {
-			return errors.New("--push-branch must match the branch configured when this session was created")
-		}
-		if metadata.PushBranch != "" {
-			currentBranch, err := gitOutput(workspace, "branch", "--show-current")
-			if err != nil || strings.TrimSpace(currentBranch) != metadata.PushBranch {
-				return errors.New("saved publish branch does not match the session worktree")
-			}
-			if requestedPushBranch != "" {
-				activePushBranch = metadata.PushBranch
-			}
-		}
 		startingCommit = metadata.StartingCommit
 		if _, err := os.Stat(workspace); err != nil {
-			return fmt.Errorf("session worktree is unavailable; start a new task or restore the worktree: %w", err)
+			return fmt.Errorf("session workspace is unavailable; start a new task or restore the workspace: %w", err)
 		}
 		worktreeRoot, err := gitOutput(workspace, "rev-parse", "--show-toplevel")
 		if err != nil || filepath.Clean(strings.TrimSpace(worktreeRoot)) != filepath.Clean(workspace) {
 			return errors.New("session workspace is not the original Git worktree")
 		}
 	}
-	if !newSession {
-		worktreeCreated = true
-	}
 	memorySourceHash := ""
 	if runtimeConfig.MemoryFile != "" {
 		memorySourceHash, err = sigmaagent.CopyProjectMemoryFromFile(runtimeConfig.MemoryFile, workspace, runtimeConfig.MemoryRepositoryID)
 		if err != nil {
-			return fmt.Errorf("load configured shared memory into task worktree: %w", err)
+			return fmt.Errorf("load configured shared memory into active workspace: %w", err)
 		}
 	}
 	toolOutputStore, err := agent.NewFileToolOutputStore(filepath.Join(sessionDir, "tool_outputs"))
@@ -484,11 +424,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if err != nil {
 		return err
 	}
-	if configurable, ok := model.(interface {
-		ConfigureRuntime(int, int, time.Duration)
-	}); ok {
-		configurable.ConfigureRuntime(runtimeConfig.MaxRetries, runtimeConfig.ModelOutputTokens, time.Duration(runtimeConfig.ModelTimeoutMS)*time.Millisecond)
-	}
+	configureModelRuntime(model, runtimeConfig)
 	backgroundTasks, err := sigmaagent.NewBackgroundCommandManager(workspace, runtimeConfig.CommandExecutionImage, filepath.Join(sessionDir, "background_tasks"), startingCommit, runtimeConfig.AllowContainerNetwork)
 	if err != nil {
 		return fmt.Errorf("configure background task manager: %w", err)
@@ -508,22 +444,24 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		}
 		tools = append(tools, agent.CommandPluginTools(workspace, plugins)...)
 	}
-	commandTools, err := sigmaagent.CommandExecutionToolsWithEnvironmentPreparation(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, startingCommit)
+	commandTools, err := sigmaagent.CommandExecutionToolsWithEnvironmentPreparationAndFilesystemScope(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, startingCommit)
 	if err != nil {
 		return fmt.Errorf("configure command execution tool: %w", err)
 	}
 	tools = append(tools, commandTools...)
-	if activePushBranch != "" {
-		tools = append(tools, sigmaagent.GitPublishToolsWithBackground(workspace, activePushBranch, backgroundTasks)...)
-	}
 	tools = append(tools, agent.ReadToolOutputTool(toolOutputStore, runtimeConfig.MaxToolResultBytes))
 	packageScopes, err := packageScopes(repo)
 	if err != nil {
 		return fmt.Errorf("resolve package scopes: %w", err)
 	}
-	extensionPaths, err := packageExtensions(packageScopes)
-	if err != nil {
-		return fmt.Errorf("discover workflow extensions: %w", err)
+	var extensionPaths []string
+	if !runtimeConfig.DisableWorkflowExtensions {
+		extensionPaths, err = packageExtensions(packageScopes)
+		if err != nil {
+			return fmt.Errorf("discover workflow extensions: %w", err)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "sigma-agent: workflow extensions disabled by run config")
 	}
 	var extensionHandler workflow.Handler = consoleWorkflowHandler{}
 	if tui != nil {
@@ -540,7 +478,10 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 			fmt.Fprintln(os.Stderr, "sigma-agent: warning: close workflow extensions:", err)
 		}
 	}()
-	mcpTools, shutdownMCPServers, err := startMCPServers(context.Background(), packageScopes)
+	mcpTools, shutdownMCPServers, err := startConfiguredMCPServers(context.Background(), packageScopes, runtimeConfig.DisableConfiguredMCPServers)
+	if runtimeConfig.DisableConfiguredMCPServers {
+		fmt.Fprintln(os.Stderr, "sigma-agent: configured MCP servers disabled by run config")
+	}
 	if err != nil {
 		// A broken MCP configuration must not take the session down. The
 		// failure is reported and the run continues without those tools.
@@ -585,19 +526,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	}
 	githubMCPEnabled := githubMCP && agent.GitHubMCPConfigured()
 	if githubMCPEnabled {
-		githubOptions := agent.GitHubMCPOptions{}
-		if githubWrite {
-			remoteURL, remoteErr := gitOutput(repo, "remote", "get-url", "origin")
-			if remoteErr != nil {
-				return fmt.Errorf("resolve origin for pull request creation: %w", remoteErr)
-			}
-			owner, repository, parseErr := parseGitHubRepository(remoteURL)
-			if parseErr != nil {
-				return parseErr
-			}
-			githubOptions = agent.GitHubMCPOptions{AllowCreatePullRequest: true, Owner: owner, Repository: repository, HeadBranch: activePushBranch}
-		}
-		client, err := agent.StartGitHubMCP(context.Background(), githubOptions)
+		client, err := agent.StartGitHubMCP(context.Background())
 		if err != nil {
 			return err
 		}
@@ -632,13 +561,10 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if useMemorySearch {
 		systemPrompt = projectGuidance.SystemPromptWithMemorySearch(codingSystemPrompt)
 	}
+	if workspaceMode == "direct" {
+		systemPrompt += "\n\nYou are working directly in the user's selected Git checkout. File changes take effect in that checkout immediately. Preserve unrelated existing changes, inspect the diff before finishing, and never revert user changes unless the user asks."
+	}
 	systemPrompt += "\n\nCONTEXT COMPACTION: You may call compact_context by itself when earlier conversation or tool output has become long and a concise handoff can preserve the active task. It makes an additional model request and is lossy, so use it selectively; the recent turns and full session record are retained."
-	if activePushBranch != "" {
-		systemPrompt += fmt.Sprintf("\n\nGit publishing is explicitly enabled for branch %q only. Review the diff and run relevant tests before committing. Commit and push only when the user explicitly requested it. Use git_commit before git_push; git_push can only target this branch on origin and cannot force-push or create a pull request.", activePushBranch)
-	}
-	if githubWrite {
-		systemPrompt += "\n\nGitHub pull request creation is explicitly enabled only for this repository and the configured feature branch. Create a pull request only when the user explicitly asks, after the branch is pushed and verification is complete. Do not merge it."
-	}
 	if newSession {
 		session = &agent.Session{ID: sessionID, System: systemPrompt, Store: store}
 	} else {
@@ -691,9 +617,6 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	} else {
 		result, runErr = session.Continue(ctx)
 	}
-	if runErr != nil {
-		keepWorkspaceAfterRun = true
-	}
 	workflowHost.Dispatch(workflow.Event{Type: "session_end", SessionID: session.ID, Error: errorText(runErr)})
 	patch, diffErr := sigmaagent.WorkspaceDiff(workspace, startingCommit)
 	if diffErr != nil && runErr == nil {
@@ -723,17 +646,23 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 		}
 	}
 	metadata, _ := json.MarshalIndent(map[string]any{
-		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": activePushBranch,
-		"github_write_enabled": githubWrite, "allow_container_network": runtimeConfig.AllowContainerNetwork,
-		"github_mcp_enabled":            githubMCPEnabled,
-		"project_instructions_file":     projectGuidance.ExternalInstructionsPath,
-		"project_instructions_sha256":   projectGuidance.ExternalInstructionsSHA256,
-		"memory_file":                   runtimeConfig.MemoryFile,
-		"memory_repository_id":          runtimeConfig.MemoryRepositoryID,
-		"memory_source_sha256_at_start": memorySourceHash,
-		"tool_output_artifacts_dir":     filepath.Join(sessionDir, "tool_outputs"),
-		"memory_write":                  memoryWrite,
-		"turns":                         result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
+		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": "",
+		"workspace_mode":       workspaceMode,
+		"github_write_enabled": false, "allow_container_network": runtimeConfig.AllowContainerNetwork,
+		"command_filesystem_scope":        runtimeConfig.CommandFilesystemScope,
+		"github_mcp_enabled":              githubMCPEnabled,
+		"configured_mcp_servers_disabled": runtimeConfig.DisableConfiguredMCPServers,
+		"workflow_extensions_disabled":    runtimeConfig.DisableWorkflowExtensions,
+		"model_reasoning_effort":          runtimeConfig.ModelReasoningEffort,
+		"model_output_tokens":             runtimeConfig.ModelOutputTokens,
+		"project_instructions_file":       projectGuidance.ExternalInstructionsPath,
+		"project_instructions_sha256":     projectGuidance.ExternalInstructionsSHA256,
+		"memory_file":                     runtimeConfig.MemoryFile,
+		"memory_repository_id":            runtimeConfig.MemoryRepositoryID,
+		"memory_source_sha256_at_start":   memorySourceHash,
+		"tool_output_artifacts_dir":       filepath.Join(sessionDir, "tool_outputs"),
+		"memory_write":                    memoryWrite,
+		"turns":                           result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
 		"output_tokens": result.OutputTokens, "cache_read_input_tokens": result.CacheReadInputTokens,
 		"cache_creation_input_tokens": result.CacheCreationInputTokens, "context_compactions": result.ContextCompactions,
 		"context_compaction_input_tokens":     result.ContextCompactionInputTokens,
@@ -752,7 +681,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if jsonOutput {
 		completion := map[string]any{
 			"protocol_version": 1, "type": "run_completed", "status": "completed", "run_id": runID, "session_id": sessionID,
-			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"), "push_branch": activePushBranch,
+			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"), "push_branch": "",
 			"turns": result.Turns, "tool_calls": result.ToolCalls,
 			"input_tokens": result.InputTokens, "output_tokens": result.OutputTokens,
 			"cache_read_input_tokens":          result.CacheReadInputTokens,
@@ -775,12 +704,7 @@ func run(repoArg, task string, keep bool, runtimeConfig config.Runtime, resumeID
 	if !jsonOutput {
 		fmt.Fprintf(os.Stderr, "\n\nRun artifacts: %s\nPatch: %s\n", runDir, filepath.Join(runDir, "result.patch"))
 		fmt.Fprintf(os.Stderr, "Session ID: %s\nSession snapshot: %s\n", sessionID, filepath.Join(sessionsDir, sessionID+".json"))
-		if activePushBranch != "" {
-			fmt.Fprintf(os.Stderr, "Publish branch: %s (origin)\n", activePushBranch)
-		}
-		if keep || runErr != nil {
-			fmt.Fprintf(os.Stderr, "Task worktree kept at: %s\n", workspace)
-		}
+		fmt.Fprintf(os.Stderr, "Workspace: %s\n", workspace)
 	}
 	if runErr != nil {
 		return runErr
@@ -837,22 +761,6 @@ func parseModelCommand(value string, current agent.Model) (modelconfig.Selection
 	return modelconfig.Selection{Provider: provider, Model: strings.TrimSpace(modelID)}, "switch", nil
 }
 
-func onlyProjectMemoryDirty(status string) bool {
-	for _, line := range strings.Split(strings.TrimSpace(status), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if len(line) < 4 || strings.TrimSpace(line[:2]) == "" {
-			return false
-		}
-		path := strings.TrimSpace(line[3:])
-		if path != filepath.ToSlash(filepath.Join(".sigma-agent", "MEMORY.md")) {
-			return false
-		}
-	}
-	return true
-}
-
 func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance sigmaagent.ProjectGuidance, extensions *workflow.Host, inputScanners ...*bufio.Scanner) (agent.Result, error) {
 	type inputEvent struct {
 		line string
@@ -865,7 +773,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	commandNames := []string{"/help", "/model", "/diff", "/tree", "/branch <entry-id>", "/skill:<name> <task>", "/abort", "/exit"}
+	commandNames := []string{"/help", "/model", "/diff", "/tree [entry-id]", "/skill:<name> <task>", "/abort", "/exit"}
 	for _, command := range extensions.Commands() {
 		commandNames = append(commandNames, "/"+command.Name)
 	}
@@ -1021,18 +929,16 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 				} else {
 					startRun(prompt, false)
 				}
-			case line == "/tree":
-				printSessionTree(session)
-			case line == "/branch" || strings.HasPrefix(line, "/branch "):
-				entryID := strings.TrimSpace(strings.TrimPrefix(line, "/branch"))
+			case line == "/tree" || strings.HasPrefix(line, "/tree "):
+				entryID := strings.TrimSpace(strings.TrimPrefix(line, "/tree"))
 				if activeDone != nil {
-					fmt.Fprintln(os.Stderr, "Wait for the current turn to finish before branching.")
+					fmt.Fprintln(os.Stderr, "Wait for the current turn to finish before changing session history.")
 				} else if entryID == "" {
-					fmt.Fprintln(os.Stderr, "Usage: /branch <entry-id> (see /tree)")
+					printSessionTree(session)
 				} else if err := session.BranchFrom(entryID); err != nil {
-					fmt.Fprintf(os.Stderr, "Could not branch session: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Could not continue from that history entry: %v\n", err)
 				} else {
-					fmt.Fprintf(os.Stderr, "Moved to entry %s. Enter a new instruction to continue on this branch.\n", entryID)
+					fmt.Fprintf(os.Stderr, "Continued from %s. Previous history remains available in /tree.\n", entryID)
 				}
 			case line == "/model" || strings.HasPrefix(line, "/model "):
 				if activeDone != nil {
@@ -1059,11 +965,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 						fmt.Fprintln(os.Stderr, err)
 						continue
 					}
-					if configurable, ok := model.(interface {
-						ConfigureRuntime(int, int, time.Duration)
-					}); ok {
-						configurable.ConfigureRuntime(runtimeConfig.MaxRetries, runtimeConfig.ModelOutputTokens, time.Duration(runtimeConfig.ModelTimeoutMS)*time.Millisecond)
-					}
+					configureModelRuntime(model, runtimeConfig)
 					if err := session.SetModel(model); err != nil {
 						fmt.Fprintf(os.Stderr, "Could not switch model: %v\n", err)
 						continue
@@ -1130,30 +1032,14 @@ func addResult(total *agent.Result, current agent.Result) {
 }
 
 func printSessionTree(session *agent.Session) {
-	entries := session.Entries()
-	head := session.HeadID()
-	if len(entries) == 0 {
+	items := sessionTreeItems(session)
+	if len(items) == 0 {
 		fmt.Fprintln(os.Stderr, "This session has no conversation entries yet.")
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Session history (use the full entry ID with /branch):")
-	for _, entry := range entries {
-		marker := " "
-		if entry.ID == head {
-			marker = "*"
-		}
-		detail := entry.Type
-		if entry.Type == "model_change" {
-			detail += ": " + entry.ModelID
-		} else if entry.Message != nil {
-			for _, block := range entry.Message.Content {
-				if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
-					detail += ": " + truncateText(strings.TrimSpace(block.Text), 88)
-					break
-				}
-			}
-		}
-		fmt.Fprintf(os.Stderr, "%s %s  %s  %s\n", marker, entry.ID, entry.CreatedAt.Local().Format("2006-01-02 15:04:05"), detail)
+	fmt.Fprintln(os.Stderr, "Session history (use /tree <entry-id> to continue from an entry):")
+	for _, item := range items {
+		fmt.Fprintln(os.Stderr, item.label)
 	}
 }
 
@@ -1176,65 +1062,6 @@ func configuredToolPolicy(runtimeConfig config.Runtime) agent.ToolPolicy {
 		}
 		return nil
 	}
-}
-
-func validateNewPushBranch(repo, branch string) error {
-	if strings.TrimSpace(branch) != branch || branch == "" || strings.HasPrefix(branch, "-") {
-		return errors.New("--push-branch must be a non-empty Git branch name")
-	}
-	switch strings.ToLower(branch) {
-	case "main", "master", "develop", "trunk":
-		return fmt.Errorf("refusing to publish directly to protected branch name %q", branch)
-	}
-	checked, err := gitOutput(repo, "check-ref-format", "--branch", branch)
-	if err != nil || strings.TrimSpace(checked) != branch {
-		return fmt.Errorf("invalid --push-branch %q", branch)
-	}
-	if _, err := gitOutput(repo, "remote", "get-url", "origin"); err != nil {
-		return errors.New("--push-branch requires a Git remote named origin")
-	}
-	if defaultBranch, err := gitOutput(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-		defaultBranch = strings.TrimPrefix(strings.TrimSpace(defaultBranch), "origin/")
-		if branch == defaultBranch {
-			return fmt.Errorf("refusing to publish directly to origin's default branch %q", branch)
-		}
-	}
-	if _, err := gitOutput(repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
-		return fmt.Errorf("local branch %q already exists; choose a new feature branch", branch)
-	} else {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			return fmt.Errorf("check local branch %q: %w", branch, err)
-		}
-	}
-	remoteRef, err := gitOutput(repo, "ls-remote", "--heads", "origin", "refs/heads/"+branch)
-	if err != nil {
-		return fmt.Errorf("cannot confirm whether origin branch %q is available; check local Git credentials and network access", branch)
-	}
-	if strings.TrimSpace(remoteRef) != "" {
-		return fmt.Errorf("remote branch %q already exists; choose a new feature branch", branch)
-	}
-	return nil
-}
-
-func parseGitHubRepository(remote string) (string, string, error) {
-	remote = strings.TrimSpace(remote)
-	path := ""
-	if strings.HasPrefix(remote, "git@github.com:") {
-		path = strings.TrimPrefix(remote, "git@github.com:")
-	} else {
-		parsed, err := url.Parse(remote)
-		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
-			return "", "", errors.New("--github-write currently supports an origin remote hosted on github.com")
-		}
-		path = strings.TrimPrefix(parsed.Path, "/")
-	}
-	path = strings.TrimSuffix(path, ".git")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("cannot read owner/repository from origin URL %q", remote)
-	}
-	return parts[0], parts[1], nil
 }
 
 func gitOutput(directory string, args ...string) (string, error) {
@@ -1346,4 +1173,15 @@ func errorString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func configureModelRuntime(model agent.Model, runtimeConfig config.Runtime) {
+	if configurable, ok := model.(interface {
+		ConfigureRuntime(int, int, time.Duration)
+	}); ok {
+		configurable.ConfigureRuntime(runtimeConfig.MaxRetries, runtimeConfig.ModelOutputTokens, time.Duration(runtimeConfig.ModelTimeoutMS)*time.Millisecond)
+	}
+	if configurable, ok := model.(interface{ ConfigureReasoningEffort(string) }); ok {
+		configurable.ConfigureReasoningEffort(runtimeConfig.ModelReasoningEffort)
+	}
 }

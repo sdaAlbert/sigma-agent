@@ -16,8 +16,6 @@ type interactiveSetupOptions struct {
 	repo          string
 	sessionID     string
 	resumeID      string
-	pushBranch    string
-	githubWrite   bool
 	allowNetwork  bool
 	githubMCP     bool
 	initialPrompt string
@@ -41,7 +39,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 		options.model = modelconfig.Selection{Provider: "minimax", Model: modelconfig.DefaultModel("minimax")}
 	}
 	fmt.Fprintln(os.Stderr, "\nSigma setup — configure this session, then enter a task.")
-	fmt.Fprintln(os.Stderr, "Commands: /login <provider|github>, /model [provider/model-id|save], /logout <provider|github>, /repo <path>, /session <id>, /resume <id>, /network on|off, /publish <branch>|off, /github-write on|off, /start, /help, /exit")
+	fmt.Fprintln(os.Stderr, "Commands: /login <provider|github>, /model [provider/model-id|save], /logout <provider|github>, /repo <path>, /session <id>, /resume <id>, /network on|off, /start, /help, /exit")
 	printSetupStatus(options)
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -208,47 +206,6 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 				continue
 			}
 			printSetupStatus(options)
-		case "/publish":
-			if value == "off" {
-				options.pushBranch = ""
-				options.githubWrite = false
-				fmt.Fprintln(os.Stderr, "Publishing disabled for this session.")
-				continue
-			}
-			if value == "" || strings.HasPrefix(value, "-") || strings.TrimSpace(value) != value {
-				fmt.Fprintln(os.Stderr, "Usage: /publish <new-feature-branch>|off")
-				continue
-			}
-			checked, err := gitOutput(options.repo, "check-ref-format", "--branch", value)
-			if err != nil || strings.TrimSpace(checked) != value {
-				fmt.Fprintf(os.Stderr, "Invalid Git branch name: %s\n", value)
-				continue
-			}
-			options.pushBranch = value
-			fmt.Fprintf(os.Stderr, "Commit/push enabled for new branch %s. The branch is created when you start a new task.\n", value)
-		case "/github-write":
-			switch value {
-			case "on":
-				if !options.githubMCP {
-					fmt.Fprintln(os.Stderr, "GitHub MCP is disabled; restart with GitHub MCP enabled before using PR creation.")
-					continue
-				}
-				if options.pushBranch == "" {
-					fmt.Fprintln(os.Stderr, "Set a publish branch first with /publish <branch>.")
-					continue
-				}
-				if !agent.GitHubMCPConfigured() {
-					fmt.Fprintln(os.Stderr, "Configure a GitHub token before enabling PR creation.")
-					continue
-				}
-				options.githubWrite = true
-			case "off":
-				options.githubWrite = false
-			default:
-				fmt.Fprintln(os.Stderr, "Usage: /github-write on|off")
-				continue
-			}
-			printSetupStatus(options)
 		case "/start":
 			if err := validateSetupOptions(options); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -274,15 +231,6 @@ func validateSetupOptions(options interactiveSetupOptions) error {
 			return fmt.Errorf("no API key configured for %s; use /login %s before starting", options.model.Provider, options.model.Provider)
 		}
 	}
-	if options.githubWrite && options.pushBranch == "" {
-		return errors.New("PR creation requires a publish branch; use /publish <branch>")
-	}
-	if options.githubWrite && !options.githubMCP {
-		return errors.New("PR creation requires GitHub MCP")
-	}
-	if options.githubWrite && !agent.GitHubMCPConfigured() {
-		return errors.New("PR creation requires a configured GitHub token")
-	}
 	return nil
 }
 
@@ -295,9 +243,6 @@ func printSetupHelp() {
   /session <id>         Name a new saved session
   /resume <id>          Resume a saved session
   /network on|off       Allow/block container internet access (on by default)
-  /publish <branch>     Enable commit and push to a new origin branch
-  /publish off          Disable Git publishing
-  /github-write on|off  Enable/disable GitHub pull request creation
   /start                Start an empty interactive conversation
   /exit                 Quit setup
 
@@ -333,17 +278,9 @@ func printSetupStatus(options interactiveSetupOptions) {
 	if options.allowNetwork {
 		network = "on"
 	}
-	publish := "off"
-	if options.pushBranch != "" {
-		publish = options.pushBranch
-	}
-	pr := "off"
-	if options.githubWrite {
-		pr = "on"
-	}
 	modelKey := "missing key"
 	if configured, err := modelconfig.ProviderHasAPIKey(options.model.Provider); err == nil && configured {
 		modelKey = "key ready"
 	}
-	fmt.Fprintf(os.Stderr, "Repo: %s | Session: %s | Model: %s/%s (%s) | Container network: %s | Publish: %s | GitHub PR: %s\n", options.repo, resume, options.model.Provider, options.model.Model, modelKey, network, publish, pr)
+	fmt.Fprintf(os.Stderr, "Repo: %s | Session: %s | Model: %s/%s (%s) | Container network: %s\n", options.repo, resume, options.model.Provider, options.model.Model, modelKey, network)
 }

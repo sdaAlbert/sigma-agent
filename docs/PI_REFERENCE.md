@@ -5,10 +5,10 @@ Sigma Agent follows Pi Agent's useful runtime ideas without importing or transla
 | Pi concept | Go implementation | Status |
 |---|---|---|
 | Inner tool loop and outer conversation loop | `internal/agent/runtime.go` | Streaming turns, tool calls, steering/follow-up queues, bounded execution, lifecycle events. |
-| Canonical session transcript and history | `internal/agent/runtime.go`, `internal/agent/session_store.go` | Durable snapshots, interrupted-tool recovery, append-only parent-linked entries, branch API, persisted model-change entries, and basic `/sessions`, `/tree`, `/branch` navigation. |
+| Canonical session transcript and history | `internal/agent/runtime.go`, `internal/agent/session_store.go` | Durable snapshots, interrupted-tool recovery, append-only parent-linked entries, branch API, persisted model-change entries, and `/tree` history navigation. |
 | Provider adapter seam | `internal/agent/minimax.go`, `internal/agent/openai_compatible.go` | MiniMax and Anthropic Messages SSE adapters plus OpenAI-compatible adapters for OpenAI, DeepSeek, and OpenRouter; no Agent SDK. |
 | Tool validation and lifecycle hooks | `internal/agent/runtime.go` | JSON validation, tool validators, policy hooks, timeout, bounded result. |
-| Coding tools | `internal/sigmaagent/tools.go` | Workspace-bounded file tools, Docker Go profiles, repository-native Docker commands, Git publishing, and diff review. |
+| Coding tools | `internal/sigmaagent/tools.go` | Workspace-bounded file tools, Docker Go profiles, repository-native Docker commands, and diff review. |
 | External tool integration | `internal/agent/github_mcp.go`, `internal/agent/command_plugins.go` | GitHub MCP context with opt-in scoped PR creation, plus config-driven trusted command tools. |
 | Shared MCP client | `internal/mcp/client.go`, `internal/agent/mcp_tools.go` | One stdio MCP client for every server: protocol version discovery with fallback, frame limits, tool listing, namespaced `mcp__<server>__<tool>` tools, and process cleanup. |
 | Package manager | `internal/pkgmgr/`, `internal/mcpconfig/` | npm, git, and local packages installed into a scope directory and recorded in a scope registry. A package contributes Agent Skills, and `mcp.json` can start the MCP server a package ships. |

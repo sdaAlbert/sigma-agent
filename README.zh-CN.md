@@ -8,13 +8,13 @@
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-Sigma 是一个用 Go 编写的 Coding Agent，面向已有代码仓库中的 issue 修复。它把模型与仓库工具连接起来，在 Docker 中运行项目命令，并串起代码调查、修改、测试和 diff 检查。每个任务都在独立的 Git worktree 中运行，不会直接改动原始工作区。
+Sigma 是一个用 Go 编写的 Coding Agent，面向已有代码仓库中的 issue 修复。它把模型与仓库工具连接起来，在 Docker 中运行项目命令，并串起代码调查、修改、测试和 diff 检查。新任务直接操作所选仓库；Docker 命令把同一个目录挂载为容器内的 `/workspace`。
 
 ## 为什么做 Sigma
 
 - **目标是提升 Issue 修复效果：** Sigma 的开发目标是让 Coding Agent 更可靠地修复真实仓库里的 issue，而不只是用 Go 重写 Pi。重点是贴合仓库实际环境，并在结束前验证每个补丁。
 - **贴合仓库的执行与验证：** Agent 可以读取项目清单和 CI 指引，通过 `prepare_environment` 准备可复用的 Docker 工具链，并在有资源限制的容器中运行仓库命令。代码修改后，Runtime 会要求完成相关测试和 Git diff 检查，才能结束任务。
-- **完整的 Issue 修复流程：** 每个任务使用独立 Git worktree 和持久化会话。集成 TUI 与 CLI 覆盖代码浏览、修改、仓库命令、测试、diff 检查、会话恢复和可选发布。
+- **完整的 Issue 修复流程：** 持久化会话覆盖代码浏览、修改、仓库命令、测试、diff 检查和会话恢复。Git 保持普通 Git 的用法；团队需要固定提交流程时，可以使用自己的 Skill。
 - **面向后端的执行接口：** 可通过集成 TUI、单次 CLI/JSONL 集成或本地 HTTP 任务 API 使用。任务 API 支持有上限的 worker pool、任务状态持久化、SSE 事件、运行中追加指令、取消和恢复。
 - **仓库长期记忆 RAG（实验方向）：** Sigma 可以在同一个仓库的不同 issue 之间检索经过审核的经验，例如测试环境限制、架构决策、兼容性规则和反复出现的问题。检索对象是记忆事实，不是源码块；可结合 BM25、Embedding、Qdrant 和排名融合。它能否提高 issue 修复效果仍需实验验证。
 - **明确控制外部访问：** GitHub MCP 默认提供只读工具；推送功能分支和创建 Pull Request 需要显式配置并主动开启。
@@ -29,9 +29,9 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 | 运行时 | TypeScript / Node.js | Go 可执行程序；Docker 执行仓库命令 |
 | 交互方式 | 交互式 CLI、print/JSON、RPC 和 TypeScript SDK | 集成终端 TUI、单次 CLI/JSONL、本地 HTTP/SSE 任务 API |
 | 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | 包内 Skills、MCP 工具，以及支持斜杠命令、Agent 工具、通知、确认和只读生命周期事件的 JavaScript 工作流扩展宿主 |
-| 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 仓库命令/测试工具内建 Docker 执行；每个任务另有独立 Git worktree |
+| 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 文件工具直接修改所选仓库；仓库命令/测试工具在挂载该仓库的 Docker 容器中执行 |
 | 环境准备 | 使用本机工具链，或另行配置容器/沙箱 | Agent 可检查项目配置并准备缓存的 Docker 镜像，安装选择的工具链和系统依赖 |
-| 编码任务重点与证据 | Pi 是更广泛、成熟且可定制的 Coding Agent Harness，支持多种交互方式和扩展生态 | Sigma 专注仓库 Issue 修复 |
+| 编码任务重点与证据 | Pi 是更广泛、成熟且可定制的 Coding Agent Harness，支持多种交互方式和扩展生态 | Sigma 专注仓库 Issue 修复，提供仓库感知的 Docker 环境准备和由 Runtime 管控的测试/diff 验证 |
 
 ### Runtime 执行流程
 
@@ -53,22 +53,23 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 
 ## Docker 命令隔离与环境准备
 
-在 Sigma 的仓库任务流程里，`run_command` 会在 Docker 中执行项目自己的构建、检查和测试命令，而不是直接在宿主机运行。它不内置某一种语言的测试配置。命令容器只把当前任务的独立 worktree 挂载为可写工作区；容器会移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。容器默认阻止访问外网；需要下载项目依赖时，可用 `/network on` 为当前会话启用网络。任务 worktree 和依赖缓存会在多次命令间保留。
+在 Sigma 的仓库任务流程里，`run_command` 会在 Docker 中执行项目自己的构建、检查和测试命令，而不是直接在宿主机运行。命令容器以可写方式挂载所选 Git 仓库到 `/workspace`，所有新任务都直接在该仓库工作。容器会移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。容器默认阻止访问外网；需要下载项目依赖时，可用 `/network on` 为当前会话启用网络。依赖缓存会在多次命令间保留。
 
 执行项目命令前，Agent 可以检查仓库 Dockerfile、devcontainer、CI workflow、README 和依赖清单，再调用 `prepare_environment` 指定基础镜像与准备命令。Sigma 会构建并缓存派生镜像，供后续命令和恢复的 session 复用。Docker 构建上下文只有自动生成的 Dockerfile，不包含仓库源码。容器默认可以下载系统包和项目依赖；需要隔离网络时可关闭。
 
-这属于**命令执行隔离**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行；任务 worktree 以读写方式挂入 Docker，所以容器命令仍可以修改该任务的文件，但通过这个挂载不能修改 worktree 以外的宿主机文件。它不是为恶意多租户任务设计的强化安全边界。
+这属于**命令执行隔离**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行。所选仓库会以读写方式挂入 Docker，因此 Agent 的文件修改和命令都会直接改动该仓库。它不是为恶意多租户任务设计的强化安全边界。
 
 这也是 Sigma 相对 Pi 默认行为的一个集成差异：Pi 的安全文档说明，其内建工具默认使用 Pi 进程所在用户的权限，而且 Pi 本身不内置 sandbox。Pi 另有容器化和外部隔离选项，包括 Docker、Docker Sandboxes、OpenShell 和 Gondolin。Sigma 的特点是把 Docker 命令执行、资源/网络限制和可复用环境准备直接集成在仓库任务工作流里；这不代表它比 Pi 的所有可选隔离方案都更安全。详见 Pi 的[安全说明](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)、[容器化指南](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/containerization.md)和 Sigma 的[Docker 配置说明](docs/CONFIGURATION.md)。
 
 ## 开始使用
 
-需要 Go 1.26+、Git、Docker Desktop，以及一个受支持模型提供商的 API Key。Sigma 调用模型服务商的 API，不内置或下载模型。
+需要 Git、Docker Desktop，以及一个受支持模型提供商的 API Key。从当前源码安装还需要 Go 1.26+；安装后可直接运行 `sigma-agent`，不必每次用 `go run`。
 
-在 `go-runtime` 目录从源码启动：
+在 `go-runtime` 目录安装一次命令：
 
 ```powershell
-go run ./cmd/sigma-agent
+go install ./cmd/sigma-agent
+sigma-agent --version
 ```
 
 或构建 Windows 可执行文件：
@@ -78,7 +79,14 @@ go build -o sigma-agent.exe ./cmd/sigma-agent
 .\sigma-agent.exe
 ```
 
-进入 TUI 设置界面后，使用 `/login minimax` 保存模型 Key，使用 `/model list` 查看支持的提供商和 Key 配置状态，使用 `/model <provider>/<model-id>` 选择模型，再用 `/repo <path>` 选择一个干净的本地仓库。使用 `/model save` 将当前模型设为新会话默认值，然后直接输入任务或运行 `/start`。脚本模式也可以通过环境变量提供模型 Key。完整命令说明见[使用指南](docs/USAGE.md)；提供商、凭据、运行时限制和 Docker 设置见[配置说明](docs/CONFIGURATION.md)。
+然后从任意 Git 仓库启动：
+
+```powershell
+cd C:\work\target-repository
+sigma-agent --tui
+```
+
+不传 `--repo` 时，TUI 从当前目录开始；使用 `/repo <path>` 可切换到其他仓库。更新源码后再次运行 `go install ./cmd/sigma-agent` 即可更新命令。进入 TUI 设置界面后，输入 `/login` 并按 Enter，从选择器中选提供商，再粘贴 Key 并按 Enter 保存；输入字符会隐藏，Esc 可取消。也可以直接使用 `/login minimax`。使用 `/model list` 查看支持的提供商和 Key 配置状态，使用 `/model <provider>/<model-id>` 选择模型。使用 `/model save` 将当前模型设为新会话默认值，然后直接输入任务或运行 `/start`。脚本模式也可以通过环境变量提供模型 Key。完整命令说明见[使用指南](docs/USAGE.md)；提供商、凭据、运行时限制和 Docker 设置见[配置说明](docs/CONFIGURATION.md)。
 
 Docker 命令容器默认不能访问外网。需要下载项目依赖时，用 `/network on` 为当前会话启用网络；详情见配置说明。
 
@@ -87,12 +95,12 @@ Docker 命令容器默认不能访问外网。需要下载项目依赖时，用 
 ### 交互式 Coding Session
 
 ```powershell
-go run ./cmd/sigma-agent --repo C:\work\target-repository --interactive
+sigma-agent --repo C:\work\target-repository --interactive
 ```
 
-要在同一个 TUI 中完成 setup 和对话，运行 `go run ./cmd/sigma-agent --tui --repo C:\work\target-repository`。仓库/模型/凭据设置、多行任务输入、流式输出和会话命令都在 TUI 内；按 `Ctrl+Enter` 提交，界面使用主屏并保留终端 scrollback。
+要在同一个 TUI 中完成 setup 和对话，运行 `sigma-agent --tui --repo C:\work\target-repository`。Sigma 会切换到全屏 TUI，退出时恢复之前的终端画面。按 `Enter` 提交，按 `Shift+Enter` 换行。
 
-在 TUI 多行输入框中输入任务并按 `Ctrl+Enter` 提交。Sigma 运行时，可以继续输入普通文本或使用 `/steer <text>` 在下一个安全轮次边界加入指令；`/followup <text>` 用于排队后续任务。`/diff` 查看补丁摘要，`/tree` 查看会话历史，`/branch <entry-id>` 从较早的完整节点继续，`/abort` 取消当前轮次，`/exit` 保存并退出。session ID 会显示在 TUI 中；下次在 setup 界面用 `/resume <id>` 恢复。完整命令列表见[使用指南](docs/USAGE.md)。
+在 TUI 输入框中输入任务并按 `Enter` 提交，按 `Shift+Enter` 输入多行提示。Sigma 运行时，可以继续输入普通文本或使用 `/steer <text>` 在下一个安全轮次边界加入指令；`/followup <text>` 用于排队后续任务。`/diff` 查看补丁摘要，`/tree` 打开会话历史并从较早节点继续，`/abort` 取消当前轮次，`/exit` 保存并退出。session ID 会显示在 TUI 中；下次在 setup 界面用 `/resume <id>` 恢复。完整命令列表见[使用指南](docs/USAGE.md)。
 
 快捷键：`Ctrl+L` 打开模型选择器；setup 阶段按 `Ctrl+R` 选择已保存的 session；按 `Tab` 补全斜杠命令和路径（提示词中的 `@path` 或 `/repo` 后的路径）；在输入框边界按 `Up`/`Down` 浏览本次运行的提示历史；按 `PageUp`/`PageDown` 或滚动鼠标滚轮浏览对话；按 `Ctrl+O` 展开或折叠工具输出。
 
@@ -102,20 +110,20 @@ go run ./cmd/sigma-agent --repo C:\work\target-repository --interactive
 修复 issue #123。检查相关代码和项目指引，完成修改，运行合适的测试并检查完整 diff。不要提交或推送。
 ```
 
-每个任务都在独立 worktree 中运行，原始仓库工作区保持不变。配置 `/login github` 后可获取 GitHub issue 上下文；GitHub MCP 默认只读，写操作需要显式开启。
+新任务直接修改所选仓库，文件变化会立即出现在当前工作区。可在 Docker shell 中或普通终端里使用 Git 管理分支、提交和推送。Sigma 的 GitHub MCP 只读，可用于读取 issue、仓库和 Pull Request 上下文。
 
 ### 单次 CLI 与进程集成
 
 无需进入交互 REPL，直接运行一个任务：
 
 ```powershell
-go run ./cmd/sigma-agent --repo C:\work\target-repository --task "修复 issue #123 并运行相关测试"
+sigma-agent --repo C:\work\target-repository --task "修复 issue #123 并运行相关测试"
 ```
 
 添加 `--json` 后，Sigma 会向标准输出写入带版本号的 JSONL 生命周期事件和最终结果：
 
 ```powershell
-go run ./cmd/sigma-agent --repo C:\work\target-repository --task "修复 issue #123" --json
+sigma-agent --repo C:\work\target-repository --task "修复 issue #123" --json
 ```
 
 最终 JSONL 记录包含 session ID 和产物路径，之后可通过 `--resume <session-id>` 恢复。该模式是单次运行；如果要在任务运行时双向控制，请使用下方 HTTP API。
@@ -125,7 +133,7 @@ go run ./cmd/sigma-agent --repo C:\work\target-repository --task "修复 issue #
 在本机 loopback 地址启动服务（默认 `127.0.0.1:8080`）：
 
 ```powershell
-go run ./cmd/sigma-agent --serve --max-concurrent 2
+sigma-agent --serve --max-concurrent 2
 ```
 
 使用 PowerShell 提交任务：
@@ -174,16 +182,16 @@ Sigma Agent 可以安装包、连接 MCP 服务器。包贡献 Agent Skills，MC
 
 ```powershell
 # 安装包到用户级作用域（~/.sigma-agent/packages/）
-go run ./cmd/sigma-agent --install npm:pi-web-access
+sigma-agent --install npm:pi-web-access
 
 # 安装到指定仓库的项目级作用域
-go run ./cmd/sigma-agent --repo . --local --install npm:pi-web-access
+sigma-agent --repo . --local --install npm:pi-web-access
 
 # 列出已安装的包
-go run ./cmd/sigma-agent --list-packages
+sigma-agent --list-packages
 
 # 连接已配置的 MCP 服务器并列出其工具
-go run ./cmd/sigma-agent --list-mcp
+sigma-agent --list-mcp
 ```
 
 MCP 服务器在 `mcp.json` 中配置，使用其他 MCP 客户端通用的 `mcpServers` 结构，现成配置可以直接复用。服务器可以从已安装的包启动：
@@ -230,7 +238,7 @@ Skill 和长期记忆解决不同问题：
 - 仓库根目录的 `AGENTS.md` 会在每次会话启动时作为项目指引加载，最多 16 KiB；它适合放稳定约定和文档入口。当前自动发现只读取仓库根目录文件，不向上搜索父目录，也不读取子目录内的 `AGENTS.md`。配置 `project_instructions_file` 后，还可以从目标仓库之外追加一份共享指引。
 - Sigma 会发现项目级 `.agents/skills/`、`.pi/skills/`，以及用户级 `~/.agents/skills/`、`~/.pi/agent/skills/`。初始上下文只暴露 Skill 名称和描述；匹配后通过 `read_skill` 加载正文，再用 `read_skill_resource` 按需读取同一 Skill 目录下的 Markdown 指引或文本模板。交互会话中可用 `/skill:<name> <task>` 显式调用 Skill，包括 frontmatter 标记 `disable-model-invocation: true` 的 Skill。
 - 支持常见 Agent Skills 字段：`name`、`description`、`license`、`compatibility`、`disable-model-invocation` 和 `user-invocable`。其他 frontmatter 字段会被容忍，但 Pi 的 `allowed-tools` 权限语义尚未实现；工具权限仍以 Sigma 配置为准。加载 Skill 或参考文件不会自动运行脚本。`read_skill_resource` 只读小型文本资料/模板，不开放脚本和二进制资源。
-- `.sigma-agent/MEMORY.md` 保存可能跨任务复用的短事实，每条带类别、来源和日期，并按仓库隔离；它通过 BM25/向量检索按需取回，不会整体塞进上下文。`memory_file` 和稳定的 `memory_repository_id` 可让独立任务 checkout 共享目标仓库记忆；文件复制到隔离 session worktree，原始目标 checkout 不变。Session snapshot 保存的是中断恢复状态，不是长期记忆。
+- `.sigma-agent/MEMORY.md` 保存可能跨任务复用的短事实，每条带类别、来源和日期，并按仓库隔离；它通过 BM25/向量检索按需取回，不会整体塞进上下文。`memory_file` 和稳定的 `memory_repository_id` 可让 session 共享外部记忆源；Sigma 会把它放入当前工作区。Session snapshot 保存的是中断恢复状态，不是长期记忆。
 - 当前源码和测试优先级更高。记忆是需要对照当前代码验证的参考，不应取代源码阅读。
 - BM25 可在本机运行。配置 Embedding 和 Qdrant 后，Sigma 会加入按仓库过滤的向量候选，再用 Reciprocal Rank Fusion 融合排名。这个记忆功能不会给源码分块或建立源码向量索引。
 

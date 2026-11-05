@@ -47,6 +47,26 @@ func TestFinalizationToolDefinitionsExposeOnlyMissingChecks(t *testing.T) {
 	}
 }
 
+func TestMissingModelStopReasonIsRecoverable(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopReason string
+		want       bool
+	}{
+		{name: "missing finish reason", stopReason: "", want: true},
+		{name: "normal final response", stopReason: "end_turn"},
+		{name: "tool response", stopReason: "tool_use"},
+		{name: "output limit", stopReason: "max_tokens"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldRecoverMissingStopReason(test.stopReason); got != test.want {
+				t.Fatalf("shouldRecoverMissingStopReason(%q) = %t, want %t", test.stopReason, got, test.want)
+			}
+		})
+	}
+}
+
 func TestReviewToolNeededOnlyAllowsOutstandingCheck(t *testing.T) {
 	tests := []struct {
 		name       string

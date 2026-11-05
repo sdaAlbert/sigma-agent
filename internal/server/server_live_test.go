@@ -87,7 +87,7 @@ func TestLiveTaskServiceLifecycle(t *testing.T) {
 	waitTaskStatus(t, ctx, client, baseURL, taskB.ID, "completed")
 	assertLiveWorkspace(t, serviceHome, taskB.ID, "good evening")
 	assertSuccessfulGoTest(t, serviceHome, taskB.ID)
-	t.Log("PASS: queued real task ran after worker became free and changed its isolated worktree")
+	t.Log("PASS: queued real task ran after worker became free and changed its selected repository workspace")
 
 	postTaskAction(t, client, baseURL, taskA.ID, "resume")
 	resumeMessageID := postLiveTaskMessage(t, client, baseURL, taskA.ID, "The earlier test command was cancelled. Re-run the Go tests against the current workspace and fix any failures. Preserve the test sleep and unrelated code.", "steer")

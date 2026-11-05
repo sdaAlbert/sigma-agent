@@ -52,6 +52,12 @@ func (m *OpenAIChatCompletionsModel) Stream(ctx context.Context, system string, 
 		"model": m.Model, "messages": requestMessages, "stream": true,
 		"max_tokens": outputTokenLimit(m.MaxOutputTokens),
 	}
+	// DeepSeek enables its thinking mode by default. Sigma's Chat Completions
+	// adapter does not preserve DeepSeek's reasoning_content across tool turns,
+	// and coding-agent tool loops benefit from the faster non-thinking mode.
+	if strings.EqualFold(m.Provider, "deepseek") {
+		requestBody["thinking"] = map[string]string{"type": "disabled"}
+	}
 	if len(requestTools) > 0 {
 		requestBody["tools"] = requestTools
 	}

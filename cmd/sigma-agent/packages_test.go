@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +52,21 @@ func TestResolveMCPEntriesKeepsValidServersWhenOneEntryIsInvalid(t *testing.T) {
 	}
 	if len(resolved) != 1 || resolved[0].Name != "local" {
 		t.Fatalf("resolveMCPEntries() = %+v, want the valid local server", resolved)
+	}
+}
+
+func TestConfiguredMCPServersCanBeDisabledWithoutLoadingUserConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, mcpconfig.FileName), []byte("not valid JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tools, shutdown, err := startConfiguredMCPServers(context.Background(), []packageScope{{Name: "user", Dir: dir}}, true)
+	if err != nil {
+		t.Fatalf("startConfiguredMCPServers(disabled) error = %v", err)
+	}
+	defer shutdown()
+	if len(tools) != 0 {
+		t.Fatalf("disabled MCP tools = %d, want none", len(tools))
 	}
 }
 

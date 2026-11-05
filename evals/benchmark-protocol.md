@@ -32,7 +32,7 @@ When benchmark tasks use independent clones of the same upstream repository,
 use `project_instructions_file` and `memory_file` in the run config instead of
 adding profile files to each source checkout. The external instruction file is
 loaded alongside any task-root `AGENTS.md`; the external memory file is copied
-only into Sigma's isolated session worktree. Set one stable
+into Sigma's active repository workspace. Set one stable
 `memory_repository_id` for that upstream repository so BM25 and Qdrant use the
 same scope across clones. Run `--index-memory` with this config before the
 batch, and record the profile paths, hashes, memory scope, Skills state, and
@@ -91,6 +91,16 @@ complete turn cannot fit the hard ceiling.
 
 Multi-SWE-Bench reuses Docker images by repository/PR tag, and the runner skips an instance when its work directory already contains a report. When the candidate patch or dataset changes, force-rebuild the image (or use a unique image tag), and use a fresh workdir, output directory, and log directory for that evaluation. Before interpreting a result, verify that the image's `/home/test.patch` matches the current benchmark test patch and that the candidate patch mounted at `/home/fix.patch` matches the saved Agent patch. If patch application fails or the fix stage captures no tests, label the run as an evaluator failure and do not count it as a code-resolution result.
 
+Before starting an evaluator container, inspect the saved candidate's changed
+paths and run a host-side patch-application preflight against a clean checkout
+of the exact task base. If the benchmark applies a separate test patch, include
+that patch in the same preflight sequence and test the candidate both before and
+after it, matching the evaluator's application order. Resolve path collisions
+and create the final scoring patch before launching the evaluator. Do not start
+a second evaluator container just to discover a deterministic patch conflict;
+start a fresh evaluator only when the validated candidate or evaluation
+condition changes. Gold control and candidate scoring remain separate runs.
+
 When Multi-SWE-Bench supplies a separate `test_patch`, save the Agent's patch unchanged as the raw candidate, then prepare a second scoring patch that excludes Agent-authored Go `*_test.go` changes. Run the same evaluator with that source-only patch so overlapping test edits do not prevent the benchmark tests from compiling. Keep both application results: a raw-patch conflict remains an evaluator/patch-integration failure, while target tests passing on the source-only patch is evidence about the production implementation. Do not replace the raw patch or report the two outcomes as the same score. Prepare both files and a checksum manifest with:
 
 ```powershell
@@ -98,6 +108,14 @@ When Multi-SWE-Bench supplies a separate `test_patch`, save the Agent's patch un
   -CandidatePatch $candidatePatch `
   -OutputDirectory $artifactDirectory
 ```
+
+Sigma's `WorkspaceDiff` excludes the session-managed `.sigma-agent/MEMORY.md`.
+Sigma does not provide its own Git commit tool; benchmark runners should save
+the candidate diff from the task workspace and keep the memory sidecar out of
+the submitted patch. For older runs that already contain it, preserve the raw
+patch and evaluator error, then score a separate code-only patch with only this
+sidecar removed. Record both outcomes instead of silently replacing the raw
+candidate.
 
 ## Docker images and environment failures
 
@@ -107,9 +125,13 @@ command images and, if needed, build a dependency-ready command image. Registry
 access and host-side image preparation do not use `allow_container_network`.
 
 During issue solving, keep both `allow_container_network: false` and
-`web_search_enabled: false`. This prevents the Agent's command container from
-downloading dependencies or searching the web. It does not prevent the host
-from pulling images before the run. Do not turn Agent networking on to repair a
+`web_search_enabled: false`, and set
+`disable_configured_mcp_servers: true` plus
+`disable_workflow_extensions: true`. The latter two prevent user-level MCP
+servers and JavaScript extensions from adding network tools despite the web
+search flag. This prevents the Agent's command container from downloading
+dependencies or searching the web. It does not prevent the host from pulling
+images before the run. Do not turn Agent networking on to repair a
 Docker Hub, image-build, or dependency-preparation failure. Instead, prepare the
 image outside the Agent run, then rerun the offline preflight. If dependencies
 are still missing, mark the task `infra-invalid`/`invalid-incomplete` and retain
@@ -178,6 +200,24 @@ preserve its exit status; avoid shell pipes or semicolon-separated commands
 that hide a test failure. Record the exact command, image, exit status, and
 failure stage in the trace or issue log.
 
+### Safe source edits after Django #12273 and #12276
+
+These runs exposed a destructive edit path: the Agent can accidentally replace
+an entire large source file, and shell redirection opens/truncates its
+destination before the command on the left succeeds. In #12276, a failed
+container-side git show was redirected into django/forms/fields.py; the file
+was truncated and subsequent manual reconstruction caused 19 unrelated
+pass-to-pass regressions. #12273 also ended with a source file truncated and a
+syntax error before evaluator tests could run.
+
+The runtime now limits full-file apply_patch replacement to files and content
+at most 32 KiB, and blocks shell redirection to existing workspace files.
+Use edit_file for localized changes to larger files. Redirect output only to a
+new literal scratch path; check command status before using its output.
+Review the final diff for unexpectedly deleted or dramatically shortened files
+before evaluation. The shell-redirection check is a targeted guard for literal
+paths; it is not a complete shell sandbox.
+
 ## Run retention and cleanup
 
 A task is complete only after the Agent run has ended, the official evaluator
@@ -213,3 +253,11 @@ the task, stage, command/image, observed error, impact on validity, workaround,
 and whether the workaround succeeded. After a recurring issue is understood,
 keep the general rule here and leave the detailed per-run evidence in the issue
 log.
+
+### Passing issue-only task text
+
+The CLI `--task` flag takes the task text itself; it does not open a file path. When an issue-only prompt is stored outside the task checkout, read it on the host (for example, PowerShell `Get-Content -Raw`) and pass the resulting string to `--task`. Passing a host path literally causes the Agent to receive only that path, and command containers generally cannot read it unless separately mounted. Record this as an invalid launch and use a fresh session; do not score or resume it.
+
+### Empty model finish reason
+
+If the provider stream returns no finish reason, the runtime preserves the session and retries the original task with a short recovery prompt at most twice. A third consecutive empty finish reason ends the run with a specific error. Record such attempts as incomplete, retain the session and benchmark environment, and do not start an evaluator until the Agent produces a candidate patch. The raw provider SSE payload is not currently retained, so distinguish the observed empty runtime reason from an unverified claim about the provider's raw response.

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -90,5 +91,40 @@ func TestMiniMaxRetriesTransientRateLimit(t *testing.T) {
 	}
 	if got := requests.Load(); got != 3 {
 		t.Fatalf("request count = %d, want initial request plus 2 retries", got)
+	}
+}
+
+func TestMiniMaxM31FlashSendsConfiguredReasoningEffort(t *testing.T) {
+	var request struct {
+		OutputConfig struct {
+			Effort string `json:"effort"`
+		} `json:"output_config"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n")
+	}))
+	defer server.Close()
+
+	model := &AnthropicMessagesModel{
+		Provider: "minimax", Model: "MiniMax-M3.1-Flash", BaseURL: server.URL,
+		APIKey: "test-key", Client: server.Client(), MaxOutputTokens: 512,
+		ReasoningEffort: "medium",
+	}
+	response, err := model.Stream(context.Background(), "system", []Message{{Role: "user", Content: []ContentBlock{{Type: "text", Text: "test"}}}}, nil, nil)
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if request.OutputConfig.Effort != "medium" {
+		t.Fatalf("output_config.effort = %q, want medium", request.OutputConfig.Effort)
+	}
+	if response.StopReason != "end_turn" {
+		t.Fatalf("StopReason = %q, want end_turn", response.StopReason)
 	}
 }

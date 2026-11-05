@@ -360,8 +360,10 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	reviewOnly := false
 	outputContinuationRetries := 0
 	skillBootstrapRetries := 0
+	emptyStopReasonRetries := 0
 	const maxOutputContinuationRetries = 2
 	const maxSkillBootstrapRetries = 2
+	const maxEmptyStopReasonRetries = 2
 	for turn := 1; turn <= limits.MaxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
 			s.emit(Event{Type: "agent_aborted", Turn: turn, Error: err.Error()})
@@ -435,6 +437,9 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		result.OutputTokens += response.OutputTokens
 		result.CacheReadInputTokens += response.CacheReadInputTokens
 		result.CacheCreationInputTokens += response.CacheCreationInputTokens
+		if !shouldRecoverMissingStopReason(response.StopReason) {
+			emptyStopReasonRetries = 0
+		}
 		s.emit(Event{Type: "model_usage", Turn: turn, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens, CacheReadInputTokens: response.CacheReadInputTokens, CacheCreationInputTokens: response.CacheCreationInputTokens})
 		result.Text += textBlocks(response.Content)
 		toolCalls := make([]ContentBlock, 0)
@@ -670,6 +675,21 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				return result, err
 			}
 			skillBootstrapRetries++
+			s.emit(Event{Type: "turn_end", Turn: turn})
+			continue
+		}
+		if shouldRecoverMissingStopReason(response.StopReason) {
+			emptyStopReasonRetries++
+			if emptyStopReasonRetries > maxEmptyStopReasonRetries {
+				return result, fmt.Errorf("model stream completed without a finish reason %d consecutive times", emptyStopReasonRetries)
+			}
+			if err := s.appendAssistant(response.Content, nil); err != nil {
+				return result, err
+			}
+			if err := s.appendRecoveryPrompt("The previous model response ended without a finish reason. Continue the original task from the current repository state. Make one concrete tool call or provide a final answer; do not repeat completed exploration."); err != nil {
+				return result, err
+			}
+			s.emit(Event{Type: "model_response_recovered", Turn: turn, Error: fmt.Sprintf("empty finish reason; retry %d of %d", emptyStopReasonRetries, maxEmptyStopReasonRetries)})
 			s.emit(Event{Type: "turn_end", Turn: turn})
 			continue
 		}
@@ -1179,6 +1199,10 @@ func (s *Session) emit(event Event) {
 		event.Session = s.ID
 		s.OnEvent(event)
 	}
+}
+
+func shouldRecoverMissingStopReason(stopReason string) bool {
+	return strings.TrimSpace(stopReason) == ""
 }
 
 func eventToolArgs(input json.RawMessage) json.RawMessage {

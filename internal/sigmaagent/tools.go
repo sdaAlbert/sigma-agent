@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 
 const maxFileBytes = 1 << 20
 const defaultMaxMemoryQueryBytes = 8 * 1024
+const maxWholeFileReplacementBytes = 32 * 1024
 
 var sourceExtensions = map[string]bool{
 	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
@@ -39,14 +41,15 @@ var ignoredDirs = map[string]bool{
 }
 
 type workspace struct {
-	root               string
-	memoryRepositoryID string
-	changeGate         *changeContractGate
-	mutations          *fileMutationQueue
-	background         *BackgroundCommandManager
-	diffBase           string
-	allowNetwork       bool
-	commandEnvironment *commandEnvironmentState
+	root                   string
+	memoryRepositoryID     string
+	changeGate             *changeContractGate
+	mutations              *fileMutationQueue
+	background             *BackgroundCommandManager
+	diffBase               string
+	allowNetwork           bool
+	commandFilesystemScope string
+	commandEnvironment     *commandEnvironmentState
 }
 
 func (w workspace) lockFileMutation(ctx context.Context, path string) (func(), error) {
@@ -144,10 +147,23 @@ func CommandExecutionToolsWithNetwork(root, image string, manager *BackgroundCom
 }
 
 func CommandExecutionToolsWithEnvironmentPreparation(root, image string, manager *BackgroundCommandManager, allowNetwork bool, diffBase ...string) ([]agent.Tool, error) {
-	return commandExecutionTools(root, image, manager, allowNetwork, true, diffBase...)
+	return commandExecutionToolsWithScope(root, image, manager, allowNetwork, true, "unrestricted", diffBase...)
+}
+
+// CommandExecutionToolsWithEnvironmentPreparationAndFilesystemScope adds the
+// workspace-only command path policy used by benchmark runs.
+func CommandExecutionToolsWithEnvironmentPreparationAndFilesystemScope(root, image string, manager *BackgroundCommandManager, allowNetwork bool, filesystemScope string, diffBase ...string) ([]agent.Tool, error) {
+	if filesystemScope != "unrestricted" && filesystemScope != "workspace" {
+		return nil, fmt.Errorf("unsupported command filesystem scope %q", filesystemScope)
+	}
+	return commandExecutionToolsWithScope(root, image, manager, allowNetwork, true, filesystemScope, diffBase...)
 }
 
 func commandExecutionTools(root, image string, manager *BackgroundCommandManager, allowNetwork, prepareEnvironment bool, diffBase ...string) ([]agent.Tool, error) {
+	return commandExecutionToolsWithScope(root, image, manager, allowNetwork, prepareEnvironment, "unrestricted", diffBase...)
+}
+
+func commandExecutionToolsWithScope(root, image string, manager *BackgroundCommandManager, allowNetwork, prepareEnvironment bool, filesystemScope string, diffBase ...string) ([]agent.Tool, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -159,7 +175,7 @@ func commandExecutionTools(root, image string, manager *BackgroundCommandManager
 	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("workspace is not a directory: %s", root)
 	}
-	ws := workspace{root: filepath.Clean(abs), background: manager, allowNetwork: allowNetwork}
+	ws := workspace{root: filepath.Clean(abs), background: manager, allowNetwork: allowNetwork, commandFilesystemScope: filesystemScope}
 	if len(diffBase) > 0 {
 		ws.diffBase = strings.TrimSpace(diffBase[0])
 	}
@@ -175,16 +191,31 @@ func commandExecutionTools(root, image string, manager *BackgroundCommandManager
 	return tools, nil
 }
 
-// GitPublishTools adds narrowly-scoped local commit and push operations for an
-// explicitly selected feature branch. The branch itself is created by the CLI.
-func GitPublishTools(root, branch string) []agent.Tool {
-	ws := workspace{root: root}
-	return []agent.Tool{ws.gitCommitTool(branch), ws.gitPushTool(branch)}
-}
+var commandAbsolutePathPattern = regexp.MustCompile(`(?:^|[\s"'=(:,>])(/(?:[A-Za-z0-9_.@+-]+/?)+)`)
+var commandParentTraversalPattern = regexp.MustCompile(`(?:^|[/\\])\.\.(?:[/\\]|$)`)
+var commandHomePathPattern = regexp.MustCompile(`(?:^|[\s"'=(:,>])(?:~|\$\{?(?:HOME|TMPDIR|CONDA_PREFIX|VIRTUAL_ENV)\}?)(?:/|\b)`)
 
-func GitPublishToolsWithBackground(root, branch string, background *BackgroundCommandManager) []agent.Tool {
-	ws := workspace{root: root, background: background}
-	return []agent.Tool{ws.gitCommitTool(branch), ws.gitPushTool(branch)}
+// validateCommandFilesystemScope blocks explicit paths outside the mounted
+// repository before a command reaches Docker. This is a tool-boundary policy,
+// not a complete OS sandbox against commands that synthesize paths at runtime.
+func validateCommandFilesystemScope(command, scope string) error {
+	if scope != "workspace" {
+		return nil
+	}
+	if commandParentTraversalPattern.MatchString(command) {
+		return errors.New("command filesystem scope is workspace-only; parent-directory traversal is not allowed")
+	}
+	if commandHomePathPattern.MatchString(command) {
+		return errors.New("command filesystem scope is workspace-only; home or environment-based paths are not allowed")
+	}
+	for _, match := range commandAbsolutePathPattern.FindAllStringSubmatch(command, -1) {
+		path := match[1]
+		if path == "/workspace" || strings.HasPrefix(path, "/workspace/") || path == "/dev/null" || path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
+			continue
+		}
+		return fmt.Errorf("command filesystem scope is workspace-only; path %s is outside /workspace", path)
+	}
+	return nil
 }
 
 func (w workspace) searchMemoryTool(vector *vectorConfig, maxQueryBytes int) agent.Tool {
@@ -419,7 +450,7 @@ func (w workspace) readFileTool() agent.Tool {
 }
 
 func (w workspace) applyPatchTool() agent.Tool {
-	return tool("apply_patch", "Replace one existing source file after read_file. The runtime automatically verifies the latest read version; do not copy or provide a SHA-256.", `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":1048576}},"required":["path","content"],"additionalProperties":false}`, "parallel_write", func(ctx context.Context, raw json.RawMessage) (string, error) {
+	return tool("apply_patch", "Replace the full content of a small existing source file after read_file (maximum 32 KiB). Larger files require edit_file for localized changes. The runtime verifies the latest read version.", `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string","maxLength":32768}},"required":["path","content"],"additionalProperties":false}`, "parallel_write", func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args struct {
 			Path    string `json:"path"`
 			Content string `json:"content"`
@@ -430,8 +461,8 @@ func (w workspace) applyPatchTool() agent.Tool {
 		if err := w.requireChangeContract(ctx); err != nil {
 			return "", err
 		}
-		if len(args.Content) > maxFileBytes {
-			return "", errors.New("content exceeds 1 MiB")
+		if len(args.Content) > maxWholeFileReplacementBytes {
+			return "", fmt.Errorf("apply_patch replaces the whole file and accepts at most %d bytes; use edit_file for a localized change", maxWholeFileReplacementBytes)
 		}
 		if protectedProjectGuidancePath(args.Path) {
 			return "", errors.New("repository skills and project memory are read-only agent context")
@@ -451,6 +482,9 @@ func (w workspace) applyPatchTool() agent.Tool {
 		current, err := readBounded(absolute, maxFileBytes)
 		if err != nil {
 			return "", err
+		}
+		if len(current) > maxWholeFileReplacementBytes {
+			return "", fmt.Errorf("apply_patch replaces the whole file and is limited to existing files no larger than %d bytes; use edit_file for a localized change", maxWholeFileReplacementBytes)
 		}
 		if err := w.verifyReadVersion(args.Path, current); err != nil {
 			return "", err
@@ -609,7 +643,11 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 	if w.allowNetwork {
 		networkDescription = "internet access is enabled, so package managers may download dependencies"
 	}
-	description := fmt.Sprintf("Run Linux shell commands inside Docker using any Docker image reference selected from the repository's Dockerfile, devcontainer, CI, manifests, or build instructions. The optional image argument overrides the active image for this command. If omitted, use the image most recently prepared with prepare_environment, or the configured fallback image %s. Docker pulls a missing image on first use. Package-manager caches persist under the task worktree's .sigma-agent/container-home. The container has %s, 2 GiB RAM, 2 CPUs, 128 processes, and only the isolated task worktree as a writable host mount. Use action=run for a foreground command (default), action=start to launch one bounded background command, action=list to find session jobs, action=status to inspect one job, or action=stop with its task_id. Job records are persisted with the session, one task may run at a time, and tasks expire after 30 minutes. While a task runs, file edits, foreground commands, tests, diffs, and Git publishing are paused to protect the shared workspace; polling and read-only tools remain available. Use purpose=inspect/build/test/other. After source changes, run a relevant test with purpose=test and inspect git_diff. Test-purpose commands must preserve the test process exit status: do not use shell pipelines, semicolons, or fallback operators that can hide a failing test. Chain setup with &&. Container network: %s.", image, networkDescription, networkDescription)
+	scopeDescription := "commands may read paths in the container image"
+	if w.commandFilesystemScope == "workspace" {
+		scopeDescription = "workspace-only command path policy: explicit paths outside /workspace are rejected before Docker starts"
+	}
+	description := fmt.Sprintf("Run Linux shell commands inside Docker using any Docker image reference selected from the repository's Dockerfile, devcontainer, CI, manifests, or build instructions. The optional image argument overrides the active image for this command. If omitted, use the image most recently prepared with prepare_environment, or the configured fallback image %s. Docker pulls a missing image on first use. Package-manager caches persist under the selected repository's .sigma-agent/container-home. The container has %s, 2 GiB RAM, 2 CPUs, 128 processes, and the selected repository directory as a writable host mount. Filesystem policy: %s. Use action=run for a foreground command (default), action=start to launch one bounded background command, action=list to find session jobs, action=status to inspect one job, or action=stop with its task_id. Job records are persisted with the session, one task may run at a time, and tasks expire after 30 minutes. While a task runs, file edits, foreground commands, tests, diffs are paused to protect the shared workspace; polling and read-only tools remain available. Use purpose=inspect/build/test/other. After source changes, run a relevant test with purpose=test and inspect git_diff. Test-purpose commands must preserve the test process exit status: do not use shell pipelines, semicolons, or fallback operators that can hide a failing test. Chain setup with &&. Container network: %s.", image, networkDescription, scopeDescription, networkDescription)
 	return tool("run_command", description, `{"type":"object","properties":{"action":{"type":"string","enum":["run","start","list","status","stop"]},"command":{"type":"string","minLength":1,"maxLength":16384},"task_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},"working_directory":{"type":"string","maxLength":512,"description":"Optional workspace-relative directory; defaults to workspace root."},"purpose":{"type":"string","enum":["inspect","build","test","other"]},"image":{"type":"string","maxLength":512,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:/@_-]*$","description":"Optional Docker image reference for this command. Omit to use the prepared image or configured fallback."}},"additionalProperties":false}`, "sequential", func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args struct {
 			Action           string `json:"action"`
@@ -659,6 +697,12 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 		args.Command = strings.TrimSpace(args.Command)
 		if args.Command == "" || len(args.Command) > maxCommandBytes {
 			return "", fmt.Errorf("command must be 1 to %d bytes", maxCommandBytes)
+		}
+		if err := validateCommandFilesystemScope(args.Command, w.commandFilesystemScope); err != nil {
+			return "", err
+		}
+		if err := validateExistingWorkspaceRedirections(args.Command, w.root, w.root, args.WorkingDirectory); err != nil {
+			return "", err
 		}
 		if args.Purpose == "test" {
 			if err := validateTestCommandExitStatus(args.Command); err != nil {
@@ -770,6 +814,111 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 		}
 		return fmt.Sprintf("SIGMA_RUN_COMMAND run_command purpose=%s status=%s exit_code=%d workspace_changed=%t action=run\n%s", args.Purpose, status, exitCode, workspaceChanged, encoded), nil
 	})
+}
+
+// validateExistingWorkspaceRedirections prevents shell output redirection from
+// truncating or appending to an existing workspace file. Source changes should
+// go through the version-checked file tools; redirection remains available for
+// creating new scratch/output files.
+func validateExistingWorkspaceRedirections(command, root, defaultDirectory, requestedDirectory string) error {
+	workingDirectory := defaultDirectory
+	if requestedDirectory != "" {
+		candidate := filepath.Join(root, filepath.FromSlash(requestedDirectory))
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			workingDirectory = candidate
+		}
+	}
+
+	for _, target := range shellOutputRedirectionTargets(command) {
+		if strings.ContainsAny(target, "$`*?[{") {
+			return fmt.Errorf("dynamic shell output target %q is blocked because it could overwrite an existing workspace file; use a new literal scratch path", target)
+		}
+		var path string
+		if target == "/workspace" || strings.HasPrefix(target, "/workspace/") {
+			relative := strings.TrimPrefix(strings.TrimPrefix(target, "/workspace"), "/")
+			path = filepath.Join(root, filepath.FromSlash(relative))
+		} else if filepath.IsAbs(target) {
+			continue
+		} else {
+			path = filepath.Join(workingDirectory, filepath.FromSlash(target))
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		relative, err := filepath.Rel(root, absolute)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if _, err := os.Stat(absolute); err == nil {
+			return fmt.Errorf("shell output redirection to existing workspace file %q is blocked to prevent truncating or corrupting source; use edit_file/apply_patch, or redirect to a new scratch file", target)
+		}
+	}
+	return nil
+}
+
+// shellOutputRedirectionTargets extracts statically named targets for unquoted
+// >, >>, and >| operators. It ignores quoted text and descriptor redirects
+// such as 2>&1. This is a targeted safety check, not a shell parser.
+func shellOutputRedirectionTargets(command string) []string {
+	var targets []string
+	for i := 0; i < len(command); i++ {
+		if command[i] == '\\' {
+			i++
+			continue
+		}
+		if command[i] == '\'' || command[i] == '"' {
+			quote := command[i]
+			for i++; i < len(command); i++ {
+				if command[i] == '\\' && quote == '"' {
+					i++
+					continue
+				}
+				if command[i] == quote {
+					break
+				}
+			}
+			continue
+		}
+		if command[i] != '>' {
+			continue
+		}
+		j := i + 1
+		if j < len(command) && (command[j] == '>' || command[j] == '|') {
+			j++
+		}
+		for j < len(command) && (command[j] == ' ' || command[j] == '\t') {
+			j++
+		}
+		if j >= len(command) || command[j] == '&' { // 2>&1 / >&-
+			continue
+		}
+		start := j
+		if command[j] == '\'' || command[j] == '"' {
+			quote := command[j]
+			j++
+			start = j
+			for j < len(command) && command[j] != quote {
+				if command[j] == '\\' && quote == '"' && j+1 < len(command) {
+					j++
+				}
+				j++
+			}
+			if j > start {
+				targets = append(targets, command[start:j])
+			}
+			i = j
+			continue
+		}
+		for j < len(command) && command[j] != ' ' && command[j] != '\t' && command[j] != '\r' && command[j] != '\n' && command[j] != ';' && command[j] != '|' && command[j] != '&' && command[j] != '<' && command[j] != '>' {
+			j++
+		}
+		if j > start {
+			targets = append(targets, command[start:j])
+		}
+		i = j - 1
+	}
+	return targets
 }
 
 func validateTestCommandExitStatus(command string) error {
@@ -900,7 +1049,7 @@ func removeIsolatedTestNetwork(name string) error {
 
 // containerRunArgs builds the shared docker run arguments for a command
 // container. The container is isolated with a bounded network, memory, CPU and
-// process budget, drops all capabilities, and mounts only the task worktree.
+// process budget, drops all capabilities, and mounts only the selected repository workspace.
 func containerRunArgs(containerName, networkName string) []string {
 	return []string{"run", "--rm", "--init", "--name", containerName, "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,exec,nosuid,size=256m"}
 }
@@ -919,98 +1068,6 @@ func (w workspace) gitDiffTool() agent.Tool {
 		}
 		return output, nil
 	})
-}
-
-func (w workspace) gitCommitTool(branch string) agent.Tool {
-	return tool("git_commit", "Stage all non-ignored changes in the isolated task worktree and commit them on the explicitly selected feature branch. Inspect git_diff and run relevant tests first. Only commit when the user asked for publication. Never change branches or include a custom path.", `{"type":"object","properties":{"message":{"type":"string","minLength":1,"maxLength":200}},"required":["message"],"additionalProperties":false}`, "sequential", func(ctx context.Context, raw json.RawMessage) (string, error) {
-		if err := w.ensureNoActiveBackgroundTask(); err != nil {
-			return "", err
-		}
-		var args struct {
-			Message string `json:"message"`
-		}
-		if err := decodeArgs(raw, &args); err != nil {
-			return "", err
-		}
-		args.Message = strings.TrimSpace(args.Message)
-		if args.Message == "" || len(args.Message) > 200 || strings.ContainsAny(args.Message, "\r\n") {
-			return "", errors.New("commit message must be a single line of 1 to 200 bytes")
-		}
-		if err := requirePublishBranch(ctx, w.root, branch); err != nil {
-			return "", err
-		}
-		status, err := runGit(ctx, w.root, "status", "--porcelain=v1", "--untracked-files=all")
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(status) == "" {
-			return "", errors.New("there are no changes to commit")
-		}
-		if _, err := runGit(ctx, w.root, "add", "--all", "--", "."); err != nil {
-			return "", fmt.Errorf("stage task worktree changes: %w", err)
-		}
-		if _, err := runGit(ctx, w.root, "diff", "--cached", "--quiet"); err == nil {
-			return "", errors.New("there are no staged changes to commit")
-		} else {
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-				return "", fmt.Errorf("inspect staged changes: %w", err)
-			}
-		}
-		output, err := runGit(ctx, w.root, "commit", "-m", args.Message)
-		if err != nil {
-			return output, fmt.Errorf("create commit: %w", err)
-		}
-		commit, err := runGit(ctx, w.root, "rev-parse", "--short", "HEAD")
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("Created commit %s on branch %s.\n%s", strings.TrimSpace(commit), branch, strings.TrimSpace(output)), nil
-	})
-}
-
-func (w workspace) gitPushTool(branch string) agent.Tool {
-	return tool("git_push", "Push the already-committed task branch to the origin remote using the user's local Git credentials. This tool can only push the feature branch selected when this session was created; it never force-pushes or opens a pull request. Only push when the user asked for publication and relevant tests have passed.", `{"type":"object","properties":{},"additionalProperties":false}`, "sequential", func(ctx context.Context, _ json.RawMessage) (string, error) {
-		if err := w.ensureNoActiveBackgroundTask(); err != nil {
-			return "", err
-		}
-		if err := requirePublishBranch(ctx, w.root, branch); err != nil {
-			return "", err
-		}
-		status, err := runGit(ctx, w.root, "status", "--porcelain=v1", "--untracked-files=all")
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(status) != "" {
-			return "", errors.New("worktree has uncommitted changes; commit or discard them before pushing")
-		}
-		_, err = runGit(ctx, w.root, "push", "--set-upstream", "origin", "HEAD:refs/heads/"+branch)
-		if err != nil {
-			return "", fmt.Errorf("push branch %s to origin failed; check local Git credentials, network access, and remote permissions", branch)
-		}
-		return fmt.Sprintf("Pushed branch %s to origin. A pull request was not created.", branch), nil
-	})
-}
-
-func requirePublishBranch(ctx context.Context, root, branch string) error {
-	current, err := runGit(ctx, root, "branch", "--show-current")
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(current) != branch {
-		return fmt.Errorf("refusing Git publish operation: current branch %q does not match configured branch %q", strings.TrimSpace(current), branch)
-	}
-	return nil
-}
-
-func runGit(ctx context.Context, root string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, "git", args...)
-	command.Dir = root
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return string(output), fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(string(output)))
-	}
-	return string(output), nil
 }
 
 func tool(name, description, schema, mode string, handler agent.ToolHandler) agent.Tool {

@@ -28,6 +28,18 @@ isolated task workspace as an external profile. Keep it short and stable.
   config supplies it externally, treat Sigma-repository paths as references to
   the profile source, not as files in the task checkout.
 
+## Issue-only benchmark workspace boundary
+
+When solving an issue-only benchmark in a mounted repository, treat `/workspace`
+as the only permitted filesystem root. Run `pwd` first and keep every read,
+write, generated script, and test fixture inside that checkout. Put temporary
+diagnostics under `/workspace/.scratch/`; do not use `/tmp`, home directories,
+installed packages, caches, wheels, or alternate checkouts. Before a command
+creates a file, verify its destination is under `/workspace`. Keep scratch
+artifacts out of the candidate patch and inspect the final diff. If a diagnostic
+cannot be done inside the checkout, explain the limitation and continue from
+the repository files and tests already available.
+
 ## Persistent memory
 
 Keep memory factual, concise, repository-scoped, and attributable to a file,

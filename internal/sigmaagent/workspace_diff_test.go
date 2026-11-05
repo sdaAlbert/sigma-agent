@@ -1,6 +1,7 @@
 package sigmaagent
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,33 @@ func TestWorkspaceDiffExcludesAgentMemory(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStageTaskChangesExcludesAgentMemory(t *testing.T) {
+	root := t.TempDir()
+	gitTestCommand(t, root, "init", "-q")
+	gitTestCommand(t, root, "config", "user.email", "sigma-test@example.invalid")
+	gitTestCommand(t, root, "config", "user.name", "Sigma Test")
+	writeDiffFixture(t, root, "app.go", "package app\n")
+	writeDiffFixture(t, root, filepath.Join(".sigma-agent", "MEMORY.md"), "# reviewed memory\n")
+	gitTestCommand(t, root, "add", ".")
+	gitTestCommand(t, root, "commit", "-qm", "base")
+
+	writeDiffFixture(t, root, "app.go", "package app\n\n// changed\n")
+	writeDiffFixture(t, root, filepath.Join(".sigma-agent", "MEMORY.md"), "# updated memory\n")
+	if err := stageTaskChanges(context.Background(), root); err != nil {
+		t.Fatalf("stageTaskChanges() error = %v", err)
+	}
+
+	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git diff --cached --name-only: %v", err)
+	}
+	if got := strings.TrimSpace(string(output)); got != "app.go" {
+		t.Fatalf("staged paths = %q, want only app.go", got)
 	}
 }
 

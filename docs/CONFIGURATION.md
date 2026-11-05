@@ -15,6 +15,7 @@ defaults. A file can contain only the settings that need changing.
   "max_tool_result_bytes": 16384,
   "max_retrieval_query_bytes": 8192,
   "model_output_tokens": 16384,
+  "model_reasoning_effort": "max",
   "tool_timeout_ms": 600000,
   "model_timeout_ms": 120000,
   "max_retries": 2,
@@ -43,8 +44,8 @@ shared profile outside a target checkout without editing that checkout:
 ```
 
 The external instructions file is added alongside any root `AGENTS.md` in the
-task workspace. An external memory file is copied into the isolated session
-worktree's `.sigma-agent/MEMORY.md`; BM25 and Qdrant search use the configured
+task workspace. An external memory file is copied into the active repository
+workspace's `.sigma-agent/MEMORY.md`; BM25 and Qdrant search use the configured
 stable `memory_repository_id`, so separate clones of the same upstream repo can
 share one memory namespace. The target checkout itself is not changed. If
 `memory_auto_write` is enabled, successful runs append reviewed-format facts to
@@ -62,18 +63,22 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `max_tool_result_bytes` | 16384 | 1024–4194304 | Inline limit for each tool result. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. If artifact storage fails or reaches its cap, the inline result is truncated. |
 | `max_retrieval_query_bytes` | 8192 | 500–65536 | Maximum UTF-8 bytes accepted by `search_memory` (legacy setting name) |
 | `model_output_tokens` | 16384 | 256–65536 | Requested output limit for each model response; truncated responses get up to two continuation attempts |
+| `model_reasoning_effort` | `max` | `low`, `medium`, `high`, `xhigh`, `max` | For MiniMax M3.1 Flash, sends `output_config.effort`. M3.1 Flash always thinks; lower effort can reduce latency and reasoning tokens. The current DeepSeek Chat Completions adapter explicitly disables thinking for faster tool loops; other models ignore this setting. |
 | `tool_timeout_ms` | 600000 | 1000–1800000 | Timeout for each tool execution, including Docker environment image preparation |
 | `model_timeout_ms` | 120000 | 1000–1800000 | HTTP timeout for a model request |
 | `max_retries` | 2 | 0–10 | Retries for retryable transport/server failures, including HTTP 429 and 529 |
 | `command_execution_image` | `debian:trixie-slim` | Linux Docker image reference | Fallback image used by `run_command` until the Agent prepares an environment or chooses an image for a command |
+| `command_filesystem_scope` | `unrestricted` | `unrestricted` or `workspace` | In `workspace` mode, rejects explicit absolute paths outside `/workspace` and parent-directory traversal before starting a command. This is a command admission guard, not a complete OS sandbox against programs that construct paths dynamically |
 | `allow_container_network` | `false` | boolean | Allow command containers outbound internet access so project dependencies can be downloaded. Set it to `true` or use `/network on` to enable it; commands and package install scripts can contact external services while it is enabled |
 | `skills_enabled` | `true` | boolean | Discover project `.agents/skills/` and `.pi/skills/`, plus user `~/.agents/skills/` and `~/.pi/agent/skills/`. Set to `false` for a matched no-Skill evaluation; repository memory stays enabled |
 | `memory_enabled` | `true` | boolean | Enable repository memory context and `search_memory`. Set to `false` for a matched no-memory comparison; code browsing tools remain available |
 | `memory_auto_write` | `false` | boolean | After a successful non-interactive run, use one bounded model call to extract up to three durable repository facts into `.sigma-agent/MEMORY.md`, then refresh Qdrant when configured. Requires `memory_enabled`; generated notes and extra tokens are recorded in `run.json`. Set it to `true` to opt in. |
 | `project_instructions_file` | unset | absolute path after config resolution | Add an external Markdown instruction file to the session prompt without copying it into the target checkout. Maximum 16 KiB; `run.json` records its path and SHA-256. |
-| `memory_file` | unset | absolute path after config resolution | Use an external reviewed memory source instead of the target checkout's `.sigma-agent/MEMORY.md`; it is copied into the isolated session worktree and can receive automatic memory writes. Maximum 16 KiB. |
+| `memory_file` | unset | absolute path after config resolution | Use an external reviewed memory source instead of the selected repository's `.sigma-agent/MEMORY.md`; it is loaded into the active repository workspace and can receive automatic memory writes. Maximum 16 KiB. |
 | `memory_repository_id` | unset | 1–128 letters, digits, `.`, `_`, `:`, `/`, or `-` | Required with `memory_file`; stable Qdrant/BM25 scope shared by independent clones of one upstream repository. |
 | `web_search_enabled` | `false` | boolean | Add MiniMax's hosted `web_search` as an explicit Agent tool. Uses provider credentials and quota. |
+| `disable_configured_mcp_servers` | `false` | boolean | Skip every MCP server in user/project `mcp.json`; use `true` for issue-only benchmark runs. |
+| `disable_workflow_extensions` | `false` | boolean | Skip user/project JavaScript workflow extensions, which can register additional tools. |
 | `default_tool_permission` | `allow` | `allow` or `deny` | Permission applied to every registered tool unless overridden below. Set to `deny` to use an allowlist. |
 | `tool_permissions` | `{}` | tool name → `allow` or `deny` | Exact per-tool overrides. Tool names match the names exposed to the model, including namespaced MCP tools. |
 
@@ -170,7 +175,8 @@ configured tool name; output is capped before it enters model context. Set
 calls then trigger Sigma's normal test-and-diff review gate. This is a
 lightweight executable adapter, not a package manager or process sandbox.
 
-Interactive CLI setup uses `/login <provider>` to save API keys or the GitHub token and `/model`
+Interactive TUI setup uses `/login` to open a credential picker, or `/login <provider>`
+to enter one directly. It saves API keys or the GitHub token; `/model`
 to show or select a provider/model. The initial API-key providers are MiniMax,
 Anthropic, OpenAI, DeepSeek, and OpenRouter. MiniMax and Anthropic use the
 Anthropic Messages protocol; OpenAI, DeepSeek, and OpenRouter use Chat
@@ -189,27 +195,11 @@ kept outside the repository and created with restrictive directory/file
 permissions where the operating system supports them. Prefer environment
 variables for managed or ephemeral environments.
 
-In an interactive CLI session, `/publish <name>` explicitly enables local Git
-commit and push tools for one feature branch. Sigma Agent creates that branch in
-the detached task worktree and rejects names already present locally or on
-`origin`, the remote's default branch, and common trunk names. `/publish off`
-disables publishing. The commit tool stages non-ignored worktree changes; the
-push tool targets only that configured branch on `origin` and does not
-force-push. Git push uses the machine's normal Git credential helper, not the
-GitHub MCP token. The user must request commit/push in the task instructions,
-and the tools still pass through the configured tool permission policy. On
-resume, use `/publish <same-branch>` to re-enable those tools. The equivalent
-`--push-branch` startup flag remains available for scripted sessions. Publishing
-is unavailable through `--serve` and disabled by default.
-
-Use `/github-write on` to expose the GitHub MCP `create_pull_request` tool. This
-requires `/publish <branch>`, GitHub MCP credentials, and write permission to
-open a pull request. The MCP tool is restricted to the current `origin`
-repository and the configured feature branch. It cannot merge a PR or write to
-issues. Sigma creates a PR only when the task explicitly asks it to, after
-pushing and verification. `/github-write off` disables PR creation. The
-equivalent `--github-write` startup flag remains available for scripted
-sessions. This option is not available through `--serve`.
+Sigma does not provide dedicated publish, branch, commit, or push commands or
+tools. Tasks work directly in the selected repository, so normal Git commands
+are available through the Docker command tool or the user's terminal. The
+GitHub MCP integration is read-only and can provide issue, repository, and pull
+request context; it does not create pull requests or push code.
 
 `run_command` accepts any Docker image reference through its optional `image`
 field. The Agent should inspect the repository's Dockerfile/devcontainer, CI,
@@ -225,7 +215,7 @@ through `run_command`; Sigma does not hardcode language-specific test profiles.
 Set `allow_container_network` to `true` or use `/network on` before starting
 a task when outbound access is needed. By default, command containers use a
 Docker internal network, so the Agent cannot download project dependencies such as
-`npm ci`, `pip install`, `mvn test`, or `cargo test`. The mounted task worktree persists between commands. Package-manager home caches
+`npm ci`, `pip install`, `mvn test`, or `cargo test`. The mounted selected repository persists between commands. Package-manager home caches
 also persist under `.sigma-agent/container-home`, so Maven, Cargo, pip, npm,
 and Go dependencies need not be downloaded again on every invocation. The mode
 does not install host software, expose the Docker socket to the container,
@@ -252,7 +242,7 @@ network is disabled, Docker build steps have no network, so choose a base image
 that already contains needed packages or re-enable networking for the session.
 `run_command` executes one Linux shell command in the active prepared image (or
 the configured fallback), and an optional `image` can override the image for a
-single command. It mounts only the isolated task worktree as writable and is
+single command. It mounts the active repository workspace as writable and is
 capped at 2 GiB RAM, 2 CPUs, 128 processes, and five minutes. Project dependency
 caches persist under `.sigma-agent/container-home`. Use the tool's
 `purpose=test` for test commands so the runtime can require a fresh test pass

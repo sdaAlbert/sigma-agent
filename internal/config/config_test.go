@@ -102,3 +102,57 @@ func TestAllowContainerNetworkCanBeDisabledInConfig(t *testing.T) {
 		t.Fatal("Load().AllowContainerNetwork = true, want explicit false")
 	}
 }
+
+func TestBenchmarkCanDisableConfiguredMCPAndWorkflowExtensions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"disable_configured_mcp_servers":true,"disable_workflow_extensions":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.DisableConfiguredMCPServers || !cfg.DisableWorkflowExtensions {
+		t.Fatalf("benchmark egress gates = (mcp:%t, extensions:%t), want both disabled", cfg.DisableConfiguredMCPServers, cfg.DisableWorkflowExtensions)
+	}
+}
+
+func TestModelReasoningEffortCanBeConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"model_reasoning_effort":"medium"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ModelReasoningEffort != "medium" {
+		t.Fatalf("model_reasoning_effort = %q, want medium", cfg.ModelReasoningEffort)
+	}
+	invalid := Defaults()
+	invalid.ModelReasoningEffort = "turbo"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("Validate() accepted unsupported reasoning effort")
+	}
+}
+
+func TestCommandFilesystemScopeDefaultsAndCanBeRestricted(t *testing.T) {
+	if got := Defaults().CommandFilesystemScope; got != "unrestricted" {
+		t.Fatalf("default command_filesystem_scope = %q, want unrestricted", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"command_filesystem_scope":"workspace"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.CommandFilesystemScope; got != "workspace" {
+		t.Fatalf("command_filesystem_scope = %q, want workspace", got)
+	}
+	cfg.CommandFilesystemScope = "host"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted unsupported command filesystem scope")
+	}
+}

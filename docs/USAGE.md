@@ -4,10 +4,11 @@ This guide covers Sigma's local interactive TUI: configuring a model, selecting 
 
 ## 1. Start Sigma
 
-From the `go-runtime` directory, run:
+From the `go-runtime` directory, install the command once:
 
 ```powershell
-go run ./cmd/sigma-agent
+go install ./cmd/sigma-agent
+sigma-agent --version
 ```
 
 You can also build an executable once and run it from the same working directory:
@@ -17,7 +18,7 @@ go build -o sigma-agent.exe ./cmd/sigma-agent
 .\sigma-agent.exe
 ```
 
-The default command starts the integrated setup screen. Sigma needs Go 1.26+, Git, Docker Desktop, and an API key for one supported model provider. Run `/help` in the TUI to display setup commands. Press `Ctrl+Enter` to submit a task or setup command.
+The installed command starts the integrated setup screen and can be run from any directory. Sigma needs Git, Docker Desktop, and an API key for one supported model provider. Go 1.26+ is needed for installation from source, not each launch. With no `--repo` flag, the setup TUI starts in the current directory; use `/repo <path>` to select another repository. Run `go install ./cmd/sigma-agent` again from the checkout to update the executable. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
 
 ## 2. Configure the model
 
@@ -57,25 +58,30 @@ useful when continuing a session after a provider quota interruption.
 
 ## 3. Select a repository and start a task
 
-Choose a local Git repository with `/repo` in the TUI. The worktree should be clean before starting:
+Choose a local Git repository with `/repo` in the TUI. Existing staged, unstaged,
+and non-ignored untracked changes are allowed. By default the TUI works directly
+in this checkout, like Pi; Agent edits appear here immediately.
 
 ```text
 /repo C:\work\target-repository
 ```
 
-Type a task in the multiline input and press `Ctrl+Enter` to start, or use `/start` to open an empty interactive session:
+Type a task in the input and press `Enter` to start, or use `Shift+Enter` to add lines. Use `/start` to open an empty interactive session:
 
 ```text
 Fix issue #123. Inspect the relevant code and repository instructions, implement the smallest appropriate fix, run the relevant tests, and review the complete diff. Do not commit or push.
 ```
 
-Sigma creates a detached Git worktree for the task. Its edits remain separate from the original checkout. Docker is used for repository commands and test execution; local model API calls run from the Sigma process.
+All new tasks use the selected Git repository as their workspace. Sigma's file
+tools edit it directly, and Docker mounts the same repository at `/workspace`
+for commands and tests. Local model API calls run from the Sigma process.
+Uncommitted changes need no copying; they are already in the workspace.
 
 ## Integrated TUI
 
-Run `go run ./cmd/sigma-agent --tui` to configure and use Sigma in one Bubble Tea interface. The setup screen accepts the same `/repo`, `/model`, `/login`, `/logout`, `/session`, `/resume`, `/network`, `/publish`, and `/github-write` commands. Type a task and press `Ctrl+Enter`, or use `/start` to open an empty session. In chat, multiline input is submitted with `Ctrl+Enter`; `/tree`, `/branch`, `/diff`, `/model`, `/steer`, `/followup`, `/abort`, and `/exit` are handled in the TUI. API keys entered after `/login` are masked on screen.
+Run `sigma-agent --tui` to configure and use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. The setup screen accepts `/repo`, `/model`, `/login`, `/logout`, `/session`, `/resume`, and `/network`. Type a task and press `Enter`, or use `/start` to open an empty session. In chat, `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/diff`, `/model`, `/steer`, `/followup`, `/abort`, and `/exit` are handled in the TUI. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel. You can also use `/login <provider>` directly.
 
-TUI shortcuts: `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and file paths (`@path` in prompts and paths after `/repo`), `Up`/`Down` browse prompt history at the start/end of the input, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
+TUI shortcuts: `Enter` submits, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and file paths (`@path` in prompts and paths after `/repo`), `Up`/`Down` browse prompt history at the start/end of the input, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
 Docker command containers have outbound networking disabled by default. Use this in setup to enable it for project dependencies:
 
@@ -89,7 +95,8 @@ Use `/network off` to disable it again. With networking on, container commands a
 
 | Command | What it does |
 | --- | --- |
-| `/login <provider>` | Save a model API key; input is hidden. Providers: `minimax`, `anthropic`, `openai`, `deepseek`, `openrouter`. |
+| `/login` | Open a picker for GitHub or a model provider, then securely enter its credential. |
+| `/login <provider>` | Directly enter a model API key; input is hidden. Providers: `minimax`, `anthropic`, `openai`, `deepseek`, `openrouter`. |
 | `/login github` | Save a GitHub token for GitHub MCP. |
 | `/model` or `/model list` | Show the selected model and provider/key status. |
 | `/model <provider>/<model-id>` | Select a model for this session. |
@@ -100,14 +107,11 @@ Use `/network off` to disable it again. With networking on, container commands a
 | `/session <id>` | Set an explicit ID for a new session. |
 | `/resume <id>` | Resume a saved session. Use the same repository as the original session. |
 | `/network on\|off` | Allow or block internet access inside Docker command/test containers for this session. |
-| `/publish <branch>` | Opt in to commit and push to a new feature branch on `origin`. |
-| `/publish off` | Disable publishing for this session. |
-| `/github-write on\|off` | Enable or disable GitHub pull-request creation. Requires GitHub MCP credentials and `/publish <branch>`. |
 | `/start` | Start an empty interactive conversation with the current settings. |
 | `/help` | Show setup commands. |
 | `/exit` | Leave setup without starting a task. |
 
-For GitHub issue context, configure `/login github`. Reading issue/repository/PR context uses the GitHub MCP integration. Creating a PR requires `/publish <branch>` and `/github-write on`; it is limited to the configured `origin` repository and feature branch. Git push uses the machine's Git credential helper, not the GitHub MCP token. Sigma never merges the PR.
+For GitHub issue context, configure `/login github`. The GitHub MCP integration is read-only. Use ordinary Git commands in the Docker shell or your terminal for branch, commit, and push operations; Sigma does not add a separate publish workflow.
 
 ## 5. Interactive session commands
 
@@ -117,17 +121,15 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | --- | --- |
 | `/help` | Show interactive-session commands. |
 | `/model` | Show or change the model between turns; `/model save` saves the default. |
-| `/diff` | Show a summary of changes made in the task worktree. |
-| `/tree` | Show the session's saved conversation entries and current branch. |
-| `/branch <entry-id>` | Move to a prior complete conversation point and continue from there. Find the full ID with `/tree`. |
+| `/diff` | Show a summary of changes in the active repository, compared with its starting commit. This includes pre-existing local changes. |
+| `/tree` | In the TUI, open the session history picker and choose a point to continue from. The previous history remains available as another branch; the terminal CLI prints the tree. |
+| `/tree <entry-id>` | Continue from a specific saved conversation entry. Find the ID in `/tree`. |
 | `/steer <guidance>` | Queue guidance while an Agent turn is active. Plain text during an active turn does the same. |
 | `/followup <instruction>` | Queue a new instruction to run after the active task settles. |
 | `/abort` | Cancel the active Agent turn while keeping the session open. |
 | `/exit` or `/quit` | Stop the active turn if needed, save the session, and exit. |
 
-When a run exits, Sigma prints its session ID, snapshot path, run-artifact path, and task-worktree path. Use that session ID in `/resume <id>` at the next setup prompt. There is no `/sessions` listing command in the current CLI.
-
-Publishing permissions are session-scoped. After resuming a session, use `/publish <same-branch>` again before asking Sigma to commit or push. GitHub PR creation also needs `/github-write on` again.
+When a run exits, Sigma prints its session ID, snapshot path, run-artifact path, and active repository path. Use that session ID in `/resume <id>` at the next setup prompt. Sessions created by older versions that used a worktree continue to resume from their saved workspace. There is no `/sessions` listing command in the current CLI.
 
 ## 6. Use Agent Skills
 
@@ -173,8 +175,8 @@ Sigma can install npm, git, and local packages that contribute Skills and MCP se
 
 ## 7. Other ways to run Sigma
 
-- **One task:** `go run ./cmd/sigma-agent --repo C:\work\target-repository --task "Fix issue #123"`
+- **One task:** `sigma-agent --repo C:\work\target-repository --task "Fix issue #123"`
 - **JSONL process integration:** Add `--json` to emit versioned lifecycle events and a final result on stdout. This mode is one-shot; resume later with `--resume <session-id>`.
-- **HTTP/SSE task service:** Start with `go run ./cmd/sigma-agent --serve --max-concurrent 2`. Use the API examples and endpoint reference in [architecture](ARCHITECTURE.md).
+- **HTTP/SSE task service:** Start with `sigma-agent --serve --max-concurrent 2`. Use the API examples and endpoint reference in [architecture](ARCHITECTURE.md).
 
-The HTTP service currently has no authentication and is intended for local use. It does not expose GitHub publishing. See [configuration](CONFIGURATION.md) for all runtime settings, environment variables, credential precedence, Docker environment preparation, Skills, and repository memory.
+The HTTP service currently has no authentication and is intended for local use. It works directly in the selected repository and has no Sigma-specific Git publishing workflow. See [configuration](CONFIGURATION.md) for all runtime settings, environment variables, credential precedence, Docker environment preparation, Skills, and repository memory.

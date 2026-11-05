@@ -324,6 +324,13 @@ func startMCPServers(ctx context.Context, scopes []packageScope) ([]agent.Tool, 
 	return tools, shutdown, nil
 }
 
+func startConfiguredMCPServers(ctx context.Context, scopes []packageScope, disabled bool) ([]agent.Tool, func(), error) {
+	if disabled {
+		return nil, func() {}, nil
+	}
+	return startMCPServers(ctx, scopes)
+}
+
 // runPackageCommand implements the package management flags.
 func runPackageCommand(install string, uninstall string, list bool, listMCP bool, local bool, repo string) error {
 	scopes, err := packageScopes(repo)
