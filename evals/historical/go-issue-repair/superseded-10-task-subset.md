@@ -1,6 +1,6 @@
 # Deferred 10-task Multi-SWE-Bench Go blind subset
 
-**Status:** Superseded as of 2026-11-02; this 10-task plan was never run. The active plan is the [Pi 50-task baseline](pi-50-task-evaluation-plan.md).  
+**Status:** Superseded as of 2026-11-02; this 10-task plan was never run. The active plan is the [Pi 50-task baseline](../../planned/pi-multiswe-go/evaluation-plan.md).  
 **Purpose:** This remains a possible future blind Sigma-versus-Pi comparison set.  
 **Classification:** A project-selected subset drawn from Multi-SWE-Bench Go, not an official benchmark split, leaderboard result, or Verified result.
 
@@ -50,4 +50,4 @@ After runs: **“On our preselected 10-task Multi-SWE-Bench Go subset, Sigma res
 - [Official CLI dataset file at the inspected revision](https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench/blob/56ff018c04a38e27ada1e9d0a6d5839a51f88f0d/go/cli__cli_dataset.jsonl)
 - [Official benchmark image manifest](https://github.com/multi-swe-bench/multi-swe-bench/blob/main/scripts/images_verified.txt)
 - [Official benchmark submission/leaderboard instructions](https://github.com/multi-swe-bench/experiments#leaderboard-submission)
-- [Subset naming research note](multiswe-subset-naming-research.md)
+- [Subset naming research note](subset-naming-research.md)

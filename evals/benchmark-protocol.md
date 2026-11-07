@@ -96,7 +96,7 @@ is shown to preserve the same TeX behavior.
 
 ## Preflight and serial task execution
 
-Before starting a model session, run `evals/scripts/preflight-swebench-task.ps1` with
+Before starting a model session, run `evals/swebench-verified-mini/scripts/preflight-swebench-task.ps1` with
 the clean task checkout, the task's command-image config, and the official
 evaluator image. It checks Docker, verifies both images are already local,
 mounts the checkout read-only at `/workspace` in the command image, and checks
@@ -112,7 +112,7 @@ Example for the retained `django__django-11880` task:
 $repoPath = "C:\work\swb5\django__django-11880"
 .\evals\scripts\preflight-swebench-task.ps1 `
   -RepoPath $repoPath `
-  -ConfigPath evals\configs\swebench-verified-mini\task-overrides\django-11880-shared-profile.json `
+  -ConfigPath evals\swebench-verified-mini\configs\task-overrides\django-11880-shared-profile.json `
   -EvaluatorImage swebench/sweb.eval.x86_64.django_1776_django-11880:latest `
   -ExpectedPython 3.6.13
 ```
@@ -218,7 +218,7 @@ the environment until the run is resolved or archived.
 With container networking disabled, Sigma command containers should use Docker network none and allocate no custom bridge subnet; verify the pinned runtime includes this behavior before a large offline batch.
 
 Before starting Sigma, resolve the exact task-specific official evaluator image
-and the command image. Run `evals/scripts/prepare-swebench-task.ps1` to pull missing
+and the command image. Run `evals/swebench-verified-mini/scripts/prepare-swebench-task.ps1` to pull missing
 images through the host Docker daemon and then run the offline preflight. Build
 the command image from that same task image when necessary. The command image should retain the
 task's interpreter and preinstalled dependencies while removing the baked
@@ -286,7 +286,7 @@ versions through the actual preflight shells. A plain `docker run ... python`
 can select a different Conda interpreter from the evaluator's `/bin/bash -lc`
 startup. If the evaluator prepends its task environment (for example
 `/opt/miniconda3/envs/testbed/bin`), set the verified environment path first in
-the command image's `PATH`. Rerun `evals/scripts/prepare-swebench-task.ps1` with the exact
+the command image's `PATH`. Rerun `evals/swebench-verified-mini/scripts/prepare-swebench-task.ps1` with the exact
 expected version; do not start Sigma until command and evaluator versions match
 and the offline mount preflight passes.
 

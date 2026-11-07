@@ -1,7 +1,7 @@
 # SWE-bench Verified Mini：12 道当前 F2P 零通过题目
 
 统计日期：2026-11-06（已纳入本日后续重测）
-清单来源：[50 题评测计划](swebench-verified-mini-50-evaluation-plan.md)
+清单来源：[50 题评测计划](evaluation-plan.md)
 
 ## 统计口径
 
@@ -15,10 +15,10 @@
 | 16 | django__django-12273 | 重置子模型主键无效 | 多表继承中主键置空后保存应产生预期对象。 | 初次源码截断致测试无法执行；后续运行 F2P 0/2、P2P 8/27，出现继承回归。现有运行时有大幅缩文件保护，但语义缺口未解决。 | Python Skill 强调小范围修改和边界测试；运行时保护能拦截截断，不能证明保存语义已修复。已有跟进失败。 | P3 暂缓 | 已记录一次 837k / 10.4k；若以后重审，≤0.9M / 10k。 |
 | 20 | django__django-12325 | 多个 OneToOneField 时父链接识别错误 | 显式 parent link 与其他 OneToOneField 并存时，声明顺序不应改变识别。 | 最近 Skill 重测 F2P 0/2、P2P 201/201；候选仍保留会拒绝未标记字段的旧校验。多次官方评分均未解决。 | Python Skill 新增了在候选集合中落实标记资格并审查旧校验的规则，但该规则是在最近评分后加入；可能有帮助，仍需新证据再重跑。 | P3 暂缓 | 最近单次 1.23M / 7.4k；若后续批准，≤1.3M / 12k。 |
 | 27 | sphinx-doc__sphinx-10435 | LaTeX 行内代码空格边界 | 生成的 TeX 不应因注释符和换行丢失代码或括号。 | 原始评分与后续有效 Skill 重测均 F2P 0/1、P2P 74/74；无效 attempt 不计。有效重测已加载 Sphinx Skill，仍用了不同输出方式而失败。 | Sphinx Skill 有精确终止符、换行常量和百分号语义提醒；但已在一次有效 Skill 运行中加载，未见效果。 | P3 不优先 | 有效运行 1.30M / 7.4k；若未来再次批准，≤0.8M / 8k，达到上限无进展即停。 |
-| 30 | sphinx-doc__sphinx-11510 | include 文件未触发 source-read | 被 include 的 reStructuredText 内容应在解析前触发 source-read 事件。 | 最新 Skill 重测 source-only F2P 0/2、P2P 0/7；普通与嵌套 include 目标测试都失败，7 项 Toctree 既有测试全失败。候选大范围改写 `other.py` 中 Include 以外的 directive，造成回归。 | Sphinx Skill 已新增保持原 parser/read 路径、区分 parsed/literal include、避免全局 I/O 替换的提醒且本次已加载；但 Agent 仍扩大改动范围。现有提示没有带来有效候选。 | P3 暂缓，不优先重跑 | 最近两次 Skill 重测合计 2.68M / 24.8k；最新一次 0.84M / 11.0k。若未来有明确的新实现假设，再限 ≤0.8M / 8k。详见[本次摘要](experiments/README.md#archive-access)。 |
-| 31 | sphinx-doc__sphinx-7590 | C++ 用户定义字面量解析 | C++ 域应解析相邻数字与 UDL suffix。 | 历史 160 轮 source-only F2P 0/1、P2P 24/24；本轮 Sphinx Skill 已在首个工具回合加载，Agent 改了 `cpp.py` / `cfamily.py`，诊断官方评分仍 0/1、24/24。官方 `test_expressions` 在 `5_udl` 处失败；Agent 在源码里先消费 `_`，后续 regex 又要求 `_`，且未支持 issue 的 `q_J`/`q_s`。本轮因 DeepSeek 400 在 33 轮中断，单次同会话重试立即同错；评分只作候选诊断，不计完整 Agent 重测。 | 通用 parser Skill 已加入精确字符流、cursor 消费与剩余输入检查并确实加载，但未避免此处的 delimiter double-consumption；它能提醒验证流程，不能补齐 C++ 后缀语法。先修 DeepSeek 请求/上下文压缩序列问题；之后若更新通用边界检查再讨论重跑，不给 Skill 塞本题答案。 | P3 暂缓（等 runtime 修复和新假设） | 本轮 694,050 / 4,264（缓存读取 643,584）；上限 1.2M / 10k。 |
+| 30 | sphinx-doc__sphinx-11510 | include 文件未触发 source-read | 被 include 的 reStructuredText 内容应在解析前触发 source-read 事件。 | 最新 Skill 重测 source-only F2P 0/2、P2P 0/7；普通与嵌套 include 目标测试都失败，7 项 Toctree 既有测试全失败。候选大范围改写 `other.py` 中 Include 以外的 directive，造成回归。 | Sphinx Skill 已新增保持原 parser/read 路径、区分 parsed/literal include、避免全局 I/O 替换的提醒且本次已加载；但 Agent 仍扩大改动范围。现有提示没有带来有效候选。 | P3 暂缓，不优先重跑 | 最近两次 Skill 重测合计 2.68M / 24.8k；最新一次 0.84M / 11.0k。若未来有明确的新实现假设，再限 ≤0.8M / 8k。详见[本次摘要](README.md#archive-access)。 |
+| 31 | sphinx-doc__sphinx-7590 | C++ 用户定义字面量解析 | C++ 域应解析相邻数字与 UDL suffix。 | 历史 160 轮 source-only F2P 0/1、P2P 24/24；本轮 Sphinx Skill 第 1 回合加载。Agent 首轮因 Sigma 消息排序 bug 被 400 中断；runtime 修复后续跑 21 回合，在输入 token 硬上限后停止。最新候选官方诊断评分仍 0/1、24/24，`test_expressions` 在 `5_udl` 失败。 | Skill 的通用精确字符流/cursor 提醒已加载，但未让 Agent 补齐 numeric UDL suffix 解析。runtime 修复解决了结构性 400；remaining failure 是 C++ lexer/parser 行为，不能靠 provider 重试。先做新的实现假设再决定是否重跑，不给 Skill 塞本题答案。 | P3 暂缓 | 本轮累计 1.238M / 6.4k（缓存读取 1.043M）；原 cap 1.2M / 10k，超出约 38k 是单个响应记账延迟。 |
 | 32 | sphinx-doc__sphinx-7748 | autodoc 只读取重载 docstring 的首个签名 | 多个重载签名都应被提取并输出。 | 最新 source-only 官方 F2P 0/2、P2P 12/12，仍 unresolved；Agent 在 66 轮、1.65M 输入后因预算停止。 | Sphinx Skill 的 overload/signature guidance 已加载，但本次失败说明它没有让候选通过目标测试；继续重跑前需有新的实现假设或更有效的预算控制。 | P3 暂不优先 | 本次 1.65M / 12.1k，超过 1.5M / 12k 软预算；后续若重审应先修预算监控。 |
-| 34 | sphinx-doc__sphinx-7985 | linkcheck 不检查本地链接 | linkcheck 应报告失效的本地/站内链接。 | 原官方 source-only F2P 0/2、P2P 3/3；本次 MiniMax 重测未评分：128 轮 cap 配置后在 92 轮因 Token Plan HTTP 429 中断；没有 tracked source patch 或目标测试，不能记为新 unresolved。 | 新 Sphinx Skill 规则被加载；Agent 在 turn 80 记录了复用现有 URI 分类与 queue/status 流的修改契约，方向符合规则，但未进入实现/测试，效果仍未验证。 | P2，等 MiniMax 额度恢复后再决定是否续跑 | 主 session 2.29M / 16.6k；另有一段 32 轮误设尝试 0.69M / 7.1k。运行日志：[本次摘要](experiments/README.md#archive-access)。
+| 34 | sphinx-doc__sphinx-7985 | linkcheck 不检查本地链接 | linkcheck 应报告失效的本地/站内链接。 | 原官方 source-only F2P 0/2、P2P 3/3；本次 MiniMax 重测未评分：128 轮 cap 配置后在 92 轮因 Token Plan HTTP 429 中断；没有 tracked source patch 或目标测试，不能记为新 unresolved。 | 新 Sphinx Skill 规则被加载；Agent 在 turn 80 记录了复用现有 URI 分类与 queue/status 流的修改契约，方向符合规则，但未进入实现/测试，效果仍未验证。 | P2，等 MiniMax 额度恢复后再决定是否续跑 | 主 session 2.29M / 16.6k；另有一段 32 轮误设尝试 0.69M / 7.1k。运行日志：[本次摘要](README.md#archive-access)。
 | 35 | sphinx-doc__sphinx-8035 | private-members 不能指定成员 | autodoc 应能只记录指定私有成员。 | 200 轮后 incomplete，F2P 0/1 且一项 P2P 失败；200 轮 patch 与已评分的 160 轮 patch 字节相同。 | Sphinx Skill 后续补了 option_spec、默认值/合并兼容，以及 filter_members 所有权和 None/全部/指定三种状态；直接覆盖原错误设计。 | P2 条件重跑 | 历史 5.06M / 34.8k；若重跑，≤1.5M / 12k，使用全新 issue-only session。 |
 | 36 | sphinx-doc__sphinx-8056 | NumPy docstring 多参数合并显示 | x1, x2 等名称应各自成为参数项。 | 200 轮、约 5.54M 输入后仍 F2P 0/1；初期源码被截断的运行时风险已修，但最终错误在 parser/field collector 仍把名称分组。 | Sphinx Skill 现在要求在 parser/collector 产生语义项时拆分分组输入；运行时也新增文件缩小保护。直接相关，但已有长跑未解决且开销很高。 | P3 暂缓 | 历史 5.54M / 31.7k；如后续重审，≤1.5M / 12k。 |
 | 42 | sphinx-doc__sphinx-8638 | 同名实例变量被错误链接 | 无关的同名变量不应被自动链接。 | F2P 0/1、P2P 33/34；目标失败且一项既有测试回归。 | Sphinx Skill 涉及 xref/domain 处理，但用户已明确要求不再迭代。 | P0 不重跑 | 0；遵从用户决定。 |
@@ -27,8 +27,8 @@
 预算说明：预算是每次新运行的累计输入/输出软上限；输入包含缓存读取 token。Sigma 当前没有累计 token 硬停止器，运行时需在约 25%、50%、75% 检查点记录用量与实现/测试进展；达到软上限或连续检查点无进展就停止，不靠延长轮数消耗完预算。P1 可优先安排；P2 需前序候选结果或剩余预算允许；P3 暂缓；P0 不运行。所有 P1/P2 均从全新 issue-only session 开始，默认 128 轮封顶。
 ## 后续重测已解决
 
-- sphinx-doc__sphinx-10673：Sphinx Skill 重测 source-only 官方 resolved，F2P 1/1、P2P 9/9；Agent run 本身在预算处 incomplete。详见 [重测摘要](experiments/README.md#archive-access)。
-- django__django-12308：Python Skill 独立重测 resolved，F2P 2/2、P2P 20/20；已从当前零通过清单移除。详见[重测摘要](experiments/README.md#archive-access)。
+- sphinx-doc__sphinx-10673：Sphinx Skill 重测 source-only 官方 resolved，F2P 1/1、P2P 9/9；Agent run 本身在预算处 incomplete。详见 [重测摘要](README.md#archive-access)。
+- django__django-12308：Python Skill 独立重测 resolved，F2P 2/2、P2P 20/20；已从当前零通过清单移除。详见[重测摘要](README.md#archive-access)。
 
 ## 有目标测试进展但未完整 resolved
 

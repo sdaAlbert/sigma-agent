@@ -122,4 +122,4 @@
 - 本地官方 evaluator checkout：`multi-swe-bench` commit `24f493f8a103e72312ded4f6b9c89f081d69cb09`；本地 `images_verified.txt` 用该 commit 的 task tags 选取任务。该 checkout 有与本实验无关的本地改动；正式跑分前需确认 evaluator 和镜像清单相关文件的内容/校验和。
 - 官方 evaluator 接受以 org/repo/PR number 对应的 patch JSONL，并输出 `final_report.json`，见[官方 evaluator 说明](https://github.com/multi-swe-bench/multi-swe-bench#readme)。
 - Pi 上游：[`earendil-works/pi`](https://github.com/earendil-works/pi)；npm 包：[`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)。
-- 既有 Sigma 运行清单：[issue benchmark inventory](issue-benchmark-inventory.md)。
+- 既有 Sigma 运行清单：[issue benchmark inventory](../../historical/go-issue-repair/issue-benchmark-inventory.md)。

@@ -18,9 +18,9 @@ a derived index. Current source and tests take precedence over stale memory.
 
 ## Phase A: six-query plumbing check
 
-The query labels are in [`memory-retrieval-v1.json`](../memory-retrieval-v1.json)
+The query labels are in [`memory-retrieval-v1.json`](../../memory-retrieval-v1.json)
 and the isolated fixture is
-[`fixtures/memory-retrieval-v1`](../fixtures/memory-retrieval-v1). Run from the
+[`fixtures/memory-retrieval-v1`](../../fixtures/memory-retrieval-v1). Run from the
 repository root after configuring a real embedding provider and Qdrant:
 
 ```powershell
@@ -59,10 +59,10 @@ tokens, calls, latency, and every failed attempt. Do not use the old #1969 or
 #2537 runs as a matched pair; their prompts and assistance conditions differ.
 
 The detailed procedures live in
-[`memory-retrieval-evaluation.md`](../memory-retrieval-evaluation.md) and
-[`skills-memory-evaluation.md`](../skills-memory-evaluation.md). Canonical
-standalone configs are [`memory-disabled.json`](../configs/ablations/memory-disabled.json)
-and [`memory-enabled.json`](../configs/ablations/memory-enabled.json). Both keep
+[`memory-retrieval-evaluation.md`](memory-retrieval-evaluation.md) and
+[`ablation-protocol.md`](ablation-protocol.md). Canonical
+standalone configs are [`memory-disabled.json`](configs/memory-disabled.json)
+and [`memory-enabled.json`](configs/memory-enabled.json). Both keep
 Skills disabled; copy any task-specific runtime fields into both configs.
 
 ## Evidence boundary

@@ -9,7 +9,7 @@
 - `internal/sigmaagent/vector.go` already calls an embedding endpoint and Qdrant. It stores code vectors in `sigma_agent_code`, attaches a `repo_id` payload, and scopes searches with exact Qdrant payload equality. The current `repositoryID` hashes the Git common directory path; that is useful for isolating worktrees belonging to the same local checkout, but it is not a portable ID across cloned directories.
 - This makes a new database service unnecessary for a first memory search experiment. A separate memory collection could reuse the existing Qdrant endpoint and embedding configuration without mixing memory records into code chunks.
 
-The minimum `sigma_agent_memory` implementation is now present. A live Qdrant smoke verified repository filtering, Markdown synchronization, provenance output, and stale-hit rejection with a local deterministic test embedder. It does not measure actual semantic retrieval quality; see the [test report](../evals/experiments/README.md#archive-access) (local detailed report not bundled).
+The minimum `sigma_agent_memory` implementation is now present. A live Qdrant smoke verified repository filtering, Markdown synchronization, provenance output, and stale-hit rejection with a local deterministic test embedder. It does not measure actual semantic retrieval quality; see the [test report](../evals/historical/README.md#archive-access) (local detailed report not bundled).
 
 ## Repository patterns worth borrowing
 

@@ -107,7 +107,7 @@ func (m *scriptedToolModel) Stream(_ context.Context, _ string, _ []agent.Messag
 	return agent.ModelResponse{}, fmt.Errorf("unexpected scripted turn %d", m.turn)
 }
 
-func TestEditAndReviewWorkflowUsesReadSnapshotsAndDynamicVerificationTools(t *testing.T) {
+func TestEditAndReviewWorkflowUsesReadSnapshotsAndKeepsChecksAvailable(t *testing.T) {
 	for _, separateChecks := range []bool{false, true} {
 		name := "both checks in one turn"
 		if separateChecks {
@@ -119,7 +119,7 @@ func TestEditAndReviewWorkflowUsesReadSnapshotsAndDynamicVerificationTools(t *te
 	}
 }
 
-func TestVerifiedRunBlocksRedundantChecks(t *testing.T) {
+func TestVerifiedRunAllowsRepeatedChecks(t *testing.T) {
 	runEditAndReviewWorkflowTest(t, false, true)
 }
 
@@ -175,8 +175,12 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 			}
 		},
 	}
-	if _, err := session.Prompt(context.Background(), "Make a narrowly scoped code change and verify it."); err != nil {
+	result, err := session.Prompt(context.Background(), "Make a narrowly scoped code change and verify it.")
+	if err != nil {
 		t.Fatalf("Prompt() error = %v", err)
+	}
+	if result.VerificationStatus != "verified" {
+		t.Fatalf("verification status = %q, want verified", result.VerificationStatus)
 	}
 	updated, err := os.ReadFile(filePath)
 	if err != nil {
@@ -185,15 +189,19 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 	if !strings.Contains(string(updated), "const value = 2") {
 		t.Fatalf("successful edit was not applied: %s", updated)
 	}
-	if len(checks) != 2 || checks[0] != "run_command" || checks[1] != "git_diff" {
-		t.Fatalf("checks after final edit = %#v, want run_command then git_diff", checks)
+	wantChecks := []string{"run_command", "git_diff"}
+	if repeatCheck {
+		wantChecks = append(wantChecks, "run_command", "run_command")
+	}
+	if strings.Join(checks, ",") != strings.Join(wantChecks, ",") {
+		t.Fatalf("checks after final edit = %#v, want %#v", checks, wantChecks)
 	}
 	if !model.visibleTools[6]["run_command"] || !model.visibleTools[6]["git_diff"] || !model.visibleTools[6]["read_file"] || !model.visibleTools[6]["edit_file"] {
 		t.Fatalf("missing checks or targeted correction tools were hidden during review: %#v", model.visibleTools[6])
 	}
 	if separateChecks {
-		if model.visibleTools[8]["run_command"] || !model.visibleTools[8]["git_diff"] || !model.visibleTools[8]["edit_file"] || !model.visibleTools[8]["read_file"] {
-			t.Fatalf("missing diff or targeted correction tools after tests passed: %#v", model.visibleTools[8])
+		if !model.visibleTools[8]["run_command"] || !model.visibleTools[8]["git_diff"] || !model.visibleTools[8]["edit_file"] || !model.visibleTools[8]["read_file"] {
+			t.Fatalf("review tools were hidden after tests passed: %#v", model.visibleTools[8])
 		}
 		if checkTurns[0] == checkTurns[1] {
 			t.Fatalf("separate checks unexpectedly ran in the same turn: %#v", checkTurns)
@@ -202,24 +210,14 @@ func runEditAndReviewWorkflowTest(t *testing.T, separateChecks, repeatCheck bool
 		t.Fatalf("checks requested in one model response ran in different turns: %#v", checkTurns)
 	}
 	if repeatCheck {
-		if model.visibleTools[8]["run_command"] || model.visibleTools[8]["git_diff"] {
-			t.Fatalf("verification tools remained exposed after a successful review: %#v", model.visibleTools[8])
-		}
-		if !model.visibleTools[8]["edit_file"] {
-			t.Fatalf("targeted correction tools were hidden after verification: %#v", model.visibleTools[8])
-		}
-		if model.visibleTools[9]["run_command"] || model.visibleTools[9]["git_diff"] {
-			t.Fatalf("a rejected duplicate check reopened verification tools: %#v", model.visibleTools[9])
-		}
-		if !strings.Contains(strings.Join(toolErrors, "\n"), "verification is complete") {
-			t.Fatalf("redundant check was not rejected with an explanation: %s", strings.Join(toolErrors, "\n"))
+		for _, turn := range []int{8, 9} {
+			if !model.visibleTools[turn]["run_command"] || !model.visibleTools[turn]["git_diff"] {
+				t.Fatalf("verification tools were hidden on turn %d: %#v", turn, model.visibleTools[turn])
+			}
 		}
 	}
 	joinedErrors := strings.Join(toolErrors, "\n")
 	if !strings.Contains(joinedErrors, "changed since it was read") {
 		t.Fatalf("stale read was not rejected using the server-side snapshot: %s", joinedErrors)
-	}
-	if strings.Contains(joinedErrors, "verification phase only allows checks still outstanding") {
-		t.Fatalf("targeted correction was rejected solely because verification was pending: %s", joinedErrors)
 	}
 }

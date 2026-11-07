@@ -26,14 +26,14 @@ regression/evaluation set, not an official 500-task score.
   result and preserve both outcomes.
 
 The original task list and historical per-task records remain in the
-[existing 50-task plan](../swebench-verified-mini-50-evaluation-plan.md). This
+[existing 50-task plan](evaluation-plan.md). This
 public summary does not rewrite that source record.
 
 ## Reproducing a new run
 
 1. Use a clean task checkout at the exact base commit and a fresh Sigma session.
 2. Prepare the command image and official evaluator image before the model run.
-   Run [`preflight-swebench-task.ps1`](../scripts/preflight-swebench-task.ps1) and
+   Run [`preflight-swebench-task.ps1`](scripts/preflight-swebench-task.ps1) and
    require a successful offline preflight.
 3. Build Sigma and record the executable SHA-256, Git commit, provider/model,
    reasoning settings, effective config, Skills/Memory state, and task base.
@@ -47,10 +47,10 @@ public summary does not rewrite that source record.
    complete or explicitly classified.
 
 Use [`benchmark-protocol.md`](../benchmark-protocol.md) for the full operational
-sequence and the existing example config
-[`full-sigma-5.json`](../configs/swebench-verified-mini/full-sigma-5.json).
+sequence and the shared study config
+[`full-sigma-5.json`](configs/full-sigma-5.json).
 For a new clean baseline, start from
-[`issue-only.json`](../configs/examples/issue-only.json), then set the
+[`issue-only.json`](../templates/issue-only.json), then set the
 repository-specific command image and frozen limits. Load API credentials from
 the local environment or credential store; never put them in the config.
 

@@ -1,6 +1,6 @@
 # Sigma/Pi paired evidence set (superseded)
 
-**Status:** Superseded on 2026-11-02 by the [Pi 50-task baseline plan](pi-50-task-evaluation-plan.md); no runs were started for this set.  
+**Status:** Superseded on 2026-11-02 by the [Pi 50-task baseline plan](../../planned/pi-multiswe-go/evaluation-plan.md); no runs were started for this set.  
 **Purpose:** Historical planning record. It is not the active evaluation set.
 
 The user asked to include successful Sigma runs as evidence. Five historical positive cases are included below with their assistance conditions intact. Two new go-zero cases are added as issue-only checks. The five historical Sigma results were produced by earlier Agent versions and different prompts/budgets; for any Pi comparison, run both agents fresh under the same recorded task input and budget. Historical results are project evidence, not directly paired Pi/Sigma results.
@@ -9,11 +9,11 @@ The user asked to include successful Sigma runs as evidence. Five historical pos
 
 | Benchmark task | Sigma evidence | Input/assistance condition | Correct interpretation |
 |---|---|---|---|
-| go-zero issue #1729 / PR #1783 | Official evaluator **1/1 resolved**. | Official issue title/body only; no GitHub MCP, web search, Skill, memory, target diff, or hint. | The clean issue-only success in this project so far. [Report](experiments/README.md#archive-access) (local detailed report not bundled) |
-| go-zero PR #1969 | Official evaluator **1/1 resolved**. | Successful run received implementation-location and root-cause hints; earlier attempts failed. | Pipeline smoke evidence; not an unassisted solve-rate sample. [Report](experiments/README.md#archive-access) (local detailed report not bundled) |
-| go-zero PR #964 | Guided evaluator run **1/1 resolved** after evaluator fixture workarounds. | Detailed implementation/acceptance specification; no target PR diff. | Evidence that Sigma can implement a detailed backend change; not issue-only. [Report](experiments/README.md#archive-access) (local detailed report not bundled) |
-| go-zero issue #2508 / PR #2537 | Guided evaluator run **1/1 resolved**. | Explicit acceptance cases and GitHub MCP access to the target PR diff. | Reference-guided reproduction, not autonomous issue repair. [Report](experiments/README.md#archive-access) (local detailed report not bundled) |
-| go-zero PR #2032 | Production-only candidate passed the official `rest` target tests after its overlapping Agent-authored test edits were removed. | 128-turn run received the official benchmark hint; no target PR diff or test patch was shown to the Agent. | Target-behavior pass for the production patch; raw combined patch missed the evaluator's `resolved=1` label because Agent and benchmark test edits overlapped. Not issue-only. [Report](experiments/README.md#archive-access) (local detailed report not bundled) |
+| go-zero issue #1729 / PR #1783 | Official evaluator **1/1 resolved**. | Official issue title/body only; no GitHub MCP, web search, Skill, memory, target diff, or hint. | The clean issue-only success in this project so far. [Report](../README.md#archive-access) (local detailed report not bundled) |
+| go-zero PR #1969 | Official evaluator **1/1 resolved**. | Successful run received implementation-location and root-cause hints; earlier attempts failed. | Pipeline smoke evidence; not an unassisted solve-rate sample. [Report](../README.md#archive-access) (local detailed report not bundled) |
+| go-zero PR #964 | Guided evaluator run **1/1 resolved** after evaluator fixture workarounds. | Detailed implementation/acceptance specification; no target PR diff. | Evidence that Sigma can implement a detailed backend change; not issue-only. [Report](../README.md#archive-access) (local detailed report not bundled) |
+| go-zero issue #2508 / PR #2537 | Guided evaluator run **1/1 resolved**. | Explicit acceptance cases and GitHub MCP access to the target PR diff. | Reference-guided reproduction, not autonomous issue repair. [Report](../README.md#archive-access) (local detailed report not bundled) |
+| go-zero PR #2032 | Production-only candidate passed the official `rest` target tests after its overlapping Agent-authored test edits were removed. | 128-turn run received the official benchmark hint; no target PR diff or test patch was shown to the Agent. | Target-behavior pass for the production patch; raw combined patch missed the evaluator's `resolved=1` label because Agent and benchmark test edits overlapped. Not issue-only. [Report](../README.md#archive-access) (local detailed report not bundled) |
 
 ## Two fresh issue-only tasks
 
@@ -36,4 +36,4 @@ These task IDs were not found in the local Sigma evaluation reports/run folders 
 - Dataset revision: `56ff018c04a38e27ada1e9d0a6d5839a51f88f0d`.
 - [Official Multi-SWE-Bench Go-zero dataset](https://huggingface.co/datasets/ByteDance-Seed/Multi-SWE-bench/blob/56ff018c04a38e27ada1e9d0a6d5839a51f88f0d/go/zeromicro__go-zero_dataset.jsonl)
 - [Official Multi-SWE-Bench evaluator](https://github.com/multi-swe-bench/multi-swe-bench#readme)
-- Naming/research note: [what “subset” means](multiswe-subset-naming-research.md).
+- Naming/research note: [what “subset” means](subset-naming-research.md).

@@ -8,7 +8,7 @@ Memory facts should describe durable information that is costly to rediscover an
 
 ## Phase A: labeled retrieval plumbing check
 
-The versioned query set is [`memory-retrieval-v1.json`](memory-retrieval-v1.json). Its six queries have human-assigned relevant source/fact labels and run against an isolated six-fact fixture at [`fixtures/memory-retrieval-v1`](fixtures/memory-retrieval-v1). These examples are deliberately small and synthetic: they test loading, repository isolation, labels, ranking, and metrics, not production distribution or coding ability.
+The versioned query set is [`memory-retrieval-v1.json`](../../memory-retrieval-v1.json). Its six queries have human-assigned relevant source/fact labels and run against an isolated six-fact fixture at [`fixtures/memory-retrieval-v1`](../../fixtures/memory-retrieval-v1). These examples are deliberately small and synthetic: they test loading, repository isolation, labels, ranking, and metrics, not production distribution or coding ability.
 
 With a real embedding endpoint and Qdrant configured, run from `go-runtime`:
 

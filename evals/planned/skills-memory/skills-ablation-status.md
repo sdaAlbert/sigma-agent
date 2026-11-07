@@ -18,8 +18,8 @@ issue text, model/version, runtime executable, prompt, memory snapshot, Docker
 image, turn/tool/token limits, and evaluator identical. Change only
 `skills_enabled`.
 
-- Control: [`skills-disabled.json`](../configs/ablations/skills-disabled.json).
-- Treatment: [`skills-enabled.json`](../configs/ablations/skills-enabled.json).
+- Control: [`skills-disabled.json`](configs/skills-disabled.json).
+- Treatment: [`skills-enabled.json`](configs/skills-enabled.json).
   Copy any task-specific runtime fields into both configs; Sigma loads one
   config file per run.
 - Stage the exact reviewed `SKILL.md` only in the treatment workspace. Record
@@ -33,7 +33,7 @@ image, turn/tool/token limits, and evaluator identical. Change only
   all invalid/incomplete attempts.
 
 Run setup and scoring from the shared
-[benchmark protocol](../benchmark-protocol.md). Use a fresh issue set for a
+[benchmark protocol](../../benchmark-protocol.md). Use a fresh issue set for a
 causal comparison; historical retests are not a substitute for the paired arms.
 
 ## Current evidence

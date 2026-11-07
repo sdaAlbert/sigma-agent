@@ -31,8 +31,9 @@ func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T)
 	if !strings.Contains(guidance.SystemPrompt("base"), "go-issue-workflow") || !strings.Contains(guidance.SystemPrompt("base"), "Use when fixing a Go issue.") {
 		t.Fatal("system prompt does not expose the skill name and description")
 	}
-	if !strings.Contains(guidance.SystemPrompt("base"), "ordered execution path") || !strings.Contains(guidance.SystemPrompt("base"), "route/method matching") {
-		t.Fatal("system prompt does not require tracing dispatch and short-circuit boundaries")
+	projectPrompt := guidance.SystemPrompt("base")
+	if !strings.Contains(projectPrompt, "record_change_contract") || !strings.Contains(projectPrompt, "optional and never required before writing") {
+		t.Fatal("project guidance should describe the change contract as an optional planning aid")
 	}
 
 	tool := guidance.SkillTool()
