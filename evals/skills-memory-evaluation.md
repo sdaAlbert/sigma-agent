@@ -1,6 +1,6 @@
 # Skills and repository memory evaluation
 
-Implementation is available. One matched one-task smoke is recorded in [the result](results/2026-10-30-skills-go-port-ablation-smoke.md); it verifies the path, but is too small to estimate general usefulness. This protocol records how to test without conflating results with model or task variance.
+Implementation is available. One matched one-task smoke is recorded in [the result](experiments/README.md#archive-access) (local detailed report not bundled); it verifies the path, but is too small to estimate general usefulness. This protocol records how to test without conflating results with model or task variance.
 
 ## Skill ablation
 

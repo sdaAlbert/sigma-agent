@@ -109,8 +109,9 @@ official evaluator, and archive are complete.
 Example for the retained `django__django-11880` task:
 
 ```powershell
+$repoPath = "C:\work\swb5\django__django-11880"
 .\evals\preflight-swebench-task.ps1 `
-  -RepoPath C:\dev\Agent\coding-agent-harness\swb5\django__django-11880 `
+  -RepoPath $repoPath `
   -ConfigPath evals\configs\full-sigma-5-django-11880-shared-profile.json `
   -EvaluatorImage swebench/sweb.eval.x86_64.django_1776_django-11880:latest `
   -ExpectedPython 3.6.13
@@ -305,7 +306,7 @@ When a pull/build fails:
 2. Record the command, image reference, stage, exact error, impact on validity,
    and recovery in the batch's `runs/<batch>/evaluation-issues.md`, even if the
    run later recovers. Add or update a corresponding entry in the shared index
-   at `../../archive/benchmarks/swebench-verified-mini/evaluation-issues.md` relative to `go-runtime/evals/benchmark-protocol.md`.
+   in the central archive at `../archive/benchmarks/swebench-verified-mini/evaluation-issues.md` relative to the Sigma repository root. The archive is stored separately from this Git repository.
 3. Inspect whether the exact task image is already local and whether it has the
    needed runtime/dependencies. Do not infer availability from a similarly
    named image.

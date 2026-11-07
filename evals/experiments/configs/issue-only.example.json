@@ -1,0 +1,20 @@
+{
+  "max_turns": 128,
+  "max_tool_calls": 256,
+  "max_repeated_failed_commands": 3,
+  "max_context_tokens": 64000,
+  "context_compaction_threshold_tokens": 24000,
+  "summary_tokens": 800,
+  "model_output_tokens": 16384,
+  "command_execution_image": "REPLACE_WITH_EVALUATOR_MATCHED_IMAGE",
+  "command_filesystem_scope": "workspace",
+  "allow_container_network": false,
+  "skills_enabled": false,
+  "memory_enabled": false,
+  "memory_auto_write": false,
+  "web_search_enabled": false,
+  "default_tool_permission": "allow",
+  "tool_permissions": {},
+  "disable_configured_mcp_servers": true,
+  "disable_workflow_extensions": true
+}

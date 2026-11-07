@@ -381,7 +381,7 @@ project-local fallback credential. A helper can create or replace the file
 without echoing the token:
 
 ```powershell
-Set-Location C:\dev\Agent\coding-agent-harness\go-runtime
+Set-Location C:\path\to\sigma-agent\go-runtime
 .\scripts\set-github-token.ps1
 ```
 
@@ -396,7 +396,7 @@ Anthropic-compatible environment variables), or stored locally in
 with masked input; Sigma Agent reads the ignored project-local file on later runs:
 
 ```powershell
-Set-Location C:\dev\Agent\coding-agent-harness\go-runtime
+Set-Location C:\path\to\sigma-agent\go-runtime
 .\scripts\set-minimax-key.ps1
 ```
 

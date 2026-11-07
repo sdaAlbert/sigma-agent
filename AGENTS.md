@@ -52,7 +52,7 @@ isolated session workspace and searches it under the configured stable ID.
 
 ## Benchmark archive layout
 
-- Put completed SWE-bench task and batch archives under `C:\dev\Agent\coding-agent-harness\archive\benchmarks\swebench-verified-mini\runs`. Keep the shared issue index at `go-runtime\var\benchmark-data\swebench-verified-mini\evaluation-issues.md`; this local benchmark log is ignored and is not a commit artifact.
-- Keep run-specific temporary logs and active evaluation staging under `go-runtime\var`; after the Agent run, official evaluation, and archive are complete, move the finished archive into the central `archive` tree.
-- Keep Sigma's resumable runtime state in `go-runtime\var\runs` and `go-runtime\var\sessions`; do not move incomplete session state as part of archive cleanup.
-- Historical `swb5\outputs` records are in `archive\legacy\swb5\outputs`; shared datasets and task checkouts remain under `swb5`.
+- Put completed SWE-bench task and batch archives under `../archive/benchmarks/swebench-verified-mini/runs`. Keep the shared issue index at `var/benchmark-data/swebench-verified-mini/evaluation-issues.md`; this local benchmark log is ignored and is not a commit artifact.
+- Keep run-specific temporary logs and active evaluation staging under `var`; after the Agent run, official evaluation, and archive are complete, move the finished archive into the central `../archive` tree.
+- Keep Sigma's resumable runtime state in `var/runs` and `var/sessions`; do not move incomplete session state as part of archive cleanup.
+- Historical `swb5/outputs` records are in `../archive/legacy/swb5/outputs`; shared datasets and task checkouts remain under the sibling `../swb5` cache.
