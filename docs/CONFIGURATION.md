@@ -276,6 +276,13 @@ rediscover and cannot be reliably inferred from the current source. Do not copy
 source code, archive task transcripts, store secrets, or treat memory as a
 replacement for `AGENTS.md`, README files, tests, or the code itself. The legacy
 `date | source | fact` format is still accepted as `kind: general`.
+
+`memory_enabled` defaults to `true`. During an ordinary task run, Sigma exposes
+`search_memory`; the Agent can retrieve relevant facts when useful. Local BM25
+reads the Markdown directly, so no extra command or Qdrant service is needed
+for the local-only path. Set `memory_enabled` to `false` to disable memory for
+a run.
+
 When vector search is configured, run `--index-memory --repo <path>` after
 updating entries so the derived Qdrant payloads include the category and new
 content hash. Local BM25 always reads the current Markdown file directly.
@@ -337,19 +344,6 @@ $env:SIGMA_AGENT_EMBEDDING_MODEL = '<Hugging-Face-model-id>'
 $env:HF_TOKEN = '<token>'
 go run ./cmd/sigma-agent --index-memory --repo C:\path\to\repository
 ```
-
-To compare BM25, vector, and hybrid ranking against the checked-in labeled
-memory query set, use its isolated fixture corpus:
-
-```powershell
-go run ./cmd/sigma-agent --eval-memory --repo .\evals\planned\skills-memory\fixtures\memory-retrieval-v1 --memory-dataset .\evals\planned\skills-memory\datasets\memory-retrieval-v1.json
-```
-
-The evaluation indexes only the fixture's six reviewed memory facts using the
-configured real embedding endpoint and Qdrant. It reports Recall@K and MRR for
-BM25, vector, and RRF rankings. The fixture checks retrieval behavior; it does
-not show that memory improves issue resolution. That requires separate matched
-Agent runs on held-out issues.
 
 The MiniMax chat key does not configure an embedding endpoint. For an
 OpenAI-compatible embedding endpoint, set

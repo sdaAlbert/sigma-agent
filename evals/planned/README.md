@@ -7,10 +7,11 @@ before a scored run begins.
 ## Skills and repository memory
 
 [`skills-memory/README.md`](skills-memory/README.md) tracks exploratory evidence
-and the next controlled runs. The repository-memory retrieval study has **not
-been run against a live embedding service**, and matched issue runs have not
-established coding benefit. Configs under that folder are starting settings;
-they do not represent completed arms.
+and a possible controlled issue-level comparison. There is no matched memory
+on/off result that establishes a coding benefit. The standalone labeled
+retrieval scorer and its synthetic dataset are not part of the evaluation
+plan. Configs under that folder are starting settings; they do not represent
+completed arms.
 
 ## Pi / Multi-SWE-Bench Go
 

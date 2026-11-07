@@ -13,8 +13,8 @@ Docker preparation scripts. Shared validity rules are in
 ## Planned studies
 
 [`planned/README.md`](planned/README.md) lists work that has not produced a
-completed evaluation. The repository-memory retrieval and matched coding
-experiment are **not done**; its plan and configs are kept under
+completed evaluation. A controlled memory-on/off coding comparison is **not
+done**; its protocol and configs are kept under
 [`planned/skills-memory/`](planned/skills-memory/).
 
 ## Historical and superseded work
@@ -26,8 +26,6 @@ matched comparison.
 
 ## Shared inputs and local outputs
 
-- The planned memory study keeps its labeled query dataset and isolated fixture
-  together under [`planned/skills-memory/`](planned/skills-memory/).
 - [`templates/issue-only.json`](templates/issue-only.json) is an example for
   preparing a future issue-only run; it is not a frozen experiment config.
 

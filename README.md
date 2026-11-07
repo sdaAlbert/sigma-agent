@@ -232,9 +232,9 @@ See [packages and MCP servers](docs/PACKAGES.md) for the package format, the
 supported sources, workflow extension commands and events, and current limits.
 HTTP MCP servers are not supported.
 
-## Repository-memory RAG and Skills
+## Repository memory and Skills
 
-The memory experiment targets repeated work in one repository. Useful facts can include a non-obvious test command, an architectural contract, or a compatibility issue learned from a previous task. Each fact is kept short and carries a repository scope, category, source, and review date. Human-reviewed `.sigma-agent/MEMORY.md` is the canonical record; Qdrant is a derived index.
+Sigma's repository memory carries a small set of reviewed, durable facts across tasks in the same repository—for example, a non-obvious test command, an architecture decision, or a compatibility constraint. The canonical source is `.sigma-agent/MEMORY.md`; each fact should include a date, category, and source. `memory_enabled` defaults to `true`, but the file is not injected wholesale: Sigma exposes `search_memory`, and the Agent retrieves relevant facts when useful.
 
 The retrieval path is:
 
@@ -245,7 +245,9 @@ Reviewed repo facts in MEMORY.md
                                              ┘
 ```
 
-Qdrant applies an exact repository filter. The Agent receives matching facts with their provenance and must check them against the current code and tests. If vector search is unavailable, retrieval falls back to BM25. This is memory RAG: Sigma does not chunk, embed, or index the repository source code, and a retrieved fact is not an answer or a patch to copy.
+Local BM25 works without Qdrant. With an embedding endpoint and Qdrant configured, Sigma can add repository-filtered vector candidates and fuse the rankings. `--index-memory --repo <path>` syncs reviewed facts after the Markdown changes. Qdrant stores vectors and provenance for memory facts; Sigma does not chunk or index repository source code. Retrieved facts are references to check against current source and tests, not answers or patches to copy.
+
+`memory_auto_write` defaults to `false`. When enabled for a successful non-interactive run, a separate bounded model call may add up to three facts to the configured memory file; review these generated notes. Failed or interrupted runs do not write memory. See [memory configuration and usage](docs/CONFIGURATION.md#repository-long-term-memory).
 
 Skills and long-term memory solve different problems:
 
@@ -256,22 +258,15 @@ Skills and long-term memory solve different problems:
 - Current source code and tests remain authoritative. Memory is a reference to verify, not a substitute for reading the code.
 - BM25 works locally. When embeddings and Qdrant are configured, Sigma adds repository-filtered vector candidates and combines rankings with reciprocal-rank fusion. Source files are not embedded or indexed by this memory feature.
 
-### What we plan to measure
+### Memory in Mini SWE
 
-The project evaluates memory at two separate levels:
-
-| Experiment | Question | Evidence |
-| --- | --- | --- |
-| Labeled retrieval queries | Does hybrid BM25 + vector retrieval return the reviewed facts for a query, including cases with no relevant fact? | Recall@K, MRR, per-query rankings, empty-result behavior, and latency |
-| Held-out issue pairs | Does retrieved memory help solve a new issue in the same repository? | Fresh matched runs with memory off/on, same model, prompt, budget, base commit, Docker image, and evaluator; compare resolution, tests, token/tool use, and whether facts were applied correctly |
-
-The first experiment measures retrieval, not coding ability. The second is the evidence needed to argue that repository-memory RAG helped issue resolution. The current README reports no retrieval score or memory-on issue success-rate gain. Read the [memory retrieval protocol](evals/memory-retrieval-evaluation.md) and [Skills/memory ablation plan](evals/skills-memory-evaluation.md) for dataset boundaries and run controls. See [architecture](docs/ARCHITECTURE.md) for the implementation, [configuration](docs/CONFIGURATION.md) for setup, and the [user guide](docs/USAGE.md) for Skill directories and invocation.
+Some Mini SWE configs enable repository memory; pilot configs can disable it. The archived `batch-20261105-10tasks-from-12304` record shows 26 reviewed Django facts indexed before a run and three additional facts written after a successful run, for 29 indexed entries. Other runs had memory enabled but no `search_memory` call. These records show that memory was available and sometimes read or updated; they do not isolate its effect on task success. No matched Mini SWE memory-on/off result currently supports a causal uplift claim. See the [memory study status](evals/planned/skills-memory/repository-memory-status.md) and [Mini SWE evaluation plan](evals/swebench-verified-mini/evaluation-plan.md).
 
 ## Evaluation and project status
 
 Sigma has a documented issue-benchmark workflow and historical attempts. A benchmark result is only counted when the task input, Agent run, official evaluator, baseline behavior, and result record can be inspected together. Guided attempts, evaluator fixture problems, and resolved issues are reported separately; results from a small task subset are not presented as a general success rate or a Pi comparison.
 
-Start with the [evaluation guide](evals/README.md), then read the [benchmark protocol](evals/benchmark-protocol.md) and [issue inventory](evals/issue-benchmark-inventory.md). The [SWE-bench Verified Mini plan](evals/swebench-verified-mini-50-evaluation-plan.md) describes the proposed 50-task evaluation; the [memory retrieval plan](evals/memory-retrieval-evaluation.md) covers retrieval metrics separately from issue-resolution outcomes. These documents describe protocols and plans, not a completed 50-task score. The current README does not claim that Sigma matches Pi or that repository memory improves coding success. Project-specific implementation notes are in [architecture](docs/ARCHITECTURE.md) and [configuration](docs/CONFIGURATION.md).
+Start with the [evaluation guide](evals/README.md), then read the [benchmark protocol](evals/benchmark-protocol.md) and [issue inventory](evals/historical/go-issue-repair/issue-benchmark-inventory.md). The [SWE-bench Verified Mini plan](evals/swebench-verified-mini/evaluation-plan.md) describes the primary evaluation. These documents describe protocols and current evidence, not a completed 50-task score. The current README does not claim that Sigma matches Pi or that repository memory improves coding success. Project-specific implementation notes are in [architecture](docs/ARCHITECTURE.md) and [configuration](docs/CONFIGURATION.md).
 
 ## Development
 

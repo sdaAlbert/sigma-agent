@@ -1,79 +1,40 @@
-# Repository memory and retrieval
+# Repository memory status
 
 **Status date:** 2026-11-07
-**Status:** design and synthetic fixture are present. The six-query retrieval
-study has not completed against a live embedding service; matched issue runs
-have not established coding benefit.
+**Status:** the runtime feature is active and has been enabled in some Mini SWE
+runs. A matched memory-on/off comparison has not established a coding benefit.
 
-## Questions
+## Current role
 
-1. Can Sigma retrieve reviewed, sourced facts about the same repository more
-   accurately than local BM25 alone?
-2. Do those facts improve later issue-resolution work under matched conditions?
+Sigma stores durable repository facts in `.sigma-agent/MEMORY.md`. The file is
+the source of truth; `search_memory` retrieves a small relevant subset on
+demand. BM25 works locally. With an embedding provider and Qdrant configured,
+Sigma adds repository-filtered vector search and fuses the rankings. Qdrant
+contains vectors and provenance for memory facts, not source-code chunks,
+transcripts, secrets, or patches. See the [runtime usage and setup
+guide](../../../docs/CONFIGURATION.md#repository-long-term-memory).
 
-Keep retrieval quality separate from coding outcomes. Memory contains reviewed
-repository facts, not source-code chunks, transcripts, secrets, benchmark
-instructions, or gold patches. Human-reviewed Markdown is canonical; Qdrant is
-a derived index. Current source and tests take precedence over stale memory.
+## Evidence from Mini SWE
 
-## Phase A: six-query plumbing check
+- Some Mini SWE configs enable both `memory_enabled` and
+  `memory_auto_write`; the pilot config disables both. Inspect the effective
+  config for each batch rather than assuming every run had the same condition.
+- The archived `batch-20261105-10tasks-from-12304` record reports 26 reviewed
+  Django memory entries indexed before the run. After a successful run,
+  automatic writeback added three facts and reindexed 29 entries.
+- Other Mini SWE tasks had memory enabled but no `search_memory` call. Memory
+  availability, indexing, retrieval, and task success are separate events.
+- These runs do not form a matched ablation. Do not attribute an official score
+  to memory or claim a coding uplift from them.
 
-The query labels are in [`datasets/memory-retrieval-v1.json`](datasets/memory-retrieval-v1.json)
-and the isolated fixture is
-[`fixtures/memory-retrieval-v1`](fixtures/memory-retrieval-v1). Run from the
-repository root after configuring a real embedding provider and Qdrant:
+## Future issue-resolution comparison
 
-```powershell
-docker compose up -d qdrant
-go run ./cmd/sigma-agent --eval-memory --repo .\evals\planned\skills-memory\fixtures\memory-retrieval-v1 --memory-dataset .\evals\planned\skills-memory\datasets\memory-retrieval-v1.json --memory-top-k 5
-```
-
-The command reports Recall@5 and MRR for BM25, dense search, and reciprocal-rank
-fusion. Record embedding provider/model, vector dimensions, Qdrant version and
-collection, config, elapsed time, and output. Do not substitute random or
-deterministic vectors. This retrieval-only check does not call a generation
-model.
-
-## Phase B: real repository queries
-
-Use a fixed corpus of reviewed facts collected before the held-out queries.
-Have a second person review relevance labels where practical. Include useful,
-hard-negative, and no-relevant-fact queries. Report per-query rankings,
-Recall@K, MRR, source accuracy, empty-result behavior, stale-fact handling,
-latency, and indexing cost.
-
-## Phase C: issue-resolution value
-
-Choose fresh held-out repository issues whose solution can use a genuinely
-earlier reviewed fact. Run each issue in two clean worktrees from the same base:
-
-| Arm | Memory setting | Other conditions |
-| --- | --- | --- |
-| Control | `memory_enabled: false` | Same model, prompt, source tools, issue text, budget, image, and evaluator |
-| Treatment | `memory_enabled: true` | Same settings and exact same memory snapshot |
-
-Use Skills disabled in both arms unless Skill is an independently balanced
-factor. Record the memory snapshot hash/sources, retrieved facts, whether they
-were applied correctly, task/evaluator outcomes, stale or irrelevant context,
-tokens, calls, latency, and every failed attempt. Do not use the old #1969 or
-#2537 runs as a matched pair; their prompts and assistance conditions differ.
-
-The detailed procedures live in
-[`memory-retrieval-evaluation.md`](memory-retrieval-evaluation.md) and
-[`ablation-protocol.md`](ablation-protocol.md). Canonical
-standalone configs are [`memory-disabled.json`](configs/memory-disabled.json)
-and [`memory-enabled.json`](configs/memory-enabled.json). Both keep
-Skills disabled; copy any task-specific runtime fields into both configs.
-
-## Evidence boundary
-
-- **Observation:** the six-query set and labeled fixture are versioned, but the
-  live embedding/Qdrant evaluation is incomplete according to the current
-  protocol and architecture status.
-- **Observation:** a recent VibeMemBench attempt did not produce an interpretable
-  memory comparison because patch application conflicted before tests ran.
-  It is not a memory win or loss. Record ID: `google__yamlfmt-42` in the
-  archived VibeMemBench run notes.
-- **Hypothesis:** repository memory may help repeated tasks when it supplies
-  durable facts that are costly to rediscover. A retrieval score alone cannot
-  establish that.
+If this study is scheduled, choose fresh held-out issues whose expected behavior
+depends on a genuinely earlier reviewed fact. Use clean worktrees from the same
+base, the same memory snapshot, model, prompt, image, budgets, Skills setting,
+and evaluator; change only `memory_enabled`. Record whether `search_memory` was
+called, which sourced facts it returned, whether the Agent used them correctly,
+the official result, regressions, turns, calls, tokens, and every incomplete
+attempt. Keep `memory_auto_write` disabled during the pair so one arm cannot
+change the other's memory. The paired configs and broader controls are in
+[`ablation-protocol.md`](ablation-protocol.md).

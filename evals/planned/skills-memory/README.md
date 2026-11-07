@@ -2,9 +2,9 @@
 
 ## Current status
 
-- **Repository memory:** the six-query fixture is synthetic; live embedding
-  retrieval and matched issue-resolution arms have not been run. There is no
-  verified coding-success gain.
+- **Repository memory:** the runtime feature is used in some Mini SWE runs.
+  There is no matched memory-on/off result that isolates its effect on coding
+  success.
 - **Skills:** one matched one-task smoke and several non-matched retests exist.
   They verify parts of the Skill path but do not estimate a general effect.
 - These are exploratory records and protocols, not completed benchmark scores.
@@ -16,17 +16,13 @@
 
 - [`ablation-protocol.md`](ablation-protocol.md) describes paired Skill and
   memory runs.
-- [`memory-retrieval-evaluation.md`](memory-retrieval-evaluation.md) describes
-  retrieval-only measurement and its distinction from coding outcomes.
 - [`skills-ablation-status.md`](skills-ablation-status.md) summarizes current
   Skill evidence and its limits.
 - [`repository-memory-status.md`](repository-memory-status.md) records the
-  memory study's incomplete status and evidence boundary.
+  memory feature's role, observed Mini SWE usage, and evidence boundary.
 - [`configs/`](configs/) contains the default-based paired config files. Add
   task-specific fields identically to both arms and retain the exact resolved
   configs with the run record.
-- [`datasets/`](datasets/) and [`fixtures/`](fixtures/) hold the labeled
-  retrieval set and its isolated synthetic repository.
 
 Do not claim an effect until the preselected matched task set has completed
 under fixed conditions with all attempts and costs reported.

@@ -217,9 +217,9 @@ MCP 服务器是以当前用户权限运行的程序，安装包也会执行包�
 
 包格式、支持的来源、工作流扩展命令与事件以及当前限制见[包与 MCP 服务器](docs/PACKAGES.md)。目前不支持 HTTP 型 MCP 服务器。
 
-## 仓库长期记忆 RAG 与 Skills
+## 仓库记忆与 Skills
 
-记忆实验关注同一仓库的重复开发任务。可复用事实包括不明显的测试命令、架构约定或之前任务中发现的兼容性问题。每条记忆保持简短，并记录仓库范围、类别、来源和审核日期。人工审核的 `.sigma-agent/MEMORY.md` 是权威记录；Qdrant 是由它生成的检索索引。
+Sigma 的仓库记忆用于在同一仓库的不同任务间复用少量、经过审核的持久事实，例如不明显的测试命令、架构决策或兼容性约束。权威来源是 `.sigma-agent/MEMORY.md`，每条事实应记录日期、类别和出处。`memory_enabled` 默认开启，但 Sigma 不会把整个文件塞进提示词；它提供 `search_memory`，由 Agent 在需要时检索相关事实。
 
 检索流程如下：
 
@@ -230,7 +230,9 @@ MEMORY.md 中经审核的仓库事实
                                         ┘
 ```
 
-Qdrant 使用精确仓库范围过滤。Agent 得到带出处的候选事实后，还要对照当前源码和测试核实；向量检索不可用时会回退到 BM25。这是“记忆 RAG”：Sigma 不会对仓库源码切块、做 Embedding 或建立源码索引，检索到的事实也不是答案或可直接复制的补丁。
+本地 BM25 不需要 Qdrant。配置 Embedding 和 Qdrant 后，Sigma 可增加按仓库过滤的向量候选并融合排名。修改记忆文件后，可运行 `--index-memory --repo <path>` 同步经审核的事实。Qdrant 存储的是记忆事实的向量和来源信息；Sigma 不会对仓库源码切块或建立源码索引。检索结果只是需要对照当前源码和测试核实的参考，不是答案或可直接复制的补丁。
+
+`memory_auto_write` 默认关闭。对成功结束的非交互运行开启后，Sigma 会额外调用一次模型，最多向配置的记忆文件写入三条事实；这些生成内容需要审核。失败或中断的运行不会写入。具体配置和使用方法见[仓库长期记忆说明](docs/CONFIGURATION.md#repository-long-term-memory)。
 
 ### Skills 与长期记忆的区别
 
@@ -243,22 +245,15 @@ Skill 和长期记忆解决不同问题：
 - 当前源码和测试优先级更高。记忆是需要对照当前代码验证的参考，不应取代源码阅读。
 - BM25 可在本机运行。配置 Embedding 和 Qdrant 后，Sigma 会加入按仓库过滤的向量候选，再用 Reciprocal Rank Fusion 融合排名。这个记忆功能不会给源码分块或建立源码向量索引。
 
-### 计划验证什么
+### Mini SWE 中的记忆
 
-项目分两层评估记忆价值：
-
-| 实验 | 要回答的问题 | 证据 |
-| --- | --- | --- |
-| 标注过的记忆查询 | BM25 + 向量混合检索能否找回相关事实？没有相关记忆时能否正确返回空结果？ | Recall@K、MRR、逐查询排名、空结果行为和延迟 |
-| 留出的 Issue 成对实验 | 检索到的记忆是否帮助 Agent 修复同一仓库的新 issue？ | 记忆关闭/开启两组新鲜运行；模型、提示词、预算、基线提交、Docker 镜像和 evaluator 相同；比较是否解决、测试、token/工具使用及记忆是否被正确应用 |
-
-第一层衡量检索，不代表代码修复能力。第二层才是说明仓库长期记忆 RAG 是否帮助解决 issue 的关键证据。目前 README 不报告检索分数，也不宣称开启记忆提高了 issue 通过率。数据边界和实验控制见[记忆检索协议](evals/memory-retrieval-evaluation.md)及[Skills/记忆消融计划](evals/skills-memory-evaluation.md)；实现细节见[架构说明](docs/ARCHITECTURE.md)，配置方法见[配置说明](docs/CONFIGURATION.md)，Skill 目录和调用方式见[使用指南](docs/USAGE.md)。
+部分 Mini SWE 配置开启仓库记忆，pilot 配置则关闭。归档记录 `batch-20261105-10tasks-from-12304` 显示：运行前有 26 条 Django 经审核事实写入 Qdrant；一次成功运行后自动新增 3 条，并将 29 条重新索引。另一些运行虽然开启记忆，却没有调用 `search_memory`。这些记录能证明记忆曾可用、偶尔被读取或更新，但不能单独说明它提高了任务成功率。目前没有能隔离记忆影响的 Mini SWE 开/关成对结果。详见[记忆使用状态](evals/planned/skills-memory/repository-memory-status.md)和[Mini SWE 评测计划](evals/swebench-verified-mini/evaluation-plan.md)。
 
 ## 评测与项目状态
 
 Sigma 记录了 issue 基准评测流程和历史尝试。只有任务输入、Agent 运行、官方 evaluator、基线行为和结果记录可以一起核查时，才把结果计为有效评测。带提示的尝试、评测夹具问题和真正解决的任务应分开报告；少量子集结果不能代表整体成功率，也不能据此宣称与 Pi 的能力相当。
 
-可先看[基准评测协议](evals/benchmark-protocol.md)和[Issue 清单](evals/issue-benchmark-inventory.md)；[SWE-bench Verified Mini 计划](evals/swebench-verified-mini-50-evaluation-plan.md)说明了拟议的 50 题评测，[记忆检索评测计划](evals/memory-retrieval-evaluation.md)则把检索指标与 issue 修复结果分开考察。这些文档描述的是协议和计划，不代表 50 题评测已经完成。本文不宣称 Sigma 已达到 Pi 的水平，也不宣称仓库记忆提高了代码修复成功率。实现细节见[架构说明](docs/ARCHITECTURE.md)和[配置说明](docs/CONFIGURATION.md)。
+可先看[评测导览](evals/README.md)、[基准评测协议](evals/benchmark-protocol.md)和[历史 Go Issue 清单](evals/historical/go-issue-repair/issue-benchmark-inventory.md)；[SWE-bench Verified Mini 计划](evals/swebench-verified-mini/evaluation-plan.md)说明了当前主评测。这些文档描述的是协议和阶段性证据，不代表 50 题评测已经完成。本文不宣称 Sigma 已达到 Pi 的水平，也不宣称仓库记忆提高了代码修复成功率。实现细节见[架构说明](docs/ARCHITECTURE.md)和[配置说明](docs/CONFIGURATION.md)。
 
 ## 开发
 

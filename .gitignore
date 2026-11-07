@@ -1,8 +1,6 @@
 # Local credentials and per-repository memory
 .secrets/
 .sigma-agent/
-!evals/planned/skills-memory/fixtures/memory-retrieval-v1/.sigma-agent/
-!evals/planned/skills-memory/fixtures/memory-retrieval-v1/.sigma-agent/MEMORY.md
 pat.txt
 
 # Local notes, sessions, run output, and generated evaluation artifacts

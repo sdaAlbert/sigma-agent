@@ -31,9 +31,6 @@ import (
 func main() {
 	serve := flag.Bool("serve", false, "run the HTTP/SSE task service")
 	indexMemory := flag.Bool("index-memory", false, "synchronize repository memory into Qdrant")
-	evalMemory := flag.Bool("eval-memory", false, "compare BM25, vector, and hybrid retrieval on labeled repository-memory queries")
-	memoryDataset := flag.String("memory-dataset", "evals/planned/skills-memory/datasets/memory-retrieval-v1.json", "labeled memory retrieval queries")
-	memoryTopK := flag.Int("memory-top-k", 5, "number of memory results used for retrieval metrics")
 	configPath := flag.String("config", "config.json", "JSON file with tunable runtime limits")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")
 	maxConcurrent := flag.Int("max-concurrent", 2, "maximum concurrent agent tasks when --serve is enabled")
@@ -137,44 +134,6 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Indexed %d repository memory entries into Qdrant.\n", memoryCount)
-		return
-	}
-	if *evalMemory {
-		if strings.TrimSpace(*repoArg) == "" {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --eval-memory requires --repo")
-			os.Exit(2)
-		}
-		if *memoryTopK < 1 || *memoryTopK > 20 {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --memory-top-k must be from 1 to 20")
-			os.Exit(2)
-		}
-		datasetPath := *memoryDataset
-		if !filepath.IsAbs(datasetPath) {
-			workingDir, err := os.Getwd()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-				os.Exit(1)
-			}
-			datasetPath = filepath.Join(workingDir, datasetPath)
-		}
-		data, err := os.ReadFile(datasetPath)
-		if err == nil {
-			var cases []sigmaagent.MemoryRetrievalCase
-			err = json.Unmarshal(data, &cases)
-			if err == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-				defer cancel()
-				var evaluation sigmaagent.MemoryRetrievalEvaluation
-				evaluation, err = sigmaagent.EvaluateMemoryRetrieval(ctx, *repoArg, cases, *memoryTopK)
-				if err == nil {
-					err = json.NewEncoder(os.Stdout).Encode(evaluation)
-				}
-			}
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-			os.Exit(1)
-		}
 		return
 	}
 	if *tui && *serve {
