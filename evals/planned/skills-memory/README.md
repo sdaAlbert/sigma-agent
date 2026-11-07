@@ -8,6 +8,9 @@
 - **Skills:** one matched one-task smoke and several non-matched retests exist.
   They verify parts of the Skill path but do not estimate a general effect.
 - These are exploratory records and protocols, not completed benchmark scores.
+- The earlier Go and memory evidence is summarized in the historical
+  [early results table](../../historical/early-go-memory-results.md); it does
+  not establish a general coding benefit.
 
 ## Files
 

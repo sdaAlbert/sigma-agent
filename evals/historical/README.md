@@ -4,6 +4,9 @@ This section holds early Go issue-repair runs, superseded task proposals, and
 cross-study observations. These records are useful for designing future runs;
 they are not comparable to the primary SWE-bench Verified Mini results.
 
+- [`early-go-memory-results.md`](early-go-memory-results.md) compresses the
+  early Go, Skill, and repository-memory result notes into one evidence-bounded
+  table. The detailed local notes and raw artifacts remain untracked.
 - [`go-issue-repair/`](go-issue-repair/README.md) indexes initial Go-zero
   outcomes and superseded Multi-SWE-Bench Go selections.
 - [`cross-study-findings.md`](cross-study-findings.md) preserves the earlier
