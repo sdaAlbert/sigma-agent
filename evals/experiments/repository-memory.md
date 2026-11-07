@@ -61,8 +61,9 @@ tokens, calls, latency, and every failed attempt. Do not use the old #1969 or
 The detailed procedures live in
 [`memory-retrieval-evaluation.md`](../memory-retrieval-evaluation.md) and
 [`skills-memory-evaluation.md`](../skills-memory-evaluation.md). Canonical
-toggle overlays are [`memory-disabled.json`](../configs/memory-disabled.json)
-and [`memory-enabled.json`](../configs/memory-enabled.json).
+standalone configs are [`memory-disabled.json`](../configs/ablations/memory-disabled.json)
+and [`memory-enabled.json`](../configs/ablations/memory-enabled.json). Both keep
+Skills disabled; copy any task-specific runtime fields into both configs.
 
 ## Evidence boundary
 

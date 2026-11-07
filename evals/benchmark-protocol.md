@@ -112,7 +112,7 @@ Example for the retained `django__django-11880` task:
 $repoPath = "C:\work\swb5\django__django-11880"
 .\evals\scripts\preflight-swebench-task.ps1 `
   -RepoPath $repoPath `
-  -ConfigPath evals\configs\full-sigma-5-django-11880-shared-profile.json `
+  -ConfigPath evals\configs\swebench-verified-mini\task-overrides\django-11880-shared-profile.json `
   -EvaluatorImage swebench/sweb.eval.x86_64.django_1776_django-11880:latest `
   -ExpectedPython 3.6.13
 ```

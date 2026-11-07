@@ -18,8 +18,10 @@ issue text, model/version, runtime executable, prompt, memory snapshot, Docker
 image, turn/tool/token limits, and evaluator identical. Change only
 `skills_enabled`.
 
-- Control: [`skills-disabled.json`](../configs/skills-disabled.json).
-- Treatment: same effective config with `skills_enabled: true`.
+- Control: [`skills-disabled.json`](../configs/ablations/skills-disabled.json).
+- Treatment: [`skills-enabled.json`](../configs/ablations/skills-enabled.json).
+  Copy any task-specific runtime fields into both configs; Sigma loads one
+  config file per run.
 - Stage the exact reviewed `SKILL.md` only in the treatment workspace. Record
   its SHA-256 and verify its name/description is discoverable before the run.
 - Include both tasks that should match the Skill and near-miss tasks where it

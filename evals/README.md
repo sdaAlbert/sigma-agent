@@ -45,6 +45,9 @@ files. Use environment variables or Sigma's local credential store.
 - [Labeled retrieval queries](memory-retrieval-v1.json)
 - [Public experiment summaries and current evidence](experiments/README.md)
 
+The full config inventory, overlays, and studies without frozen configs are
+listed in [`configs/README.md`](configs/README.md).
+
 ## Helper scripts
 
 Scripts live in [`scripts/`](scripts/), separate from plans and result
@@ -61,9 +64,9 @@ prepare script invokes its sibling preflight script from `scripts/`.
 
 ## Configs, fixtures, and outputs
 
-- [`configs/`](configs/) contains run configs and ablation overlays. Reuse the
-  checked-in config as the source of truth; don't copy settings into another
-  long-lived document.
+- [`configs/`](configs/README.md) contains study configs, task overrides,
+  paired ablation configs, and examples. Its README maps each file to the relevant
+  study and records which planned studies still need a frozen config.
 - [`fixtures/`](fixtures/) contains small test workspaces, including the
   labeled memory-retrieval fixture.
 - [`experiments/`](experiments/) contains public experiment overviews,

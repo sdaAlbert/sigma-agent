@@ -60,4 +60,4 @@ paths.
 - [Skill ablation](skills-ablation.md)
 - [Repository memory](repository-memory.md)
 - [Cross-study findings](findings.md)
-- [Portable config example](configs/issue-only.example.json)
+- [Portable config example](../configs/examples/issue-only.json)

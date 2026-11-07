@@ -1,5 +1,6 @@
 {
   "context_compaction_threshold_tokens": 24000,
+  "skills_enabled": false,
   "memory_enabled": false,
   "memory_auto_write": false
 }

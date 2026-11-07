@@ -59,7 +59,7 @@ Use the configured embedding provider consistently for both indexing and queries
 3. Run Skills ablations with `skills_enabled: false` and `true` against matched tasks; the one-task smoke is not a general result.
 4. Consider explicit memory proposals only after these evaluations establish value and a human approval workflow.
 
-The reproducible ablation protocol and no-Skill config are in [`evals/skills-memory-evaluation.md`](../evals/skills-memory-evaluation.md) and [`evals/configs/skills-disabled.json`](../evals/configs/skills-disabled.json). GitHub implementation patterns are in [`2026-10-sigma-agent-vector-memory-github-patterns.md`](2026-10-sigma-agent-vector-memory-github-patterns.md).
+The reproducible ablation protocol and no-Skill config are in [`evals/skills-memory-evaluation.md`](../evals/skills-memory-evaluation.md) and [`evals/configs/ablations/skills-disabled.json`](../evals/configs/ablations/skills-disabled.json). GitHub implementation patterns are in [`2026-10-sigma-agent-vector-memory-github-patterns.md`](2026-10-sigma-agent-vector-memory-github-patterns.md).
 
 ## Sources
 

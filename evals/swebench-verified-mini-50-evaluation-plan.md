@@ -60,7 +60,7 @@ Docker 镜像准备、网络故障、运行中断和清理一律遵循 [benchmar
 
 `full-sigma-5` 的 #11815、#11848 和 #11880 首轮使用的是各目标 checkout
 自己的 `.sigma-agent/MEMORY.md`，未加载仓库外的 `AGENTS.md` profile。现在增加了
-`configs/full-sigma-5-django-11880-shared-profile.json`：它会把 Sigma 的
+`configs/swebench-verified-mini/task-overrides/django-11880-shared-profile.json`：它会把 Sigma 的
 `AGENTS.md` 外置注入，并从 Sigma 仓库外的共享 Django 记忆源检索，目标 checkout
 不需要写入这些配置。若用它续跑 #11880，应标记为 profile 更新后的续跑，不与原
 条件混报；后续题目使用共享 profile 时也应单独标明评测条件。

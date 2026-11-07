@@ -48,9 +48,9 @@ public summary does not rewrite that source record.
 
 Use [`benchmark-protocol.md`](../benchmark-protocol.md) for the full operational
 sequence and the existing example config
-[`swebench-verified-mini-full-sigma-5.json`](../configs/swebench-verified-mini-full-sigma-5.json).
+[`full-sigma-5.json`](../configs/swebench-verified-mini/full-sigma-5.json).
 For a new clean baseline, start from
-[`issue-only.example.json`](configs/issue-only.example.json), then set the
+[`issue-only.json`](../configs/examples/issue-only.json), then set the
 repository-specific command image and frozen limits. Load API credentials from
 the local environment or credential store; never put them in the config.
 
