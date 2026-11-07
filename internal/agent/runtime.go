@@ -90,6 +90,7 @@ type ModelResponse struct {
 	InputTokens              int            `json:"input_tokens,omitempty"`
 	OutputTokens             int            `json:"output_tokens,omitempty"`
 	CacheReadInputTokens     int            `json:"cache_read_input_tokens,omitempty"`
+	CacheMissInputTokens     int            `json:"cache_miss_input_tokens,omitempty"`
 	CacheCreationInputTokens int            `json:"cache_creation_input_tokens,omitempty"`
 }
 
@@ -121,6 +122,7 @@ type Event struct {
 	InputTokens              int             `json:"input_tokens,omitempty"`
 	OutputTokens             int             `json:"output_tokens,omitempty"`
 	CacheReadInputTokens     int             `json:"cache_read_input_tokens,omitempty"`
+	CacheMissInputTokens     int             `json:"cache_miss_input_tokens,omitempty"`
 	CacheCreationInputTokens int             `json:"cache_creation_input_tokens,omitempty"`
 	SummaryTokens            int             `json:"summary_tokens,omitempty"`
 	CompactionSummary        string          `json:"compaction_summary,omitempty"`
@@ -150,11 +152,13 @@ func DefaultLimits() Limits {
 
 type Result struct {
 	Text                          string
+	VerificationStatus            string
 	Turns                         int
 	ToolCalls                     int
 	InputTokens                   int
 	OutputTokens                  int
 	CacheReadInputTokens          int
+	CacheMissInputTokens          int
 	CacheCreationInputTokens      int
 	ContextCompactions            int
 	ContextCompactionInputTokens  int
@@ -175,20 +179,19 @@ type Session struct {
 	Context        ContextPreparer
 	ToolOutputs    ToolOutputStore
 
-	mu                                    sync.Mutex
-	messages                              []Message
-	compactionSummary                     string
-	compactionBoundary                    int
-	entries                               []SessionEntry
-	head                                  string
-	modelID                               string
-	loadedSkills                          map[string]bool
-	finalizationInspectionBudgetExhausted bool
-	steering                              []Message
-	followUps                             []Message
-	pendingTools                          []ContentBlock
-	running                               bool
-	cancel                                context.CancelFunc
+	mu                 sync.Mutex
+	messages           []Message
+	compactionSummary  string
+	compactionBoundary int
+	entries            []SessionEntry
+	head               string
+	modelID            string
+	loadedSkills       map[string]bool
+	steering           []Message
+	followUps          []Message
+	pendingTools       []ContentBlock
+	running            bool
+	cancel             context.CancelFunc
 }
 
 func (s *Session) Messages() []Message {
@@ -317,7 +320,6 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	}
 	s.running = true
 	s.cancel = cancel
-	s.finalizationInspectionBudgetExhausted = false
 	s.mu.Unlock()
 	defer func() {
 		cancel()
@@ -336,24 +338,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	if _, err := s.consumeSteering(); err != nil {
 		return result, err
 	}
-	reservedTurns := limits.MaxTurns / 2
-	if reservedTurns < 1 {
-		reservedTurns = 1
-	}
-	checkpointTurn := limits.MaxTurns - reservedTurns
-	if checkpointTurn < 1 {
-		checkpointTurn = 1
-	}
-	reservedToolCalls := limits.MaxToolCalls / 2
-	if reservedToolCalls < 1 {
-		reservedToolCalls = 1
-	}
-	checkpointToolCall := limits.MaxToolCalls - reservedToolCalls
-	if checkpointToolCall < 1 {
-		checkpointToolCall = 1
-	}
 	toolOrder := 0
-	finalizationInspectionCalls := 0
 	lastWriteOrder, lastTestOrder, lastDiffOrder := 0, 0, 0
 	lastTestPassed := false
 	repeatedFailedCommands := make(map[string]int)
@@ -373,39 +358,10 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		s.emit(Event{Type: "turn_start", Turn: turn})
 		s.emit(Event{Type: "model_request", Turn: turn})
 		systemPrompt := s.System
-		finalizationTurn := checkpointTurn
-		if result.ToolCalls >= checkpointToolCall && turn < finalizationTurn {
-			finalizationTurn = turn
-		}
-		finalizationPhase := turn >= finalizationTurn
-		inspectionBudgetExhausted := finalizationInspectionBudgetExhausted(finalizationPhase, finalizationInspectionCalls)
-		s.mu.Lock()
-		s.finalizationInspectionBudgetExhausted = inspectionBudgetExhausted
-		s.mu.Unlock()
 		testsNeeded := lastWriteOrder > 0 && lastTestOrder <= lastWriteOrder
 		diffNeeded := lastWriteOrder > 0 && lastDiffOrder <= lastWriteOrder
-		reviewNeeded := testsNeeded || diffNeeded
 		verificationComplete := lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && lastDiffOrder > lastWriteOrder && lastTestPassed
-		reviewOnly = reviewNeeded && !(lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && !lastTestPassed)
-		if lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && !lastTestPassed {
-			systemPrompt += "\n\nLATEST TEST RESULT FAILED: inspect the first actionable compiler or test failure, make a targeted correction, then rerun the relevant test and inspect git_diff again. Do not finish with a newly introduced compile failure. If the failure is demonstrably pre-existing or environmental, preserve the evidence and report that limitation."
-		}
-		if reviewNeeded {
-			systemPrompt += "\n\nRECOMMENDED REVIEW: Source changes were made in this run. Run relevant tests and inspect git_diff before finishing. You may continue investigating, rerun checks, and make corrections as needed; a new edit makes earlier test and diff results stale. If a check cannot run, keep its output as evidence and report why."
-		}
-		if verificationComplete {
-			systemPrompt += "\n\nVERIFICATION STATUS: The current source revision has passed a test command and its diff has been inspected. These checks are not locked; continue investigating or rerun them if useful. If no further work is needed, provide the final summary."
-		}
-		if finalizationPhase {
-			remaining := limits.MaxTurns - turn + 1
-			systemPrompt += fmt.Sprintf("\n\nFINALIZATION PHASE: %d turns remain. Stop broad exploration. Only make a targeted correction if a test or diff review shows it is needed; then rerun the checks. If a write was rejected because the file changed, read that file again and rebase the edit.", remaining)
-		}
-		if limits.MaxRepeatedFailedCommands > 0 {
-			systemPrompt += fmt.Sprintf("\n\nCOMMAND PROGRESS RULE: Do not repeat an identical failed run_command unless the workspace or environment has changed. Inspect the failure, change the command or implementation, or report the blocker. The run pauses after %d identical failed calls without a workspace change.", limits.MaxRepeatedFailedCommands)
-		}
-		if inspectionBudgetExhausted {
-			systemPrompt += "\n\nFOCUSED EXPLORATION: You are in the final turns. Prefer focused investigation and act on useful new evidence; all tools remain available. Avoid repeating an unchanged probe without a reason."
-		}
+		reviewOnly = (testsNeeded || diffNeeded) && !(lastWriteOrder > 0 && lastTestOrder > lastWriteOrder && !lastTestPassed)
 		systemPrompt, requestMessages := s.modelContext(systemPrompt)
 		if s.Context != nil {
 			prepared, prepareErr := s.Context.Prepare(systemPrompt, requestMessages)
@@ -419,9 +375,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			}
 		}
 		toolDefinitions := s.Tools.Definitions()
-		if finalizationPhase || reviewOnly || verificationComplete {
-			toolDefinitions = finalizationToolDefinitions(toolDefinitions, reviewOnly, testsNeeded, diffNeeded, verificationComplete)
-		}
+		toolDefinitions = finalizationToolDefinitions(toolDefinitions, reviewOnly, testsNeeded, diffNeeded, verificationComplete)
 		toolDefinitions = requiredSkillBootstrapTools(toolDefinitions, s.pendingRequiredSkills())
 		response, err := s.Model.Stream(ctx, systemPrompt, requestMessages, toolDefinitions, func(modelEvent ModelEvent) {
 			s.emit(Event{Type: "model_" + modelEvent.Type, Turn: turn, Text: modelEvent.Text, Tool: modelEvent.Name})
@@ -433,11 +387,12 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		result.InputTokens += response.InputTokens
 		result.OutputTokens += response.OutputTokens
 		result.CacheReadInputTokens += response.CacheReadInputTokens
+		result.CacheMissInputTokens += response.CacheMissInputTokens
 		result.CacheCreationInputTokens += response.CacheCreationInputTokens
 		if !shouldRecoverMissingStopReason(response.StopReason) {
 			emptyStopReasonRetries = 0
 		}
-		s.emit(Event{Type: "model_usage", Turn: turn, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens, CacheReadInputTokens: response.CacheReadInputTokens, CacheCreationInputTokens: response.CacheCreationInputTokens})
+		s.emit(Event{Type: "model_usage", Turn: turn, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens, CacheReadInputTokens: response.CacheReadInputTokens, CacheMissInputTokens: response.CacheMissInputTokens, CacheCreationInputTokens: response.CacheCreationInputTokens})
 		result.Text += textBlocks(response.Content)
 		toolCalls := make([]ContentBlock, 0)
 		for _, block := range response.Content {
@@ -499,7 +454,16 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 					toolResults[i] = toolResult(call.ID, message, true)
 				}
 			} else {
-				toolResults, toolErr = s.executeTools(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
+				toolResults, toolErr = s.executeTools(ctx, turn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
+			}
+			for index, call := range toolCalls {
+				if index >= len(toolResults) || call.Name != "run_command" {
+					continue
+				}
+				if strings.Contains(resultStatusLine(toolResults[index].Content, "SIGMA_RUN_COMMAND "), "status=failed") {
+					guidance := "\n\nRecovery guidance: Read the command's exit code and stdout/stderr to identify the first concrete cause. Separate a repository/test failure from a tool or environment failure; do not change source based only on infrastructure output. Choose one smallest diagnostic or corrective action, and change the command or workspace state before retrying."
+					toolResults[index] = toolResult(call.ID, toolResults[index].Content+guidance, toolResults[index].IsError)
+				}
 			}
 			compactIndex, compactCount := -1, 0
 			for i, call := range toolCalls {
@@ -529,6 +493,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 						result.InputTokens += compacted.InputTokens
 						result.OutputTokens += compacted.OutputTokens
 						result.CacheReadInputTokens += compacted.CacheReadInputTokens
+						result.CacheMissInputTokens += compacted.CacheMissInputTokens
 						result.CacheCreationInputTokens += compacted.CacheCreationInputTokens
 						result.ContextCompactionInputTokens += compacted.InputTokens
 						result.ContextCompactionOutputTokens += compacted.OutputTokens
@@ -540,9 +505,6 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			for index, call := range toolCalls {
 				if index >= len(toolResults) {
 					continue
-				}
-				if turn >= finalizationTurn && isFinalizationInspectionTool(call.Name, call.Input) {
-					finalizationInspectionCalls++
 				}
 				if toolCallChangedWorkspaceOrEnvironment(call, toolResults[index], s.Tools) {
 					clear(repeatedFailedCommands)
@@ -642,7 +604,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				if compaction != nil {
 					result.ContextCompactions++
 					_, visible := s.modelContext(s.System)
-					s.emit(Event{Type: "context_compacted_model", Turn: turn, Tool: compactContextToolName, MessagesDropped: compaction.MessagesCompacted, EstimatedTokensBefore: compaction.EstimatedTokensBefore, EstimatedTokensAfter: estimateTextTokens(s.System) + estimateMessageTokens(visible), InputTokens: compaction.InputTokens, OutputTokens: compaction.OutputTokens, CacheReadInputTokens: compaction.CacheReadInputTokens, CacheCreationInputTokens: compaction.CacheCreationInputTokens, SummaryTokens: compaction.SummaryTokens, CompactionSummary: truncateToolOutput(compaction.Summary, 2048)})
+					s.emit(Event{Type: "context_compacted_model", Turn: turn, Tool: compactContextToolName, MessagesDropped: compaction.MessagesCompacted, EstimatedTokensBefore: compaction.EstimatedTokensBefore, EstimatedTokensAfter: estimateTextTokens(s.System) + estimateMessageTokens(visible), InputTokens: compaction.InputTokens, OutputTokens: compaction.OutputTokens, CacheReadInputTokens: compaction.CacheReadInputTokens, CacheMissInputTokens: compaction.CacheMissInputTokens, CacheCreationInputTokens: compaction.CacheCreationInputTokens, SummaryTokens: compaction.SummaryTokens, CompactionSummary: truncateToolOutput(compaction.Summary, 2048)})
 				}
 			}
 			s.emit(Event{Type: "turn_end", Turn: turn})
@@ -713,13 +675,26 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			}
 		}
 		if !hasSteering && !hasFollowUps {
+			result.VerificationStatus = currentVerificationStatus(lastWriteOrder, lastTestOrder, lastDiffOrder, lastTestPassed)
 			return result, nil
 		}
 	}
-	if lastWriteOrder > 0 && (lastTestOrder <= lastWriteOrder || lastDiffOrder <= lastWriteOrder) {
-		return result, fmt.Errorf("agent turn limit (%d) reached with unverified changes: %s did not run after the latest edit", limits.MaxTurns, strings.Join(missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder), " and "))
+	result.VerificationStatus = currentVerificationStatus(lastWriteOrder, lastTestOrder, lastDiffOrder, lastTestPassed)
+	s.emit(Event{Type: "turn_limit_reached", Error: fmt.Sprintf("agent turn limit (%d) reached", limits.MaxTurns)})
+	return result, nil
+}
+
+func currentVerificationStatus(lastWriteOrder, lastTestOrder, lastDiffOrder int, lastTestPassed bool) string {
+	if lastWriteOrder == 0 {
+		return "no_changes"
 	}
-	return result, fmt.Errorf("agent turn limit (%d) reached", limits.MaxTurns)
+	if lastTestOrder > lastWriteOrder && lastDiffOrder > lastWriteOrder {
+		if lastTestPassed {
+			return "verified"
+		}
+		return "test_failed"
+	}
+	return "incomplete"
 }
 
 func missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder int) []string {
@@ -751,7 +726,7 @@ func (s *Session) hasMessageIDLocked(id string) bool {
 	return contains(s.messages) || contains(s.steering) || contains(s.followUps)
 }
 
-func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
+func (s *Session) executeTools(ctx context.Context, turn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
 	parallel := len(calls) > 1
 	if len(s.pendingRequiredSkills()) > 0 {
 		parallel = false
@@ -779,13 +754,13 @@ func (s *Session) executeTools(ctx context.Context, turn, finalizationTurn int, 
 			wg.Add(1)
 			go func(i int, call ContentBlock) {
 				defer wg.Done()
-				results[i] = s.executeTool(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, call, timeout, maxResultBytes)
+				results[i] = s.executeTool(ctx, turn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, call, timeout, maxResultBytes)
 			}(i, call)
 		}
 		wg.Wait()
 	} else {
 		for i, call := range calls {
-			results[i] = s.executeTool(ctx, turn, finalizationTurn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, call, timeout, maxResultBytes)
+			results[i] = s.executeTool(ctx, turn, reviewOnly, testsNeeded, diffNeeded, verificationComplete, call, timeout, maxResultBytes)
 			if ctx.Err() != nil {
 				break
 			}
@@ -887,7 +862,7 @@ func toolCallChangedWorkspaceOrEnvironment(call, result ContentBlock, registry *
 	return strings.Contains(status, "workspace_changed=true")
 }
 
-func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
+func (s *Session) executeTool(ctx context.Context, turn int, reviewOnly, testsNeeded, diffNeeded, verificationComplete bool, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
 	tool, exists := s.Tools.byName[call.Name]
 	started := time.Now()
 	s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
@@ -945,7 +920,7 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 		s.AfterTool(toolCtx, tool, call.Input, output, callErr)
 	}
 	if callErr != nil {
-		output = "Tool error: " + callErr.Error()
+		output = "Tool error: " + callErr.Error() + "\nRecovery guidance: " + toolErrorRecoveryHint(call.Name, callErr.Error())
 	}
 	if output == "" && callErr == nil {
 		output = "Tool completed with no output."
@@ -972,37 +947,30 @@ func (s *Session) executeTool(ctx context.Context, turn, finalizationTurn int, r
 	return toolResult(call.ID, output, callErr != nil)
 }
 
-const maxFinalizationInspectionCalls = 8
-
-func finalizationInspectionBudgetExhausted(finalizationPhase bool, inspectionCalls int) bool {
-	return finalizationPhase && inspectionCalls >= maxFinalizationInspectionCalls
-}
-
-func isFinalizationInspectionTool(name string, input json.RawMessage) bool {
-	switch name {
-	case "read_file", "list_files", "search_code", "search_memory", "web_search", "read_skill_resource":
-		return true
-	case "run_command":
-		var command struct {
-			Purpose string `json:"purpose"`
-		}
-		return json.Unmarshal(input, &command) != nil || command.Purpose != "test"
+func toolErrorRecoveryHint(toolName, message string) string {
+	message = strings.ToLower(message)
+	switch {
+	case strings.Contains(message, "changed since it was read"):
+		return "Read the current file again, then rebase the intended localized edit on that version."
+	case strings.Contains(message, "old_text must match exactly once"):
+		return "Read a narrower file range, copy the exact unique text from it, and retry the edit with a smaller replacement."
+	case strings.Contains(message, "outside /workspace"), strings.Contains(message, "workspace-relative"), strings.Contains(message, "parent-directory traversal"):
+		return "Use pwd to confirm the task workspace, then retry with a path relative to that workspace and without '..'."
+	case strings.Contains(message, "would shrink the file"):
+		return "Re-read the affected region and make a localized edit; then inspect the diff and run the focused test."
+	case strings.Contains(message, "purpose=test commands cannot contain"):
+		return "Run the test process directly with purpose=test; remove pipes and semicolons, and chain setup with &&."
+	case strings.Contains(message, "must be successfully read with read_file"):
+		return "Read the named evidence file with read_file, then retry recording the change contract."
 	default:
-		return false
+		return fmt.Sprintf("Use this error to choose the smallest corrective action before retrying %s; change the path, arguments, command, or workspace state instead of repeating the unchanged call.", toolName)
 	}
 }
 
 func requiredSkillBootstrapTools(definitions []ToolDefinition, pendingSkills []string) []ToolDefinition {
-	if len(pendingSkills) == 0 {
-		return definitions
-	}
-	filtered := make([]ToolDefinition, 0, 1)
-	for _, definition := range definitions {
-		if definition.Name == "read_skill" {
-			filtered = append(filtered, definition)
-		}
-	}
-	return filtered
+	// Keep the request schema stable for prefix-based provider prompt caches.
+	// executeTool still blocks repository actions until required Skills load.
+	return definitions
 }
 
 func skillBootstrapCallAllowed(name string, input json.RawMessage, pendingSkills []string) bool {

@@ -72,6 +72,10 @@ type tuiReadyMsg struct {
 type tuiModelSelectionMsg modelconfig.Selection
 type tuiRunDoneMsg struct{ err error }
 type tuiStartMsg struct{}
+type tuiStartupInfoMsg struct {
+	repo string
+	info tuiStartupInfo
+}
 
 type tuiOverlayItem struct {
 	label string
@@ -85,8 +89,8 @@ type tuiToolOutput struct {
 }
 
 type tuiStartupInfo struct {
+	repoIsGit  bool
 	repoDirty  bool
-	repoError  string
 	contexts   []string
 	skills     []string
 	extensions []string
@@ -127,17 +131,15 @@ type tuiModel struct {
 	assistantText      string
 	assistantLine      int
 	modelStyle         lipgloss.Style
-	userMessageStyle   lipgloss.Style
-	toolStyle          lipgloss.Style
 	mutedStyle         lipgloss.Style
 	brandStyle         lipgloss.Style
 	frameStyle         lipgloss.Style
 	hintStyle          lipgloss.Style
-	phaseStyle         lipgloss.Style
 	statusBarStyle     lipgloss.Style
 	confirmResult      chan bool
 	commands           []workflow.Command
 	startupInfo        tuiStartupInfo
+	startupLoading     bool
 	showStartupDetails bool
 	sessionID          string
 	contextLimit       int
@@ -147,8 +149,6 @@ type tuiModel struct {
 	cacheWriteTokens   int
 	latestContext      int
 	cacheHitRate       float64
-	assistantStyle     lipgloss.Style
-	errorStyle         lipgloss.Style
 }
 
 func startTUI(setup interactiveSetupOptions, runner tuiRunner) error {
@@ -164,29 +164,26 @@ func startTUI(setup interactiveSetupOptions, runner tuiRunner) error {
 	input.Focus()
 	if root, err := gitOutput(setup.repo, "rev-parse", "--show-toplevel"); err == nil {
 		setup.repo = strings.TrimSpace(root)
+	} else if absolute, absErr := filepath.Abs(setup.repo); absErr == nil {
+		setup.repo = absolute
 	}
 	transcript := viewport.New()
 	transcript.SetWidth(80)
 	transcript.SetHeight(18)
 	app := &tuiModel{
 		input: input, transcript: transcript, setup: setup, runner: runner, phase: "setup",
-		assistantLine:    -1,
-		historyIndex:     -1,
-		toolOutputs:      make(map[string]*tuiToolOutput),
-		lines:            nil,
-		modelStyle:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
-		userMessageStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("#dee0e1")).Background(lipgloss.Color("#213b49")),
-		toolStyle:        lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
-		mutedStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		brandStyle:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")),
-		frameStyle:       lipgloss.NewStyle().BorderStyle(lipgloss.Border{Top: "─", Bottom: "─"}).BorderTop(true).BorderBottom(true).BorderForeground(lipgloss.Color("33")).Padding(0, 1),
-		hintStyle:        lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
-		phaseStyle:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")),
-		statusBarStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236")),
-		assistantStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")),
-		errorStyle:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
+		assistantLine:  -1,
+		historyIndex:   -1,
+		toolOutputs:    make(map[string]*tuiToolOutput),
+		lines:          nil,
+		modelStyle:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
+		mutedStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		brandStyle:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")),
+		frameStyle:     lipgloss.NewStyle().BorderStyle(lipgloss.Border{Top: "─", Bottom: "─"}).BorderTop(true).BorderBottom(true).BorderForeground(lipgloss.Color("#ff4d4d")).Padding(0, 1),
+		hintStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+		statusBarStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236")),
 	}
-	app.startupInfo = inspectTUIStartupInfo(setup.repo)
+	app.startupLoading = true
 	app.lines = app.startupLines()
 	app.syncInputHeight()
 	app.refreshTranscript(false)
@@ -200,11 +197,12 @@ func startTUI(setup interactiveSetupOptions, runner tuiRunner) error {
 
 func inspectTUIStartupInfo(repo string) tuiStartupInfo {
 	info := tuiStartupInfo{}
-	status, err := gitOutput(repo, "status", "--porcelain=v1", "--untracked-files=all")
-	if err != nil {
-		info.repoError = err.Error()
-	} else {
-		info.repoDirty = strings.TrimSpace(status) != ""
+	info.repoIsGit = sigmaagent.IsGitRepository(repo)
+	if info.repoIsGit {
+		status, err := gitOutput(repo, "status", "--porcelain=v1", "--untracked-files=all")
+		if err == nil {
+			info.repoDirty = strings.TrimSpace(status) != ""
+		}
 	}
 	scopes, err := packageScopes(repo)
 	if err != nil {
@@ -236,40 +234,26 @@ func inspectTUIStartupInfo(repo string) tuiStartupInfo {
 	return info
 }
 
-func (m *tuiModel) refreshStartupInfo() {
-	m.startupInfo = inspectTUIStartupInfo(m.setup.repo)
-}
-
 func (m *tuiModel) startupLines() []string {
-	contexts := "none detected"
-	if len(m.startupInfo.contexts) > 0 {
-		contexts = strings.Join(m.startupInfo.contexts, ", ")
+	projectInfo := fmt.Sprintf("%d context files · %d Skills · %d extensions", len(m.startupInfo.contexts), len(m.startupInfo.skills), len(m.startupInfo.extensions))
+	if m.startupLoading {
+		projectInfo = "Loading project context…"
 	}
-	skills := "none detected"
-	if len(m.startupInfo.skills) > 0 {
-		skills = strings.Join(m.startupInfo.skills, ", ")
+	repository := "Sigma edits this folder directly; changes appear here immediately."
+	if !m.startupLoading && !m.startupInfo.repoIsGit {
+		repository = "Working directly in this folder · Git diff is unavailable."
 	}
-	extensions := "none available"
-	if len(m.startupInfo.extensions) > 0 {
-		extensions = strings.Join(m.startupInfo.extensions, ", ")
-	}
-	repository := "Sigma edits this repository directly; changes appear here immediately."
 	if m.startupInfo.repoDirty {
 		repository = "Existing local changes are already here and will be preserved."
-	}
-	if m.startupInfo.repoError != "" {
-		repository = "Choose a Git repository with /repo <path> before starting a task."
 	}
 	lines := []string{
 		"Ask Sigma to explain the project, make a change, or run a verification task.",
 		repository,
 		"",
-		m.brandStyle.Render("Context") + "     " + m.mutedStyle.Render(contexts),
-		m.toolStyle.Render("Skills") + "      " + m.mutedStyle.Render(skills),
-		m.phaseStyle.Render("Extensions") + "  " + m.mutedStyle.Render(extensions),
+		"\x00startup-message:" + projectInfo,
 	}
 	if m.showStartupDetails {
-		lines = append(lines, "", "Setup: /repo <path> · /model · /login · /resume · /network on|off", "Enter sends · Shift+Enter adds a line · Ctrl+O hides these details")
+		lines = append(lines, "", "Context: "+strings.Join(m.startupInfo.contexts, ", "), "Skills: "+strings.Join(m.startupInfo.skills, ", "), "Extensions: "+strings.Join(m.startupInfo.extensions, ", "), "Setup: /repo · /model · /login · /resume · /network on|off", "Enter sends · Shift+Enter adds a line · Ctrl+O hides these details")
 	}
 	return lines
 }
@@ -281,11 +265,9 @@ func (m *tuiModel) validateStart() error {
 	if m.setup.resumeID != "" {
 		return nil
 	}
-	if _, err := gitOutput(m.setup.repo, "rev-parse", "--show-toplevel"); err != nil {
-		return fmt.Errorf("select a valid Git repository with /repo <path>: %w", err)
-	}
-	if _, err := gitOutput(m.setup.repo, "rev-parse", "--verify", "HEAD"); err != nil {
-		return errors.New("this repository has no commit yet; create an initial commit before starting a task")
+	info, err := os.Stat(m.setup.repo)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("workspace folder is unavailable: %s", m.setup.repo)
 	}
 	return nil
 }
@@ -323,7 +305,10 @@ func (m *tuiModel) syncInputHeight() {
 	m.syncTranscriptHeight()
 }
 
-func (m *tuiModel) Init() tea.Cmd { return nil }
+func (m *tuiModel) Init() tea.Cmd {
+	repo := m.setup.repo
+	return func() tea.Msg { return tuiStartupInfoMsg{repo: repo, info: inspectTUIStartupInfo(repo)} }
+}
 
 func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
@@ -334,9 +319,12 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			inputWidth = 20
 		}
 		m.input.SetWidth(inputWidth)
-		m.transcript.SetWidth(inputWidth)
+		m.transcript.SetWidth(max(20, msg.Width-2))
 		m.height = msg.Height
 		m.syncTranscriptHeight()
+		if m.phase == "setup" {
+			m.lines = m.startupLines()
+		}
 		m.refreshTranscript(false)
 	case tuiStartMsg:
 		m.active = true
@@ -346,6 +334,13 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			err := m.runner(m.setup, m.bridge)
 			return tuiRunDoneMsg{err: err}
+		}
+	case tuiStartupInfoMsg:
+		if filepath.Clean(msg.repo) == filepath.Clean(m.setup.repo) {
+			m.startupInfo = msg.info
+			m.startupLoading = false
+			m.lines = m.startupLines()
+			m.refreshTranscript(true)
 		}
 	case tuiReadyMsg:
 		m.phase = "chat"
@@ -365,8 +360,8 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					if strings.TrimSpace(block.Text) != "" {
 						content := safeTerminalText(strings.TrimSpace(block.Text))
 						if message.Role == "assistant" {
-							content = renderTUIMarkdown(content, m.width-6)
-							content = m.assistantStyle.Render("Sigma") + "  " + content
+							m.appendAssistantMessage(content)
+							continue
 						} else if message.Role == "user" {
 							m.appendUserMessage(content)
 							continue
@@ -374,9 +369,9 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 						m.appendLine(content)
 					}
 				case "tool_use":
-					m.appendLine(m.toolStyle.Render("▸ "+safeTerminalText(block.Name)) + " " + m.mutedStyle.Render(toolArgsSummary(block.Input, max(24, m.width-18))))
+					m.appendCardMessage("tool", "▸ "+safeTerminalText(block.Name)+" "+toolArgsSummary(block.Input, max(24, m.width-18)))
 				case "tool_result":
-					m.appendLine(m.mutedStyle.Render("  ↳ " + compactToolOutput(block.Content)))
+					m.appendCardMessage("tool", "↳ "+compactToolOutput(block.Content))
 				}
 			}
 		}
@@ -386,7 +381,7 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Placeholder = "Ask Sigma or enter a /command"
 		if msg.err != nil {
 			m.status = msg.err.Error()
-			m.appendLine("Run failed: " + msg.err.Error())
+			m.appendError("Run failed: " + msg.err.Error())
 		} else {
 			m.appendLine("Run finished. This session is saved.")
 		}
@@ -435,8 +430,7 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
-				m.selectOverlayItem()
-				return m, nil
+				return m, m.selectOverlayItem()
 			}
 			if m.overlay != "completion" {
 				return m, nil
@@ -526,7 +520,7 @@ func (m *tuiModel) submit() tea.Cmd {
 	if m.secretFor != "" {
 		if err := m.saveSecret(value); err != nil {
 			m.status = "Could not save credential: " + err.Error()
-			m.appendLine(m.status)
+			m.appendError(m.status)
 			return nil
 		}
 		provider := m.secretFor
@@ -535,6 +529,7 @@ func (m *tuiModel) submit() tea.Cmd {
 		m.input.Placeholder = "Ask Sigma or enter a /command"
 		m.status = "Saved " + provider + " credential in your user configuration"
 		m.appendLine("Saved " + provider + " credential in the user configuration directory.")
+		m.appendLine(provider + " is ready. You can start your task now.")
 		m.syncInputHeight()
 		return nil
 	}
@@ -546,7 +541,7 @@ func (m *tuiModel) submit() tea.Cmd {
 		}
 		if err := m.validateStart(); err != nil {
 			m.status = err.Error()
-			m.appendLine(err.Error())
+			m.appendError(err.Error())
 			return nil
 		}
 		m.addHistory(value)
@@ -589,25 +584,26 @@ func (m *tuiModel) setupCommand(line string) tea.Cmd {
 	value = strings.TrimSpace(value)
 	switch command {
 	case "/help":
-		m.appendLine("Setup: /repo <path>, /model [provider/model-id|save], /login <provider|github>, /logout <provider|github>, /session <id>, /resume <id>, /network on|off, /start, /exit. Enter submits; Shift+Enter inserts a new line.")
+		m.appendLine("Setup: /repo <path>, /model [provider/model-id|save], /login (choose a credential), /logout <provider|github>, /session <id>, /resume <id>, /network on|off, /start, /exit. Enter submits; Shift+Enter inserts a new line.")
 	case "/repo":
 		if value == "" {
-			m.appendLine("Usage: /repo <path>")
-			break
+			return m.openRepositorySelector()
 		}
 		path, err := filepath.Abs(value)
 		if err == nil {
-			var top string
-			top, err = gitOutput(path, "rev-parse", "--show-toplevel")
-			if err == nil {
-				m.setup.repo = strings.TrimSpace(top)
-				m.refreshStartupInfo()
-				m.lines = m.startupLines()
-				m.appendLine("Repository: " + m.setup.repo)
+			var info os.FileInfo
+			info, err = os.Stat(path)
+			if err == nil && info.IsDir() {
+				if top, gitErr := gitOutput(path, "rev-parse", "--show-toplevel"); gitErr == nil {
+					path = strings.TrimSpace(top)
+				}
+				return m.selectRepository(path)
 			}
 		}
 		if err != nil {
-			m.appendLine("Could not select repository: " + err.Error())
+			m.appendError("Could not select workspace folder: " + err.Error())
+		} else {
+			m.appendError("Workspace path must be an existing folder.")
 		}
 	case "/model":
 		if value == "" {
@@ -636,7 +632,7 @@ func (m *tuiModel) setupCommand(line string) tea.Cmd {
 				break
 			}
 			if err := modelconfig.SaveDefaultSelection(m.setup.model); err != nil {
-				m.appendLine("Could not save default model: " + err.Error())
+				m.appendError("Could not save default model: " + err.Error())
 			} else {
 				m.appendLine("Saved default model.")
 			}
@@ -690,13 +686,13 @@ func (m *tuiModel) setupCommand(line string) tea.Cmd {
 			err = modelconfig.RemoveAPIKey(value)
 		}
 		if err != nil {
-			m.appendLine("Could not remove credential: " + err.Error())
+			m.appendError("Could not remove credential: " + err.Error())
 		} else {
 			m.appendLine("Credential removed.")
 		}
 	case "/session":
 		if !agent.ValidSessionID(value) {
-			m.appendLine("Invalid session ID.")
+			m.appendError("Invalid session ID.")
 			break
 		}
 		m.setup.sessionID, m.setup.resumeID = value, ""
@@ -722,7 +718,7 @@ func (m *tuiModel) setupCommand(line string) tea.Cmd {
 		}
 	case "/start":
 		if err := m.validateStart(); err != nil {
-			m.appendLine(err.Error())
+			m.appendError(err.Error())
 			break
 		}
 		return func() tea.Msg { return tuiStartMsg{} }
@@ -790,17 +786,17 @@ func (m *tuiModel) openSessionSelector() {
 	}
 	root, err := os.Getwd()
 	if err != nil {
-		m.appendLine("Could not find session directory: " + err.Error())
+		m.appendError("Could not find session directory: " + err.Error())
 		return
 	}
 	store, err := agent.NewFileSessionStore(filepath.Join(root, "var", "sessions"))
 	if err != nil {
-		m.appendLine("Could not read saved sessions: " + err.Error())
+		m.appendError("Could not read saved sessions: " + err.Error())
 		return
 	}
 	sessions, err := store.List()
 	if err != nil {
-		m.appendLine("Could not list saved sessions: " + err.Error())
+		m.appendError("Could not list saved sessions: " + err.Error())
 		return
 	}
 	items := make([]tuiOverlayItem, 0, len(sessions))
@@ -856,18 +852,23 @@ func (m *tuiModel) syncTranscriptHeight() {
 	m.transcript.SetHeight(height)
 }
 
-func (m *tuiModel) selectOverlayItem() {
+func (m *tuiModel) selectOverlayItem() tea.Cmd {
 	if m.overlayIndex < 0 || m.overlayIndex >= len(m.overlayItems) {
-		return
+		return nil
 	}
 	item := m.overlayItems[m.overlayIndex]
 	switch m.overlay {
 	case "login":
 		m.closeOverlay()
 		m.beginSecretEntry(item.value)
+		return nil
+	case "repo":
+		m.closeOverlay()
+		return m.selectRepository(item.value)
 	case "confirm":
 		m.resolveConfirmation(item.value == "yes")
 		m.closeOverlay()
+		return nil
 	case "model":
 		if strings.HasPrefix(item.value, "provider:") {
 			provider := strings.TrimPrefix(item.value, "provider:")
@@ -889,11 +890,13 @@ func (m *tuiModel) selectOverlayItem() {
 			}
 		}
 		m.closeOverlay()
+		return nil
 	case "session":
 		m.setup.resumeID = item.value
 		m.setup.sessionID = ""
 		m.status = "Selected session " + item.value
 		m.closeOverlay()
+		return nil
 	case "tree":
 		m.closeOverlay()
 		select {
@@ -901,13 +904,103 @@ func (m *tuiModel) selectOverlayItem() {
 		default:
 			m.status = "Input queue is full."
 		}
+		return nil
 	case "completion":
 		completion := m.completion
 		m.closeOverlay()
 		if completion != nil {
 			m.applyCompletion(completion, item.value)
 		}
+		return nil
 	}
+	return nil
+}
+
+func (m *tuiModel) openRepositorySelector() tea.Cmd {
+	root, err := os.Getwd()
+	if err != nil {
+		m.appendLine("Could not read the current folder. Use /repo <path> to select a workspace folder.")
+		return nil
+	}
+	repositories := discoverGitRepositories(root)
+	if len(repositories) == 0 {
+		m.appendLine("No Git repositories found nearby. Use /repo <path> to select any workspace folder.")
+		return nil
+	}
+	if len(repositories) == 1 {
+		return m.selectRepository(repositories[0])
+	}
+	items := make([]tuiOverlayItem, 0, len(repositories))
+	for _, repository := range repositories {
+		label, err := filepath.Rel(root, repository)
+		if err != nil || strings.HasPrefix(label, "..") {
+			label = repository
+		}
+		items = append(items, tuiOverlayItem{label: label, value: repository})
+	}
+	m.openOverlay("repo", "Choose a Git repository", items)
+	return nil
+}
+
+func discoverGitRepositories(root string) []string {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	found := map[string]struct{}{}
+	visited := 0
+	var visit func(string, int)
+	visit = func(directory string, depth int) {
+		if visited >= 300 {
+			return
+		}
+		visited++
+		_, metadataErr := os.Stat(filepath.Join(directory, ".git"))
+		if directory == absolute || metadataErr == nil {
+			root, err := gitOutput(directory, "rev-parse", "--show-toplevel")
+			if err != nil {
+				return
+			}
+			root, err = filepath.Abs(strings.TrimSpace(root))
+			if err == nil {
+				found[filepath.Clean(root)] = struct{}{}
+			}
+			return
+		}
+		if depth >= 2 {
+			return
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			switch strings.ToLower(entry.Name()) {
+			case "appdata", "node_modules", "vendor", "windows", "program files", "program files (x86)":
+				continue
+			}
+			visit(filepath.Join(directory, entry.Name()), depth+1)
+		}
+	}
+	visit(absolute, 0)
+	repositories := make([]string, 0, len(found))
+	for repository := range found {
+		repositories = append(repositories, repository)
+	}
+	sort.Strings(repositories)
+	return repositories
+}
+
+func (m *tuiModel) selectRepository(repository string) tea.Cmd {
+	m.setup.repo = repository
+	m.startupLoading = true
+	m.startupInfo = tuiStartupInfo{}
+	m.lines = m.startupLines()
+	m.appendLine("Repository selected: " + repository)
+	return func() tea.Msg { return tuiStartupInfoMsg{repo: repository, info: inspectTUIStartupInfo(repository)} }
 }
 
 func (m *tuiModel) resolveConfirmation(confirmed bool) {
@@ -1082,7 +1175,7 @@ func (m *tuiModel) completeCommand(lineIndex, start, end int, lineRunes []rune) 
 	if !strings.HasPrefix(word, "/") {
 		return
 	}
-	commands := []string{"/help", "/repo ", "/model ", "/login ", "/logout ", "/session ", "/resume ", "/network ", "/start", "/diff", "/tree", "/steer ", "/followup ", "/abort", "/exit", "/skill:"}
+	commands := []string{"/help", "/repo ", "/model ", "/login", "/logout ", "/session ", "/resume ", "/network ", "/start", "/diff", "/tree", "/steer ", "/followup ", "/abort", "/exit", "/skill:"}
 	items := make([]tuiOverlayItem, 0)
 	for _, command := range commands {
 		if strings.HasPrefix(command, word) {
@@ -1129,10 +1222,10 @@ func (m *tuiModel) onAgentEvent(event agent.Event) {
 	case "model_text_delta":
 		if m.assistantLine < 0 {
 			m.assistantLine = len(m.lines)
-			m.lines = append(m.lines, m.assistantStyle.Render("Sigma")+"  ")
+			m.lines = append(m.lines, "\x00assistant-message:")
 		}
 		m.assistantText += safeTerminalText(event.Text)
-		m.lines[m.assistantLine] = m.assistantStyle.Render("Sigma") + "  " + m.assistantText
+		m.lines[m.assistantLine] = "\x00assistant-message:" + m.assistantText
 		m.refreshTranscript(false)
 	case "turn_start":
 		m.turnRunning = true
@@ -1141,18 +1234,18 @@ func (m *tuiModel) onAgentEvent(event agent.Event) {
 	case "turn_end":
 		m.turnRunning = false
 		if m.assistantText != "" && m.assistantLine >= 0 && m.assistantLine < len(m.lines) {
-			m.lines[m.assistantLine] = m.assistantStyle.Render("Sigma") + "  " + renderTUIMarkdown(m.assistantText, m.width-6)
+			m.lines[m.assistantLine] = "\x00assistant-message:" + m.assistantText
 			m.refreshTranscript(true)
 		}
 	case "tool_execution_start":
 		m.turnRunning = true
-		label := m.toolStyle.Render("▸ " + safeTerminalText(event.Tool))
+		label := "▸ " + safeTerminalText(event.Tool)
 		args := ""
 		if len(event.Args) > 0 {
 			args = toolArgsSummary(event.Args, max(24, m.width-18))
-			label += " " + m.mutedStyle.Render(args)
+			label += " " + args
 		}
-		m.appendLine(label)
+		m.appendCardMessage("tool", label)
 		if event.ToolCallID != "" {
 			m.toolOutputs[event.ToolCallID] = &tuiToolOutput{tool: event.Tool, args: args, status: "running", line: len(m.lines) - 1}
 			m.appendLine("\x00tool-output:" + event.ToolCallID)
@@ -1163,16 +1256,18 @@ func (m *tuiModel) onAgentEvent(event agent.Event) {
 			output.output = safeTerminalText(event.ResultOutput)
 			output.summary = safeTerminalText(event.ResultSummary)
 			label := fmt.Sprintf("✓ %s · %s", safeTerminalText(event.Tool), formatDuration(event.Duration))
-			style := m.toolStyle
 			if event.Error != "" {
 				label = fmt.Sprintf("✗ %s · %s", safeTerminalText(event.Tool), truncateText(safeTerminalText(event.Error), 120))
-				style = m.errorStyle
 			}
 			if output.args != "" {
 				label += "  " + output.args
 			}
 			if output.line >= 0 && output.line < len(m.lines) {
-				m.lines[output.line] = style.Render(label)
+				kind := "tool"
+				if event.Error != "" {
+					kind = "error"
+				}
+				m.lines[output.line] = "\x00" + kind + "-message:" + label
 			}
 			m.turnRunning = false
 			for _, pending := range m.toolOutputs {
@@ -1185,13 +1280,13 @@ func (m *tuiModel) onAgentEvent(event agent.Event) {
 		} else {
 			label := fmt.Sprintf("✓ %s · %s", safeTerminalText(event.Tool), formatDuration(event.Duration))
 			if event.Error != "" {
-				m.appendLine(m.errorStyle.Render("✗ " + safeTerminalText(event.Tool) + " · " + truncateText(safeTerminalText(event.Error), 120)))
+				m.appendCardMessage("error", "✗ "+safeTerminalText(event.Tool)+" · "+truncateText(safeTerminalText(event.Error), 120))
 			} else {
-				m.appendLine(m.mutedStyle.Render(label))
+				m.appendCardMessage("tool", label)
 			}
 		}
 		if event.ResultSummary != "" && event.ToolCallID == "" {
-			m.appendLine(m.mutedStyle.Render("  ↳ " + compactToolOutput(event.ResultSummary)))
+			m.appendCardMessage("tool", "↳ "+compactToolOutput(event.ResultSummary))
 		}
 	case "model_usage":
 		m.inputTokens += event.InputTokens
@@ -1209,13 +1304,19 @@ func (m *tuiModel) onAgentEvent(event agent.Event) {
 		}
 	case "model_error", "agent_error", "agent_aborted":
 		if event.Error != "" {
-			m.appendLine(m.errorStyle.Render("Sigma · " + safeTerminalText(event.Error)))
+			m.appendCardMessage("error", "Sigma · "+safeTerminalText(event.Error))
 		}
 	}
 }
 
 func (m *tuiModel) appendLine(line string) {
 	wasAtBottom := m.transcript.AtBottom()
+	if !strings.HasPrefix(line, "\x00") {
+		line = "\x00system-message:" + line
+	}
+	if len(m.lines) > 0 && m.lines[len(m.lines)-1] == line {
+		return
+	}
 	m.lines = append(m.lines, line)
 	if len(m.lines) > 600 {
 		m.lines = append([]string(nil), m.lines[len(m.lines)-600:]...)
@@ -1224,8 +1325,24 @@ func (m *tuiModel) appendLine(line string) {
 }
 
 func (m *tuiModel) appendUserMessage(text string) {
+	m.appendCardMessage("user", text)
+}
+
+func (m *tuiModel) appendAssistantMessage(text string) {
+	m.appendCardMessage("assistant", text)
+}
+
+func (m *tuiModel) appendError(text string) {
+	m.appendCardMessage("error", text)
+}
+
+func (m *tuiModel) appendCardMessage(kind, text string) {
 	wasAtBottom := m.transcript.AtBottom()
-	m.lines = append(m.lines, "\x00user-message:"+safeTerminalText(text))
+	line := "\x00" + kind + "-message:" + safeTerminalText(text)
+	if kind == "error" && len(m.lines) > 0 && m.lines[len(m.lines)-1] == line {
+		return
+	}
+	m.lines = append(m.lines, line)
 	if len(m.lines) > 600 {
 		m.lines = append([]string(nil), m.lines[len(m.lines)-600:]...)
 	}
@@ -1247,8 +1364,8 @@ func (m *tuiModel) View() tea.View {
 	if m.startupInfo.repoDirty {
 		repoState = "local edits present"
 	}
-	if m.startupInfo.repoError != "" {
-		repoState = "select a Git repo with /repo"
+	if !m.startupLoading && !m.startupInfo.repoIsGit {
+		repoState = "folder workspace · no Git diff"
 	}
 	phase := "ready"
 	if m.phase == "starting" {
@@ -1288,7 +1405,7 @@ func (m *tuiModel) View() tea.View {
 	b.WriteString(m.renderStatusBar())
 	v := tea.NewView(b.String())
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// Leave mouse input with the terminal so users can drag-select and copy text.
 	return v
 }
 
@@ -1345,11 +1462,7 @@ func (m *tuiModel) renderStatusBar() string {
 }
 
 func (m *tuiModel) inputFrameStyle() lipgloss.Style {
-	style := m.frameStyle
-	if m.turnRunning {
-		return style.BorderForeground(lipgloss.Color("11"))
-	}
-	return style
+	return m.frameStyle.BorderForeground(lipgloss.Color("#ff4d4d"))
 }
 
 func truncateTUIWidth(value string, width int) string {
@@ -1372,7 +1485,7 @@ func truncateTUIWidth(value string, width int) string {
 
 func (m *tuiModel) refreshTranscript(keepBottom bool) {
 	if m.transcript.Width() == 0 {
-		width := m.width - 6
+		width := m.width - 2
 		if width < 20 {
 			width = 80
 		}
@@ -1383,31 +1496,19 @@ func (m *tuiModel) refreshTranscript(keepBottom bool) {
 	}
 	lines := make([]string, 0, len(m.lines))
 	for _, line := range m.lines {
-		if strings.HasPrefix(line, "\x00user-message:") {
-			text := strings.TrimPrefix(line, "\x00user-message:")
-			if len(lines) > 0 {
-				lines = append(lines, "")
-			}
-			cardWidth := max(20, m.transcript.Width())
-			contentWidth := max(1, cardWidth-2)
-			content := strings.Split(renderTUIMarkdown(text, contentWidth), "\n")
-			for _, contentLine := range content {
-				padding := max(0, contentWidth-lipgloss.Width(contentLine))
-				cardLine := " " + contentLine + strings.Repeat(" ", padding) + " "
-				lines = append(lines, m.userMessageStyle.Width(cardWidth).Render(cardLine))
-			}
-			lines = append(lines, "")
+		if kind, text, ok := messageCard(line); ok {
+			lines = append(lines, m.renderMessageCard(kind, text)...)
 			continue
 		}
 		if strings.HasPrefix(line, "\x00tool-output:") {
 			id := strings.TrimPrefix(line, "\x00tool-output:")
 			output := m.toolOutputs[id]
 			if output == nil || (output.status == "running" && output.output == "") {
-				lines = append(lines, m.mutedStyle.Render("  … output pending"))
+				lines = append(lines, m.renderMessageCard("tool", "… output pending")...)
 				continue
 			}
 			if output.output == "" {
-				lines = append(lines, m.mutedStyle.Render("  [no output]"))
+				lines = append(lines, m.renderMessageCard("tool", "[no output]")...)
 				continue
 			}
 			if !m.expandOutputs {
@@ -1415,12 +1516,10 @@ func (m *tuiModel) refreshTranscript(keepBottom bool) {
 				if preview == "" {
 					preview = compactToolOutput(output.output)
 				}
-				lines = append(lines, m.mutedStyle.Render("  ↳ "+preview+" · Ctrl+O to expand"))
+				lines = append(lines, m.renderMessageCard("tool", "↳ "+preview+" · Ctrl+O to expand")...)
 				continue
 			}
-			for _, outputLine := range strings.Split(strings.TrimSpace(output.output), "\n") {
-				lines = append(lines, "  "+outputLine)
-			}
+			lines = append(lines, m.renderMessageCard("tool", strings.TrimSpace(output.output))...)
 			continue
 		}
 		lines = append(lines, line)
@@ -1438,6 +1537,53 @@ func (m *tuiModel) refreshTranscript(keepBottom bool) {
 	if wasAtBottom {
 		m.transcript.GotoBottom()
 	}
+}
+
+func messageCard(line string) (kind, text string, ok bool) {
+	for _, candidate := range []string{"startup", "user", "assistant", "tool", "error", "system"} {
+		prefix := "\x00" + candidate + "-message:"
+		if strings.HasPrefix(line, prefix) {
+			return candidate, strings.TrimPrefix(line, prefix), true
+		}
+	}
+	return "", "", false
+}
+
+func (m *tuiModel) renderMessageCard(kind, text string) []string {
+	cardWidth := max(20, m.transcript.Width())
+	contentWidth := max(1, cardWidth-4)
+	background, foreground, title := "#252b30", "#dce3e7", "Sigma · status"
+	var content string
+	switch kind {
+	case "startup":
+		background, foreground, title = "#273a46", "#d5e5ed", "Workspace"
+		content = safeTerminalText(text)
+	case "user":
+		background, foreground, title = "#213b49", "#e2f4fa", "You"
+		content = renderTUIMarkdown(text, contentWidth)
+	case "assistant":
+		background, foreground, title = "#302a45", "#f0eaff", "Sigma"
+		content = renderTUIMarkdown(text, contentWidth)
+	case "tool":
+		background, foreground, title = "#26372e", "#e0f1e5", "Tool"
+		content = safeTerminalText(text)
+	case "error":
+		background, foreground, title = "#492727", "#ffe7e7", "Sigma · error"
+		content = safeTerminalText(text)
+	default:
+		content = safeTerminalText(text)
+	}
+	style := lipgloss.NewStyle().Background(lipgloss.Color(background)).Foreground(lipgloss.Color(foreground))
+	rows := []string{style.Render(strings.Repeat(" ", cardWidth))}
+	for _, row := range []string{title, content} {
+		for _, contentLine := range strings.Split(row, "\n") {
+			contentLine = truncateTUIWidth(contentLine, contentWidth)
+			padding := max(0, contentWidth-lipgloss.Width(contentLine))
+			rows = append(rows, style.Render("  "+contentLine+strings.Repeat(" ", padding)+"  "))
+		}
+	}
+	rows = append(rows, style.Render(strings.Repeat(" ", cardWidth)))
+	return rows
 }
 
 func (m *tuiModel) sendEvent(event agent.Event) { m.onAgentEvent(event) }
@@ -1583,13 +1729,17 @@ func interactiveTUISession(ctx context.Context, session *agent.Session, workspac
 					bridge.notice("Continued from " + entryID + "; previous history remains available in /tree")
 				}
 			case line == "/diff":
-				diff, err := gitOutput(workspace, "diff", "--stat", startingCommit)
-				if err != nil {
-					bridge.notice(err.Error())
-				} else if strings.TrimSpace(diff) == "" {
-					bridge.notice("No changes yet")
+				if !sigmaagent.HasGitCommit(workspace) {
+					bridge.notice("Git diff is unavailable in this folder")
 				} else {
-					bridge.notice(strings.TrimSpace(diff))
+					diff, err := gitOutput(workspace, "diff", "--stat", startingCommit)
+					if err != nil {
+						bridge.notice(err.Error())
+					} else if strings.TrimSpace(diff) == "" {
+						bridge.notice("No changes yet")
+					} else {
+						bridge.notice(strings.TrimSpace(diff))
+					}
 				}
 			case line == "/model" || strings.HasPrefix(line, "/model "):
 				if active != nil {

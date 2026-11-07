@@ -37,7 +37,7 @@ func main() {
 	configPath := flag.String("config", "config.json", "JSON file with tunable runtime limits")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")
 	maxConcurrent := flag.Int("max-concurrent", 2, "maximum concurrent agent tasks when --serve is enabled")
-	repoArg := flag.String("repo", "", "Git repository to work on (defaults to the current directory in interactive setup)")
+	repoArg := flag.String("repo", "", "workspace folder to work in (defaults to the current directory in interactive setup)")
 	task := flag.String("task", "", "coding task text for the agent (not a file path), or an additional instruction when resuming")
 	interactive := flag.Bool("interactive", false, "start a persistent terminal conversation (default when no task or resume is given)")
 	tui := flag.Bool("tui", false, "start the integrated terminal UI for setup and Agent interaction")
@@ -241,11 +241,21 @@ func main() {
 }
 
 func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
-	repo, err := gitOutput(repoArg, "rev-parse", "--show-toplevel")
+	repo, err := filepath.Abs(repoArg)
 	if err != nil {
-		return fmt.Errorf("resolve Git repository: %w", err)
+		return fmt.Errorf("resolve workspace path: %w", err)
 	}
-	repo = strings.TrimSpace(repo)
+	if info, statErr := os.Stat(repo); statErr != nil || !info.IsDir() {
+		if statErr != nil {
+			return fmt.Errorf("resolve workspace folder: %w", statErr)
+		}
+		return errors.New("workspace path must be a directory")
+	}
+	gitRoot, gitErr := gitOutput(repo, "rev-parse", "--show-toplevel")
+	gitDiffAvailable := gitErr == nil && sigmaagent.HasGitCommit(repo)
+	if gitErr == nil {
+		repo = filepath.Clean(strings.TrimSpace(gitRoot))
+	}
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -301,29 +311,33 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	workspaceMode := "direct"
 	var runErr error
 	if newSession {
-		commit, err := gitOutput(repo, "rev-parse", "HEAD")
-		if err != nil {
-			return err
+		if gitDiffAvailable {
+			commit, commitErr := gitOutput(repo, "rev-parse", "HEAD")
+			if commitErr != nil {
+				return commitErr
+			}
+			startingCommit = strings.TrimSpace(commit)
 		}
-		startingCommit = strings.TrimSpace(commit)
 		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 			return err
 		}
-		metadata, _ := json.MarshalIndent(map[string]string{
+		metadata, _ := json.MarshalIndent(map[string]any{
 			"repo": repo, "starting_commit": startingCommit,
-			"workspace_mode": workspaceMode,
-			"model_provider": activeModelSelection.Provider, "model_id": activeModelSelection.Model,
+			"git_diff_available": gitDiffAvailable,
+			"workspace_mode":     workspaceMode,
+			"model_provider":     activeModelSelection.Provider, "model_id": activeModelSelection.Model,
 		}, "", "  ")
 		if err := os.WriteFile(filepath.Join(sessionDir, "metadata.json"), metadata, 0o600); err != nil {
 			return err
 		}
 	} else {
 		var metadata struct {
-			Repo           string `json:"repo"`
-			StartingCommit string `json:"starting_commit"`
-			WorkspaceMode  string `json:"workspace_mode"`
-			ModelProvider  string `json:"model_provider"`
-			ModelID        string `json:"model_id"`
+			Repo             string `json:"repo"`
+			StartingCommit   string `json:"starting_commit"`
+			GitDiffAvailable *bool  `json:"git_diff_available"`
+			WorkspaceMode    string `json:"workspace_mode"`
+			ModelProvider    string `json:"model_provider"`
+			ModelID          string `json:"model_id"`
 		}
 		data, err := os.ReadFile(filepath.Join(sessionDir, "metadata.json"))
 		if err != nil {
@@ -352,12 +366,19 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 			}
 		}
 		startingCommit = metadata.StartingCommit
+		if metadata.GitDiffAvailable != nil {
+			gitDiffAvailable = *metadata.GitDiffAvailable
+		} else {
+			gitDiffAvailable = startingCommit != ""
+		}
 		if _, err := os.Stat(workspace); err != nil {
 			return fmt.Errorf("session workspace is unavailable; start a new task or restore the workspace: %w", err)
 		}
-		worktreeRoot, err := gitOutput(workspace, "rev-parse", "--show-toplevel")
-		if err != nil || filepath.Clean(strings.TrimSpace(worktreeRoot)) != filepath.Clean(workspace) {
-			return errors.New("session workspace is not the original Git worktree")
+		if gitDiffAvailable {
+			worktreeRoot, gitErr := gitOutput(workspace, "rev-parse", "--show-toplevel")
+			if gitErr != nil || filepath.Clean(strings.TrimSpace(worktreeRoot)) != filepath.Clean(workspace) {
+				return errors.New("session workspace is not the original Git worktree")
+			}
 		}
 	}
 	memorySourceHash := ""
@@ -562,7 +583,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		systemPrompt = projectGuidance.SystemPromptWithMemorySearch(codingSystemPrompt)
 	}
 	if workspaceMode == "direct" {
-		systemPrompt += "\n\nYou are working directly in the user's selected Git checkout. File changes take effect in that checkout immediately. Preserve unrelated existing changes, inspect the diff before finishing, and never revert user changes unless the user asks."
+		systemPrompt += "\n\nYou are working directly in the user's selected folder. File changes take effect there immediately. Preserve unrelated existing files and changes. If this folder has Git with a commit, review the diff before finishing; otherwise explain that Git diff is unavailable. Never revert user changes unless the user asks."
 	}
 	systemPrompt += "\n\nCONTEXT COMPACTION: You may call compact_context by itself when earlier conversation or tool output has become long and a concise handoff can preserve the active task. It makes an additional model request and is lossy, so use it selectively; the recent turns and full session record are retained."
 	if newSession {
@@ -618,12 +639,27 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		result, runErr = session.Continue(ctx)
 	}
 	workflowHost.Dispatch(workflow.Event{Type: "session_end", SessionID: session.ID, Error: errorText(runErr)})
-	patch, diffErr := sigmaagent.WorkspaceDiff(workspace, startingCommit)
+	patch := ""
+	var diffErr error
+	if gitDiffAvailable {
+		patch, diffErr = sigmaagent.WorkspaceDiff(workspace, startingCommit)
+	}
+	if result.VerificationStatus == "no_changes" && strings.TrimSpace(patch) != "" {
+		// A resumed session can start this invocation with a candidate patch
+		// already present. The current invocation's turn history alone cannot
+		// establish that those changes were verified.
+		result.VerificationStatus = "incomplete"
+	}
 	if diffErr != nil && runErr == nil {
 		runErr = fmt.Errorf("collect patch: %w", diffErr)
 	}
-	if writeErr := os.WriteFile(filepath.Join(runDir, "result.patch"), []byte(patch), 0o600); writeErr != nil && runErr == nil {
-		runErr = writeErr
+	patchSaved := false
+	if writeErr := os.WriteFile(filepath.Join(runDir, "result.patch"), []byte(patch), 0o600); writeErr != nil {
+		if runErr == nil {
+			runErr = writeErr
+		}
+	} else {
+		patchSaved = true
 	}
 	transcript, _ := json.MarshalIndent(session.Messages(), "", "  ")
 	if writeErr := os.WriteFile(filepath.Join(runDir, "transcript.json"), transcript, 0o600); writeErr != nil && runErr == nil {
@@ -632,10 +668,14 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	memoryWrite := sigmaagent.MemoryWriteReport{Status: "disabled"}
 	if runtimeConfig.MemoryEnabled && runtimeConfig.MemoryAutoWrite {
 		switch {
+		case !gitDiffAvailable:
+			memoryWrite.Status = "skipped_non_git_workspace"
 		case interactive:
 			memoryWrite.Status = "skipped_interactive"
 		case runErr != nil:
 			memoryWrite.Status = "skipped_unsuccessful_run"
+		case result.VerificationStatus == "incomplete" || result.VerificationStatus == "test_failed":
+			memoryWrite.Status = "skipped_unverified_run"
 		default:
 			memoryWrite = sigmaagent.CaptureSuccessfulRunMemoryWithProfile(context.Background(), model, repo, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID, runID, task, patch, session.Messages())
 			event := agent.Event{At: time.Now().UTC(), Type: "memory_write_completed", Session: sessionID}
@@ -647,8 +687,12 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	}
 	metadata, _ := json.MarshalIndent(map[string]any{
 		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": "",
-		"workspace_mode":       workspaceMode,
-		"github_write_enabled": false, "allow_container_network": runtimeConfig.AllowContainerNetwork,
+		"verification_status":   result.VerificationStatus,
+		"git_diff_available":    gitDiffAvailable,
+		"candidate_patch_saved": patchSaved,
+		"final_diff_collected":  diffErr == nil,
+		"workspace_mode":        workspaceMode,
+		"github_write_enabled":  false, "allow_container_network": runtimeConfig.AllowContainerNetwork,
 		"command_filesystem_scope":        runtimeConfig.CommandFilesystemScope,
 		"github_mcp_enabled":              githubMCPEnabled,
 		"configured_mcp_servers_disabled": runtimeConfig.DisableConfiguredMCPServers,
@@ -664,6 +708,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		"memory_write":                    memoryWrite,
 		"turns":                           result.Turns, "tool_calls": result.ToolCalls, "input_tokens": result.InputTokens,
 		"output_tokens": result.OutputTokens, "cache_read_input_tokens": result.CacheReadInputTokens,
+		"cache_miss_input_tokens":     result.CacheMissInputTokens,
 		"cache_creation_input_tokens": result.CacheCreationInputTokens, "context_compactions": result.ContextCompactions,
 		"context_compaction_input_tokens":     result.ContextCompactionInputTokens,
 		"context_compaction_output_tokens":    result.ContextCompactionOutputTokens,
@@ -682,9 +727,13 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		completion := map[string]any{
 			"protocol_version": 1, "type": "run_completed", "status": "completed", "run_id": runID, "session_id": sessionID,
 			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"), "push_branch": "",
-			"turns": result.Turns, "tool_calls": result.ToolCalls,
+			"verification_status":   result.VerificationStatus,
+			"candidate_patch_saved": patchSaved,
+			"final_diff_collected":  diffErr == nil,
+			"turns":                 result.Turns, "tool_calls": result.ToolCalls,
 			"input_tokens": result.InputTokens, "output_tokens": result.OutputTokens,
 			"cache_read_input_tokens":          result.CacheReadInputTokens,
+			"cache_miss_input_tokens":          result.CacheMissInputTokens,
 			"cache_creation_input_tokens":      result.CacheCreationInputTokens,
 			"context_compactions":              result.ContextCompactions,
 			"context_compaction_input_tokens":  result.ContextCompactionInputTokens,
@@ -756,7 +805,7 @@ func parseModelCommand(value string, current agent.Model) (modelconfig.Selection
 		return modelconfig.Selection{}, "", err
 	}
 	if !hasKey {
-		return modelconfig.Selection{}, "", fmt.Errorf("no %s API key is configured; restart the interactive session and use /login %s", provider, provider)
+		return modelconfig.Selection{}, "", fmt.Errorf("no %s API key is configured; use /login to choose a credential", provider)
 	}
 	return modelconfig.Selection{Provider: provider, Model: strings.TrimSpace(modelID)}, "switch", nil
 }
@@ -973,13 +1022,17 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintf(os.Stderr, "Switched to %s/%s.\n", selection.Provider, selection.Model)
 				}
 			case line == "/diff":
-				diff, err := gitOutput(workspace, "diff", "--stat", startingCommit)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
-				} else if strings.TrimSpace(diff) == "" {
-					fmt.Fprintln(os.Stderr, "No changes yet.")
+				if !sigmaagent.HasGitCommit(workspace) {
+					fmt.Fprintln(os.Stderr, "Git diff is unavailable in this folder")
 				} else {
-					fmt.Fprint(os.Stdout, diff)
+					diff, err := gitOutput(workspace, "diff", "--stat", startingCommit)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, err)
+					} else if strings.TrimSpace(diff) == "" {
+						fmt.Fprintln(os.Stderr, "No changes yet.")
+					} else {
+						fmt.Fprint(os.Stdout, diff)
+					}
 				}
 			case strings.HasPrefix(line, "/steer "):
 				message := strings.TrimSpace(strings.TrimPrefix(line, "/steer "))
@@ -1025,6 +1078,7 @@ func addResult(total *agent.Result, current agent.Result) {
 	total.InputTokens += current.InputTokens
 	total.OutputTokens += current.OutputTokens
 	total.CacheReadInputTokens += current.CacheReadInputTokens
+	total.CacheMissInputTokens += current.CacheMissInputTokens
 	total.CacheCreationInputTokens += current.CacheCreationInputTokens
 	total.ContextCompactions += current.ContextCompactions
 	total.ContextCompactionInputTokens += current.ContextCompactionInputTokens

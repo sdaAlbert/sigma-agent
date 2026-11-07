@@ -76,6 +76,28 @@ func TestMatchingSkillNamesUsesRepositoryLanguageAndTaskName(t *testing.T) {
 	}
 }
 
+func TestMatchingSkillNamesDoesNotTreatShortNamesAsOrdinarySubstrings(t *testing.T) {
+	useIsolatedUserSkillDirectory(t)
+	root := t.TempDir()
+	writeFixture(t, filepath.Join(root, "setup.py"), "")
+	writeFixture(t, filepath.Join(root, ".agents", "skills", "python-issue-workflow", "SKILL.md"), "---\nname: python-issue-workflow\ndescription: Python issue workflow.\n---\nworkflow\n")
+	writeFixture(t, filepath.Join(root, ".agents", "skills", "pdf", "SKILL.md"), "---\nname: pdf\ndescription: Work with PDF documents.\n---\npdf workflow\n")
+
+	guidance, err := LoadProjectGuidance(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := guidance.MatchingSkillNames("Fix Sphinx PDF output produced by make latexpdf.")
+	if len(got) != 1 || got[0] != "python-issue-workflow" {
+		t.Fatalf("ordinary PDF wording matched Skills = %v, want [python-issue-workflow]", got)
+	}
+
+	got = guidance.MatchingSkillNames("Please load the pdf Skill before continuing.")
+	if len(got) != 2 || got[0] != "pdf" || got[1] != "python-issue-workflow" {
+		t.Fatalf("explicit short Skill reference matched = %v, want [pdf python-issue-workflow]", got)
+	}
+}
+
 func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 	useIsolatedUserSkillDirectory(t)
 	root := t.TempDir()

@@ -112,8 +112,8 @@ compaction. The HTTP service passes the same config path to each task worker.
 configured separately, because they are installed artifacts rather than
 tunable limits.
 
-- Packages are installed with `sigma-agent --install npm:<name>`, listed with
-  `sigma-agent --list-packages`, and recorded in a scope registry
+- Packages are installed with `sigma --install npm:<name>`, listed with
+  `sigma --list-packages`, and recorded in a scope registry
   (`~/.sigma-agent/packages.json` for the user scope,
   `<repo>/.sigma-agent/packages.json` for the project scope).
 - MCP servers are configured in `mcp.json`, using the `mcpServers` shape shared
@@ -135,7 +135,7 @@ tunable limits.
 A server that names a `package` starts with the package directory as its
 working directory, and `./`-prefixed arguments are resolved against the package
 root. Server tools are exposed as `mcp__<server>__<tool>` and pass through the
-configured tool policy. `sigma-agent --list-mcp` connects to every enabled
+configured tool policy. `sigma --list-mcp` connects to every enabled
 server and prints the tools it contributes.
 
 See [Packages and MCP servers](PACKAGES.md) for the package format, the

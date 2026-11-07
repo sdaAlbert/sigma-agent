@@ -63,25 +63,26 @@ This is a useful integration difference from Pi's default: Pi's security guide s
 
 ## Get started
 
-Requirements: Git, Docker Desktop, and an API key for a supported model provider. Installing from this checkout also requires Go 1.26+; after installation, start Sigma as a normal command without `go run`.
+Requirements: Git, Docker Desktop, and an API key for a supported model provider. Building from this checkout requires Go 1.26+; after building, start Sigma as `sigma` without `go run`.
 
-Install the command once from the `go-runtime` directory:
+After cloning the repository, build and install the command from the `go-runtime` directory:
 
 ```powershell
-go install ./cmd/sigma-agent
-sigma-agent --version
+$binDir = Join-Path (go env GOPATH) 'bin'
+go build -o (Join-Path $binDir 'sigma.exe') ./cmd/sigma-agent
+sigma --version
 ```
 
 Or build a Windows executable:
 
 ```powershell
-go build -o sigma-agent.exe ./cmd/sigma-agent
-.\sigma-agent.exe
+go build -o sigma.exe ./cmd/sigma-agent
+.\sigma.exe
 ```
 
-In the TUI setup screen, use `/login minimax` to save a model key, `/model list` to see supported providers and key status, `/model <provider>/<model-id>` to select a model, and `/repo <path>` to choose a clean local checkout. Use `/model save` to make the selection the default for new sessions, then type a task or run `/start`. Provider keys can also be supplied through environment variables for scripted use. The complete [user guide](docs/USAGE.md) covers setup and interactive commands; [configuration](docs/CONFIGURATION.md) documents providers, credentials, runtime limits, and Docker settings.
+In the TUI setup screen, use `/login` and choose MiniMax in the credential picker to save a model key, `/model list` to see supported providers and key status, `/model <provider>/<model-id>` to select a model, and `/repo <path>` to choose a clean local checkout. Use `/model save` to make the selection the default for new sessions, then type a task or run `/start`. Provider keys can also be supplied through environment variables for scripted use. The complete [user guide](docs/USAGE.md) covers setup and interactive commands; [configuration](docs/CONFIGURATION.md) documents providers, credentials, runtime limits, and Docker settings.
 
-After the one-time install, launch Sigma from any repository with `sigma-agent --tui`. If the current directory is not a Git repository, use `/repo <path>` in setup to select one.
+After the one-time build, launch Sigma from any folder with `sigma`. Git is optional; when the folder has a Git commit, Sigma also provides Git diff review. Without Git, files are still edited directly in that folder.
 
 Docker command containers block outbound network access by default. Use `/network on` when a session needs to download dependencies; see the configuration guide for details.
 
@@ -90,10 +91,10 @@ Docker command containers block outbound network access by default. Use `/networ
 ### Interactive coding session
 
 ```powershell
-sigma-agent --repo C:\work\target-repository --interactive
+sigma --repo C:\work\target-repository --interactive
 ```
 
-For the integrated setup and chat UI, run `sigma-agent --tui --repo C:\work\target-repository`. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. Press `Enter` to submit and `Shift+Enter` to add a line.
+For the integrated setup and chat UI, run `sigma --tui --repo C:\work\target-repository`. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. Press `Enter` to submit and `Shift+Enter` to add a line.
 
 Type a task in the TUI input and press `Enter`. Use `Shift+Enter` for a multiline prompt. While Sigma is working, submit text or `/steer <text>` to guide its next safe turn; `/followup <text>` queues a later request. `/diff` summarizes the patch, `/tree` opens session history so you can continue from an earlier point, `/abort` cancels the active turn, and `/exit` saves the session. The session ID is shown in the TUI; use `/resume <id>` at the next setup screen to continue. See the [user guide](docs/USAGE.md) for the full command reference.
 
@@ -112,13 +113,13 @@ Every new task edits the selected checkout directly, so changes appear in your c
 Run one task without entering the interactive REPL:
 
 ```powershell
-sigma-agent --repo C:\work\target-repository --task "Fix issue #123 and run the relevant tests"
+sigma --repo C:\work\target-repository --task "Fix issue #123 and run the relevant tests"
 ```
 
 Add `--json` to write versioned JSONL lifecycle events and a final result to stdout:
 
 ```powershell
-sigma-agent --repo C:\work\target-repository --task "Fix issue #123" --json
+sigma --repo C:\work\target-repository --task "Fix issue #123" --json
 ```
 
 The final JSONL record contains the session ID and artifact paths. A later process can continue that session with `--resume <session-id>`. This mode is one-shot; use the HTTP API below for bidirectional task control while the Agent is running.
@@ -128,7 +129,7 @@ The final JSONL record contains the session ID and artifact paths. A later proce
 Start the task service on loopback (default address `127.0.0.1:8080`):
 
 ```powershell
-sigma-agent --serve --max-concurrent 2
+sigma --serve --max-concurrent 2
 ```
 
 Submit a task from PowerShell:
@@ -179,16 +180,16 @@ to the model as `mcp__<server>__<tool>`.
 
 ```powershell
 # Install a package into the user scope (~/.sigma-agent/packages/)
-sigma-agent --install npm:pi-web-access
+sigma --install npm:pi-web-access
 
 # Install into one repository's project scope
-sigma-agent --repo . --local --install npm:pi-web-access
+sigma --repo . --local --install npm:pi-web-access
 
 # List the installed packages
-sigma-agent --list-packages
+sigma --list-packages
 
 # Connect to the configured MCP servers and list their tools
-sigma-agent --list-mcp
+sigma --list-mcp
 ```
 
 MCP servers are configured in `mcp.json`, using the `mcpServers` shape shared

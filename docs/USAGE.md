@@ -4,29 +4,32 @@ This guide covers Sigma's local interactive TUI: configuring a model, selecting 
 
 ## 1. Start Sigma
 
-From the `go-runtime` directory, install the command once:
+After cloning the repository, build and install the command from the `go-runtime` directory:
 
 ```powershell
-go install ./cmd/sigma-agent
-sigma-agent --version
+$binDir = Join-Path (go env GOPATH) 'bin'
+go build -o (Join-Path $binDir 'sigma.exe') ./cmd/sigma-agent
+sigma --version
 ```
 
 You can also build an executable once and run it from the same working directory:
 
 ```powershell
-go build -o sigma-agent.exe ./cmd/sigma-agent
-.\sigma-agent.exe
+go build -o sigma.exe ./cmd/sigma-agent
+.\sigma.exe
 ```
 
-The installed command starts the integrated setup screen and can be run from any directory. Sigma needs Git, Docker Desktop, and an API key for one supported model provider. Go 1.26+ is needed for installation from source, not each launch. With no `--repo` flag, the setup TUI starts in the current directory; use `/repo <path>` to select another repository. Run `go install ./cmd/sigma-agent` again from the checkout to update the executable. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
+The installed command starts the integrated setup screen and can be run from any directory. Sigma needs Git, Docker Desktop, and an API key for one supported model provider. Go 1.26+ is needed to build from source, not for each launch. With no `--repo` flag, the setup TUI starts in the current directory; use `/repo <path>` to select another repository. Rerun the build command from the checkout to update `sigma.exe`. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
 
 ## 2. Configure the model
 
 In the TUI setup screen, configure a provider key. For example:
 
 ```text
-/login minimax
+/login
 ```
+
+Choose MiniMax in the credential picker, then paste the key. You do not need to add the provider name to `/login`.
 
 Sigma masks the key while you type and saves it in the per-user configuration directory, outside the repository. On Windows the file is `%APPDATA%\sigma-agent\model-auth.json`; credentials in this file are plaintext, so protect your Windows account and do not copy the file into the repository. For scripts or managed environments, use the provider's environment variable instead.
 
@@ -58,9 +61,10 @@ useful when continuing a session after a provider quota interruption.
 
 ## 3. Select a repository and start a task
 
-Choose a local Git repository with `/repo` in the TUI. Existing staged, unstaged,
-and non-ignored untracked changes are allowed. By default the TUI works directly
-in this checkout, like Pi; Agent edits appear here immediately.
+Sigma starts in the current folder. Git is optional; when a Git worktree is
+available, Sigma can show a diff. Existing staged, unstaged, and non-ignored
+untracked changes are allowed. The TUI works directly in the selected folder,
+like Pi; Agent edits appear here immediately.
 
 ```text
 /repo C:\work\target-repository
@@ -72,14 +76,14 @@ Type a task in the input and press `Enter` to start, or use `Shift+Enter` to add
 Fix issue #123. Inspect the relevant code and repository instructions, implement the smallest appropriate fix, run the relevant tests, and review the complete diff. Do not commit or push.
 ```
 
-All new tasks use the selected Git repository as their workspace. Sigma's file
-tools edit it directly, and Docker mounts the same repository at `/workspace`
+All new tasks use the selected folder as their workspace. Sigma's file
+tools edit it directly, and Docker mounts the same folder at `/workspace`
 for commands and tests. Local model API calls run from the Sigma process.
 Uncommitted changes need no copying; they are already in the workspace.
 
 ## Integrated TUI
 
-Run `sigma-agent --tui` to configure and use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. The setup screen accepts `/repo`, `/model`, `/login`, `/logout`, `/session`, `/resume`, and `/network`. Type a task and press `Enter`, or use `/start` to open an empty session. In chat, `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/diff`, `/model`, `/steer`, `/followup`, `/abort`, and `/exit` are handled in the TUI. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel. You can also use `/login <provider>` directly.
+Run `sigma --tui` to configure and use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. The setup screen accepts `/repo`, `/model`, `/login`, `/logout`, `/session`, `/resume`, and `/network`. Type a task and press `Enter`, or use `/start` to open an empty session. In chat, `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/diff`, `/model`, `/steer`, `/followup`, `/abort`, and `/exit` are handled in the TUI. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
 
 TUI shortcuts: `Enter` submits, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and file paths (`@path` in prompts and paths after `/repo`), `Up`/`Down` browse prompt history at the start/end of the input, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
@@ -96,14 +100,14 @@ Use `/network off` to disable it again. With networking on, container commands a
 | Command | What it does |
 | --- | --- |
 | `/login` | Open a picker for GitHub or a model provider, then securely enter its credential. |
-| `/login <provider>` | Directly enter a model API key; input is hidden. Providers: `minimax`, `anthropic`, `openai`, `deepseek`, `openrouter`. |
+| `/login` | Open the credential picker for a model provider or GitHub, then securely enter its key. |
 | `/login github` | Save a GitHub token for GitHub MCP. |
 | `/model` or `/model list` | Show the selected model and provider/key status. |
 | `/model <provider>/<model-id>` | Select a model for this session. |
 | `/model save` | Save the selected provider/model as the default for new sessions. |
 | `/logout <provider>` | Remove a saved model key. Environment variables can still provide credentials. |
 | `/logout github` | Remove the saved GitHub token. |
-| `/repo <path>` | Select a local Git repository. |
+| `/repo <path>` | Select any existing local folder as the workspace. |
 | `/session <id>` | Set an explicit ID for a new session. |
 | `/resume <id>` | Resume a saved session. Use the same repository as the original session. |
 | `/network on\|off` | Allow or block internet access inside Docker command/test containers for this session. |
@@ -175,8 +179,8 @@ Sigma can install npm, git, and local packages that contribute Skills and MCP se
 
 ## 7. Other ways to run Sigma
 
-- **One task:** `sigma-agent --repo C:\work\target-repository --task "Fix issue #123"`
+- **One task:** `sigma --repo C:\work\target-repository --task "Fix issue #123"`
 - **JSONL process integration:** Add `--json` to emit versioned lifecycle events and a final result on stdout. This mode is one-shot; resume later with `--resume <session-id>`.
-- **HTTP/SSE task service:** Start with `sigma-agent --serve --max-concurrent 2`. Use the API examples and endpoint reference in [architecture](ARCHITECTURE.md).
+- **HTTP/SSE task service:** Start with `sigma --serve --max-concurrent 2`. Use the API examples and endpoint reference in [architecture](ARCHITECTURE.md).
 
 The HTTP service currently has no authentication and is intended for local use. It works directly in the selected repository and has no Sigma-specific Git publishing workflow. See [configuration](CONFIGURATION.md) for all runtime settings, environment variables, credential precedence, Docker environment preparation, Skills, and repository memory.

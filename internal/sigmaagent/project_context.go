@@ -191,8 +191,8 @@ func (g ProjectGuidance) SystemPrompt(base string) string {
 }
 
 // MatchingSkillNames returns Skills whose declared language matches the
-// repository, plus Skills explicitly named in the task. It keeps unrelated
-// Skill bodies out of the first-turn bootstrap.
+// repository, plus Skills explicitly named in the task. Short Skill names
+// require an explicit Skill reference to avoid matching ordinary prose.
 func (g ProjectGuidance) MatchingSkillNames(task string) []string {
 	if len(g.Skills) == 0 {
 		return nil
@@ -223,7 +223,7 @@ func (g ProjectGuidance) MatchingSkillNames(task string) []string {
 		// mention a language in examples (for example, a spreadsheet Skill may
 		// mention Python scripts) without being a language-specific workflow.
 		metadata := strings.ToLower(skill.Name)
-		match := strings.Contains(task, strings.ToLower(skill.Name))
+		match := taskExplicitlyNamesSkill(task, metadata)
 		for language := range languages {
 			if strings.Contains(metadata, language) || language == "javascript" && strings.Contains(metadata, "typescript") {
 				match = true
@@ -234,6 +234,19 @@ func (g ProjectGuidance) MatchingSkillNames(task string) []string {
 		}
 	}
 	return matched
+}
+
+func taskExplicitlyNamesSkill(task, skillName string) bool {
+	name := regexp.QuoteMeta(strings.ToLower(skillName))
+	if len(skillName) <= 3 {
+		// Very short names are common words and substrings (for example, "pdf"
+		// inside "latexpdf"). Require an explicit Skill reference instead of
+		// treating ordinary task prose as an invocation.
+		pattern := `(?i)(?:[$@]` + name + `\b|\b` + name + `\s+skill\b|\bskill(?:\s+named)?(?:\s+|:\s*|=\s*)` + name + `\b)`
+		return regexp.MustCompile(pattern).MatchString(task)
+	}
+	pattern := `(?i)(?:^|[^\pL\pN_-])` + name + `(?:$|[^\pL\pN_-])`
+	return regexp.MustCompile(pattern).MatchString(task)
 }
 
 // SystemPromptWithMemorySearch is kept for callers that want to make the

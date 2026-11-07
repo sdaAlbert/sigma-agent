@@ -135,7 +135,9 @@ func (m *BackgroundCommandManager) StartWithImage(ctx context.Context, image, co
 	}
 	id := hex.EncodeToString(idBytes[:])
 	container := "sigma-bg-" + id[:20]
-	network, err := createIsolatedTestNetwork(ctx, m.allowNetwork)
+	// Offline tasks use Docker's built-in none network; only online tasks need
+	// a per-task bridge network.
+	network, err := commandContainerNetwork(ctx, m.allowNetwork)
 	if err != nil {
 		return backgroundCommand{}, fmt.Errorf("create background task network: %w", err)
 	}
@@ -285,7 +287,7 @@ func (m *BackgroundCommandManager) refreshLocked(ctx context.Context, id string)
 			if saveErr := m.saveLocked(); saveErr != nil {
 				return backgroundCommand{}, saveErr
 			}
-			_ = exec.Command("docker", "network", "rm", job.Network).Run()
+			_ = removeIsolatedTestNetwork(job.Network)
 			return job, nil
 		}
 		return backgroundCommand{}, fmt.Errorf("inspect background task: %w: %s", err, strings.TrimSpace(string(output)))
@@ -347,7 +349,7 @@ func (m *BackgroundCommandManager) finishLocked(ctx context.Context, job backgro
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), backgroundDockerLimit)
 	defer cleanupCancel()
 	_ = exec.CommandContext(cleanupCtx, "docker", "rm", "--force", job.Container).Run()
-	_ = exec.CommandContext(cleanupCtx, "docker", "network", "rm", job.Network).Run()
+	_ = removeIsolatedTestNetwork(job.Network)
 	return job, nil
 }
 

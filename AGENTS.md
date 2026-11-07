@@ -49,3 +49,10 @@ benchmark instructions that already belong in the evaluation protocol.
 When a run config supplies an external memory file, it is the shared source of
 truth for that configured repository scope; Sigma copies it only into the
 isolated session workspace and searches it under the configured stable ID.
+
+## Benchmark archive layout
+
+- Put completed SWE-bench task and batch archives under `C:\dev\Agent\coding-agent-harness\archive\benchmarks\swebench-verified-mini\runs`. Keep the shared issue index at `C:\dev\Agent\coding-agent-harness\archive\benchmarks\swebench-verified-mini\evaluation-issues.md`.
+- Keep run-specific temporary logs and active evaluation staging under `go-runtime\var`; after the Agent run, official evaluation, and archive are complete, move the finished archive into the central `archive` tree.
+- Keep Sigma's resumable runtime state in `go-runtime\var\runs` and `go-runtime\var\sessions`; do not move incomplete session state as part of archive cleanup.
+- Historical `swb5\outputs` records are in `archive\legacy\swb5\outputs`; shared datasets and task checkouts remain under `swb5`.

@@ -169,15 +169,20 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 			}
 			repoPath, err := filepath.Abs(value)
 			if err == nil {
-				var top string
-				top, err = gitOutput(repoPath, "rev-parse", "--show-toplevel")
-				if err == nil {
-					options.repo = strings.TrimSpace(top)
-					fmt.Fprintf(os.Stderr, "Repository: %s\n", options.repo)
+				var info os.FileInfo
+				info, err = os.Stat(repoPath)
+				if err == nil && info.IsDir() {
+					if top, gitErr := gitOutput(repoPath, "rev-parse", "--show-toplevel"); gitErr == nil {
+						repoPath = strings.TrimSpace(top)
+					}
+					options.repo = repoPath
+					fmt.Fprintf(os.Stderr, "Workspace folder: %s\n", options.repo)
+				} else if err == nil {
+					err = errors.New("workspace path must be an existing folder")
 				}
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Could not select repository: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Could not select workspace folder: %v\n", err)
 			}
 		case "/session":
 			if !agent.ValidSessionID(value) {
@@ -228,7 +233,7 @@ func validateSetupOptions(options interactiveSetupOptions) error {
 			return fmt.Errorf("check model credentials: %w", err)
 		}
 		if !hasKey {
-			return fmt.Errorf("no API key configured for %s; use /login %s before starting", options.model.Provider, options.model.Provider)
+			return fmt.Errorf("no API key configured for %s; use /login to choose a credential before starting", options.model.Provider)
 		}
 	}
 	return nil
@@ -239,7 +244,7 @@ func printSetupHelp() {
   /login <provider>    Save an API key or GitHub token (input is hidden)
   /model [provider/id] Show or select the model; /model save sets the default
   /logout <provider>   Remove a saved model key or GitHub token
-  /repo <path>          Select a local Git repository
+  /repo <path>          Select any local workspace folder
   /session <id>         Name a new saved session
   /resume <id>          Resume a saved session
   /network on|off       Allow/block container internet access (on by default)

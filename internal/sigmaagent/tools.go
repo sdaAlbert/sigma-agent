@@ -25,6 +25,8 @@ import (
 const maxFileBytes = 1 << 20
 const defaultMaxMemoryQueryBytes = 8 * 1024
 const maxWholeFileReplacementBytes = 32 * 1024
+const suspiciousFileShrinkMinLines = 100
+const suspiciousFileShrinkFraction = 2
 
 var sourceExtensions = map[string]bool{
 	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
@@ -203,17 +205,17 @@ func validateCommandFilesystemScope(command, scope string) error {
 		return nil
 	}
 	if commandParentTraversalPattern.MatchString(command) {
-		return errors.New("command filesystem scope is workspace-only; parent-directory traversal is not allowed")
+		return errors.New("command filesystem scope is workspace-only; use a path relative to the task repo and remove '..' traversal")
 	}
 	if commandHomePathPattern.MatchString(command) {
-		return errors.New("command filesystem scope is workspace-only; home or environment-based paths are not allowed")
+		return errors.New("command filesystem scope is workspace-only; use a path relative to /workspace instead of a host home or environment path")
 	}
 	for _, match := range commandAbsolutePathPattern.FindAllStringSubmatch(command, -1) {
 		path := match[1]
 		if path == "/workspace" || strings.HasPrefix(path, "/workspace/") || path == "/dev/null" || path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
 			continue
 		}
-		return fmt.Errorf("command filesystem scope is workspace-only; path %s is outside /workspace", path)
+		return fmt.Errorf("path %s is outside /workspace; the task repository is mounted at /workspace, so use a repository-relative path and avoid host or interpreter paths", path)
 	}
 	return nil
 }
@@ -345,7 +347,7 @@ func (w workspace) listFilesTool() agent.Tool {
 }
 
 func (w workspace) searchCodeTool() agent.Tool {
-	return tool("search_code", "Search source files for a literal, case-insensitive query. Returns file paths, line numbers, and snippets.", `{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":200},"path":{"type":"string"}},"required":["query"],"additionalProperties":false}`, "parallel", func(ctx context.Context, raw json.RawMessage) (string, error) {
+	return tool("search_code", "Search source files for a literal, case-insensitive query. Returns file paths, line numbers, and snippets. path must be a workspace-relative directory; use read_file for one file.", `{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":200},"path":{"type":"string","description":"Workspace-relative directory; omit to search the task repository"}},"required":["query"],"additionalProperties":false}`, "parallel", func(ctx context.Context, raw json.RawMessage) (string, error) {
 		var args struct {
 			Query string `json:"query"`
 			Path  string `json:"path"`
@@ -424,7 +426,7 @@ func (w workspace) readFileTool() agent.Tool {
 			return "", err
 		}
 		if !supported(absolute) {
-			return "", errors.New("file type is not available to agent tools")
+			return "", errors.New("this file type is not supported by text file tools; use a supported source or text file, or inspect changes with git status/diff")
 		}
 		data, err := readBounded(absolute, maxFileBytes)
 		if err != nil {
@@ -469,7 +471,7 @@ func (w workspace) applyPatchTool() agent.Tool {
 			return "", err
 		}
 		if !supported(absolute) {
-			return "", errors.New("file type is not available to agent tools")
+			return "", errors.New("this file type is not supported by text file tools; use a supported source or text file, or inspect changes with git status/diff")
 		}
 		release, err := w.lockFileMutation(ctx, absolute)
 		if err != nil {
@@ -484,6 +486,9 @@ func (w workspace) applyPatchTool() agent.Tool {
 			return "", fmt.Errorf("apply_patch replaces the whole file and is limited to existing files no larger than %d bytes; use edit_file for a localized change", maxWholeFileReplacementBytes)
 		}
 		if err := w.verifyReadVersion(args.Path, current); err != nil {
+			return "", err
+		}
+		if err := rejectSuspiciousFileShrink(args.Path, current, []byte(args.Content)); err != nil {
 			return "", err
 		}
 		temporary := absolute + ".sigma-agent.tmp"
@@ -532,7 +537,7 @@ func (w workspace) createFileTool() agent.Tool {
 			return "", err
 		}
 		if !supported(absolute) {
-			return "", errors.New("file type is not available to agent tools")
+			return "", errors.New("this file type is not supported by text file tools; use a supported source or text file, or inspect changes with git status/diff")
 		}
 		release, err := w.lockFileMutation(ctx, absolute)
 		if err != nil {
@@ -580,7 +585,7 @@ func (w workspace) editFileTool() agent.Tool {
 			return "", err
 		}
 		if !supported(absolute) {
-			return "", errors.New("file type is not available to agent tools")
+			return "", errors.New("this file type is not supported by text file tools; use a supported source or text file, or inspect changes with git status/diff")
 		}
 		release, err := w.lockFileMutation(ctx, absolute)
 		if err != nil {
@@ -600,6 +605,9 @@ func (w workspace) editFileTool() agent.Tool {
 		updatedContent := strings.Replace(string(current), args.OldText, args.NewText, 1)
 		if len(updatedContent) > maxFileBytes {
 			return "", errors.New("updated file exceeds 1 MiB")
+		}
+		if err := rejectSuspiciousFileShrink(args.Path, current, []byte(updatedContent)); err != nil {
+			return "", err
 		}
 		temporary := absolute + ".sigma-agent.tmp"
 		file, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -737,7 +745,9 @@ func (w workspace) runCommandTool(image string) agent.Tool {
 		}
 		runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
-		networkName, err := createIsolatedTestNetwork(runCtx, w.allowNetwork)
+		// Offline mode uses Docker's built-in none network, which allocates no
+		// bridge subnet. Online commands retain a per-command isolated bridge.
+		networkName, err := commandContainerNetwork(runCtx, w.allowNetwork)
 		if err != nil {
 			return "", fmt.Errorf("create isolated Docker network: %w", err)
 		}
@@ -1028,7 +1038,17 @@ func createIsolatedTestNetwork(ctx context.Context, allowNetwork ...bool) (strin
 	return name, nil
 }
 
+func commandContainerNetwork(ctx context.Context, allowNetwork bool) (string, error) {
+	if !allowNetwork {
+		return "none", nil
+	}
+	return createIsolatedTestNetwork(ctx, true)
+}
+
 func removeIsolatedTestNetwork(name string) error {
+	if name == "" || name == "none" {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "docker", "network", "rm", name)
@@ -1053,6 +1073,9 @@ func (w workspace) gitDiffTool() agent.Tool {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+		if !HasGitCommit(w.root) {
+			return "This folder isn't a Git repository. Files are edited in place; Git diff is unavailable here.", nil
+		}
 		output, err := WorkspaceDiff(w.root, w.diffBase)
 		if err != nil {
 			return output, err
@@ -1074,12 +1097,12 @@ func (w workspace) resolve(relative string, directory bool) (string, error) {
 	}
 	relative = filepath.Clean(filepath.FromSlash(relative))
 	if filepath.IsAbs(relative) || relative == "." && !directory || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("path must stay inside the workspace")
+		return "", errors.New("use a workspace-relative path inside the task repository; absolute paths and parent-directory traversal are unavailable")
 	}
 	absolute := filepath.Join(w.root, relative)
 	contained, err := filepath.Rel(w.root, absolute)
 	if err != nil || contained == ".." || strings.HasPrefix(contained, ".."+string(filepath.Separator)) {
-		return "", errors.New("path must stay inside the workspace")
+		return "", errors.New("use a workspace-relative path inside the task repository; absolute paths and parent-directory traversal are unavailable")
 	}
 	current := w.root
 	parts := strings.Split(contained, string(filepath.Separator))
@@ -1107,10 +1130,10 @@ func (w workspace) resolve(relative string, directory bool) (string, error) {
 		return "", err
 	}
 	if directory && !info.IsDir() {
-		return "", errors.New("path is not a directory")
+		return "", errors.New("this operation expects a directory; for one file, use read_file or pass the file's parent directory")
 	}
 	if !directory && !info.Mode().IsRegular() {
-		return "", errors.New("path is not a regular file")
+		return "", errors.New("this operation expects a regular text file; use a file path rather than a directory")
 	}
 	return absolute, nil
 }
@@ -1121,12 +1144,12 @@ func (w workspace) resolveNewFile(relative string) (string, error) {
 	}
 	clean := filepath.Clean(filepath.FromSlash(relative))
 	if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", errors.New("path must stay inside the workspace")
+		return "", errors.New("use a workspace-relative path inside the task repository; absolute paths and parent-directory traversal are unavailable")
 	}
 	absolute := filepath.Join(w.root, clean)
 	contained, err := filepath.Rel(w.root, absolute)
 	if err != nil || contained == ".." || strings.HasPrefix(contained, ".."+string(filepath.Separator)) {
-		return "", errors.New("path must stay inside the workspace")
+		return "", errors.New("use a workspace-relative path inside the task repository; absolute paths and parent-directory traversal are unavailable")
 	}
 	parts := strings.Split(contained, string(filepath.Separator))
 	current := w.root
@@ -1156,7 +1179,7 @@ func (w workspace) resolveNewFile(relative string) (string, error) {
 			return "", errors.New("file already exists; use edit_file or apply_patch to modify it")
 		}
 		if !info.IsDir() {
-			return "", errors.New("parent path is not a directory")
+			return "", errors.New("a parent component is a file, not a directory; correct the path or use the existing file directly")
 		}
 	}
 	return "", errors.New("invalid new file path")
@@ -1175,6 +1198,29 @@ func (w workspace) verifyReadVersion(path string, current []byte) error {
 		return fileChangedSinceReadError(path, current)
 	}
 	return nil
+}
+
+// rejectSuspiciousFileShrink catches accidental large-source truncations in a
+// single edit. Smaller localized edits remain available, including intentional
+// removal of a large block when expressed as reviewable changes.
+func rejectSuspiciousFileShrink(path string, current, updated []byte) error {
+	currentLines := sourceLineCount(current)
+	updatedLines := sourceLineCount(updated)
+	removedLines := currentLines - updatedLines
+	if currentLines >= suspiciousFileShrinkMinLines &&
+		removedLines >= suspiciousFileShrinkMinLines &&
+		updatedLines*suspiciousFileShrinkFraction < currentLines {
+		return fmt.Errorf("edit to %s would shrink the file from %d lines to %d lines; this large one-shot reduction was blocked to protect the existing source. Re-read the affected region and make a localized edit, then inspect git_diff and run the focused test", filepath.ToSlash(path), currentLines, updatedLines)
+	}
+	return nil
+}
+
+func sourceLineCount(content []byte) int {
+	if len(content) == 0 {
+		return 0
+	}
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	return strings.Count(normalized, "\n") + 1
 }
 
 func fileChangedSinceReadError(path string, current []byte) error {

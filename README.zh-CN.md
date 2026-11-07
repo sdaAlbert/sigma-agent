@@ -63,30 +63,31 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 
 ## 开始使用
 
-需要 Git、Docker Desktop，以及一个受支持模型提供商的 API Key。从当前源码安装还需要 Go 1.26+；安装后可直接运行 `sigma-agent`，不必每次用 `go run`。
+需要 Git、Docker Desktop，以及一个受支持模型提供商的 API Key。从当前源码构建需要 Go 1.26+；构建后直接运行 `sigma`，不必每次用 `go run`。
 
-在 `go-runtime` 目录安装一次命令：
+从 GitHub 克隆仓库后，在 `go-runtime` 目录构建并安装命令：
 
 ```powershell
-go install ./cmd/sigma-agent
-sigma-agent --version
+$binDir = Join-Path (go env GOPATH) 'bin'
+go build -o (Join-Path $binDir 'sigma.exe') ./cmd/sigma-agent
+sigma --version
 ```
 
 或构建 Windows 可执行文件：
 
 ```powershell
-go build -o sigma-agent.exe ./cmd/sigma-agent
-.\sigma-agent.exe
+go build -o sigma.exe ./cmd/sigma-agent
+.\sigma.exe
 ```
 
 然后从任意 Git 仓库启动：
 
 ```powershell
 cd C:\work\target-repository
-sigma-agent --tui
+sigma
 ```
 
-不传 `--repo` 时，TUI 从当前目录开始；使用 `/repo <path>` 可切换到其他仓库。更新源码后再次运行 `go install ./cmd/sigma-agent` 即可更新命令。进入 TUI 设置界面后，输入 `/login` 并按 Enter，从选择器中选提供商，再粘贴 Key 并按 Enter 保存；输入字符会隐藏，Esc 可取消。也可以直接使用 `/login minimax`。使用 `/model list` 查看支持的提供商和 Key 配置状态，使用 `/model <provider>/<model-id>` 选择模型。使用 `/model save` 将当前模型设为新会话默认值，然后直接输入任务或运行 `/start`。脚本模式也可以通过环境变量提供模型 Key。完整命令说明见[使用指南](docs/USAGE.md)；提供商、凭据、运行时限制和 Docker 设置见[配置说明](docs/CONFIGURATION.md)。
+不传 `--repo` 时，TUI 从当前目录开始；使用 `/repo <path>` 可切换到其他仓库。更新源码后再次执行上面的 `go build` 命令即可更新 `sigma.exe`。进入 TUI 设置界面后，输入 `/login` 并按 Enter，从选择器中选提供商，再粘贴 Key 并按 Enter 保存；输入字符会隐藏，Esc 可取消。使用 `/model list` 查看支持的提供商和 Key 配置状态，使用 `/model <provider>/<model-id>` 选择模型。使用 `/model save` 将当前模型设为新会话默认值，然后直接输入任务或运行 `/start`。脚本模式也可以通过环境变量提供模型 Key。完整命令说明见[使用指南](docs/USAGE.md)；提供商、凭据、运行时限制和 Docker 设置见[配置说明](docs/CONFIGURATION.md)。
 
 Docker 命令容器默认不能访问外网。需要下载项目依赖时，用 `/network on` 为当前会话启用网络；详情见配置说明。
 
@@ -95,10 +96,10 @@ Docker 命令容器默认不能访问外网。需要下载项目依赖时，用 
 ### 交互式 Coding Session
 
 ```powershell
-sigma-agent --repo C:\work\target-repository --interactive
+sigma --repo C:\work\target-repository --interactive
 ```
 
-要在同一个 TUI 中完成 setup 和对话，运行 `sigma-agent --tui --repo C:\work\target-repository`。Sigma 会切换到全屏 TUI，退出时恢复之前的终端画面。按 `Enter` 提交，按 `Shift+Enter` 换行。
+要在同一个 TUI 中完成 setup 和对话，运行 `sigma --tui --repo C:\work\target-repository`。Sigma 会切换到全屏 TUI，退出时恢复之前的终端画面。按 `Enter` 提交，按 `Shift+Enter` 换行。
 
 在 TUI 输入框中输入任务并按 `Enter` 提交，按 `Shift+Enter` 输入多行提示。Sigma 运行时，可以继续输入普通文本或使用 `/steer <text>` 在下一个安全轮次边界加入指令；`/followup <text>` 用于排队后续任务。`/diff` 查看补丁摘要，`/tree` 打开会话历史并从较早节点继续，`/abort` 取消当前轮次，`/exit` 保存并退出。session ID 会显示在 TUI 中；下次在 setup 界面用 `/resume <id>` 恢复。完整命令列表见[使用指南](docs/USAGE.md)。
 
@@ -117,13 +118,13 @@ sigma-agent --repo C:\work\target-repository --interactive
 无需进入交互 REPL，直接运行一个任务：
 
 ```powershell
-sigma-agent --repo C:\work\target-repository --task "修复 issue #123 并运行相关测试"
+sigma --repo C:\work\target-repository --task "修复 issue #123 并运行相关测试"
 ```
 
 添加 `--json` 后，Sigma 会向标准输出写入带版本号的 JSONL 生命周期事件和最终结果：
 
 ```powershell
-sigma-agent --repo C:\work\target-repository --task "修复 issue #123" --json
+sigma --repo C:\work\target-repository --task "修复 issue #123" --json
 ```
 
 最终 JSONL 记录包含 session ID 和产物路径，之后可通过 `--resume <session-id>` 恢复。该模式是单次运行；如果要在任务运行时双向控制，请使用下方 HTTP API。
@@ -133,7 +134,7 @@ sigma-agent --repo C:\work\target-repository --task "修复 issue #123" --json
 在本机 loopback 地址启动服务（默认 `127.0.0.1:8080`）：
 
 ```powershell
-sigma-agent --serve --max-concurrent 2
+sigma --serve --max-concurrent 2
 ```
 
 使用 PowerShell 提交任务：
@@ -182,16 +183,16 @@ Sigma Agent 可以安装包、连接 MCP 服务器。包贡献 Agent Skills，MC
 
 ```powershell
 # 安装包到用户级作用域（~/.sigma-agent/packages/）
-sigma-agent --install npm:pi-web-access
+sigma --install npm:pi-web-access
 
 # 安装到指定仓库的项目级作用域
-sigma-agent --repo . --local --install npm:pi-web-access
+sigma --repo . --local --install npm:pi-web-access
 
 # 列出已安装的包
-sigma-agent --list-packages
+sigma --list-packages
 
 # 连接已配置的 MCP 服务器并列出其工具
-sigma-agent --list-mcp
+sigma --list-mcp
 ```
 
 MCP 服务器在 `mcp.json` 中配置，使用其他 MCP 客户端通用的 `mcpServers` 结构，现成配置可以直接复用。服务器可以从已安装的包启动：

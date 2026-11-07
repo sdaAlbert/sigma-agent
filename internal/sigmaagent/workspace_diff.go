@@ -3,10 +3,13 @@ package sigmaagent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +35,9 @@ func stageTaskChanges(ctx context.Context, root string) error {
 // WorkspaceDiff returns task changes, including new non-ignored files, while
 // omitting Sigma-managed repository memory from candidate patches.
 func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
+	if !HasGitCommit(root) {
+		return workspaceFingerprint(root)
+	}
 	base := "HEAD"
 	if len(baseCommit) > 0 && strings.TrimSpace(baseCommit[0]) != "" {
 		base = baseCommit[0]
@@ -92,6 +98,79 @@ func WorkspaceDiff(root string, baseCommit ...string) (string, error) {
 		return "", fmt.Errorf("prepare untracked files for diff: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return runWorkspaceDiff(root, gitIndexEnv, base)
+}
+
+// IsGitRepository reports whether root is inside a Git worktree.
+func IsGitRepository(root string) bool {
+	command := exec.Command("git", "rev-parse", "--show-toplevel")
+	command.Dir = root
+	return command.Run() == nil
+}
+
+// HasGitCommit reports whether root is inside a Git worktree with a HEAD commit.
+func HasGitCommit(root string) bool {
+	command := exec.Command("git", "rev-parse", "--verify", "HEAD")
+	command.Dir = root
+	return command.Run() == nil
+}
+
+func workspaceFingerprint(root string) (string, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	visited := 0
+	err = filepath.WalkDir(absolute, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == absolute {
+			return nil
+		}
+		relative, err := filepath.Rel(absolute, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if entry.IsDir() {
+			name := strings.ToLower(entry.Name())
+			if ignoredDirs[name] || relative == "var/runs" || relative == "var/sessions" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if sensitiveName(entry.Name()) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		visited++
+		if visited > 50000 {
+			return fmt.Errorf("workspace snapshot exceeds the 50000-file limit")
+		}
+		_, _ = hash.Write([]byte(relative))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(strconv.FormatInt(info.ModTime().UnixNano(), 10)))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(strconv.FormatUint(uint64(info.Mode()), 10)))
+		_, _ = hash.Write([]byte{0})
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("snapshot workspace: %w", err)
+	}
+	return "workspace-snapshot:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func runWorkspaceDiff(root, gitIndexEnv, base string) (string, error) {

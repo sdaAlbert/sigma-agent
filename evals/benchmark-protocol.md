@@ -24,7 +24,7 @@ go run ./cmd/sigma-agent --repo $repoPath --task $issueTask --github-mcp=false
 - **Human-guided:** add a human-authored hint or acceptance criteria, record the exact extra information, and still pass `--github-mcp=false` so the Agent cannot fetch the gold PR itself.
 - **Reference reproduction:** deliberately provide the target PR diff. Label this separately; it checks whether Sigma Agent can apply and validate a known solution, not whether it can discover one.
 
-Use a clean worktree and the same model, runtime limits, repository test image, and evaluator for comparisons. Save the prompt, configuration, transcript, patch, evaluator report, and run metadata for every attempt, including failures.
+Use a clean worktree and the same model, runtime executable (record its SHA-256), runtime limits, repository test image, and evaluator for comparisons. For a Skill-only comparison, change only the Skill snapshot; if the executable, turn/tool caps, or other run settings change, record it as a separate condition and do not attribute the score to the Skill change alone. Save the prompt, configuration, transcript, patch, evaluator report, and run metadata for every attempt, including failures.
 
 ## Shared instructions and memory across task checkouts
 
@@ -47,6 +47,53 @@ profile. If `memory_auto_write` is enabled, successful runs append durable
 facts to the external source and refresh its index; preserve each pre-run hash
 so the memory state used by each task can be reconstructed.
 
+### Python and Sphinx Skill staging
+
+The Python and Sphinx workflows live in this Sigma project at
+`.agents/skills/python-issue-workflow/SKILL.md` and
+`.agents/skills/python-sphinx-issue-workflow/SKILL.md`, not in the user's
+shared `~/.agents/skills` directory. Sigma discovers project Skills from the
+active task checkout, so stage the relevant file into that checkout under the
+same `.agents/skills/<name>/SKILL.md` path. Add the staged Skill directory to
+that checkout's local `.git/info/exclude` so it is available to Sigma but
+cannot enter the candidate patch. Verify the Skill is listed and loaded in the
+transcript before code exploration; record its path and SHA-256 in the batch
+manifest. Do not modify archived checkouts to add a Skill retroactively.
+
+The runtime currently reads at most 12 KiB (12,288 bytes) from one
+`SKILL.md`. Keep staged Skill files below this limit with margin. After staging,
+verify the exact file size and confirm `read_skill` returns the Skill body;
+`unknown Agent Skill` can mean discovery skipped an oversized file, even when
+the path exists. Do not spend model turns retrying a Skill that the runtime did
+not discover; fix/split the Skill, create a fresh checkout, and record the
+attempt as invalid/incomplete.
+
+Before `--index-memory`, verify the configured Qdrant endpoint is healthy. If
+the local endpoint refuses connections, inspect `docker ps -a` and restart the
+existing task-independent Qdrant container with its existing persistent volume;
+check `/readyz`, then retry indexing and save the successful entry count. Keep
+the shared container available while subsequent tasks use Memory.
+
+### Skill auto-match false positives
+
+Sphinx issue #10435 exposed an earlier false positive: short Skill names were
+matched as substrings, so `pdf` matched “pdf output” and `latexpdf` even though
+the task only changed generated LaTeX. The runtime matcher now requires an
+explicit Skill reference for short names and token boundaries for longer names.
+Keep the focused matcher regression test. In a scored run, record the required
+Skill name and trigger phrase, then check that the Skill's declared purpose
+fits the task. Do not disable Skills or weaken the gate to bypass a mismatch.
+If an irrelevant Skill requirement blocks a run, archive it as
+`invalid/incomplete`, preserve the environment, and fix routing as a separate
+runtime change. Keep failed attempts and continuations separate and report
+combined resource use.
+
+When validating generated LaTeX, treat `%` as syntax: it comments out the rest
+of its line, so newline placement around inline content and closing delimiters
+can change the rendered result. Inspect the generated `.tex` context around
+both boundaries; do not relax an exact-output assertion until an alternative
+is shown to preserve the same TeX behavior.
+
 ## Preflight and serial task execution
 
 Before starting a model session, run `evals/preflight-swebench-task.ps1` with
@@ -63,14 +110,16 @@ Example for the retained `django__django-11880` task:
 
 ```powershell
 .\evals\preflight-swebench-task.ps1 `
-  -RepoPath C:\dev\Agent\swb5\django__django-11880 `
+  -RepoPath C:\dev\Agent\coding-agent-harness\swb5\django__django-11880 `
   -ConfigPath evals\configs\full-sigma-5-django-11880-shared-profile.json `
   -EvaluatorImage swebench/sweb.eval.x86_64.django_1776_django-11880:latest `
   -ExpectedPython 3.6.13
 ```
 
-Run only one Agent/evaluator task at a time on this workstation. Do not start
-another task's containers or cleanup while one task is active. After its patch,
+Run only one Agent/evaluator task at a time on this workstation. Before each
+launch, inspect the active benchmark processes and their current run logs; do
+not assume a task is idle because its batch is from an earlier date. Do not
+start another task's containers or cleanup while one task is active. After its patch,
 evaluator output, and run manifest are archived, clean only resources unique
 to that task, then preflight the next one. Reuse a local image only when its
 repository/instance tag and digest match the task manifest.
@@ -78,7 +127,17 @@ repository/instance tag and digest match the task manifest.
 Benchmark configs set `max_repeated_failed_commands: 3`. Sigma pauses after
 three identical failed test/command calls without a workspace change; the
 session, patch, logs, worktree, and images remain available for diagnosis or
-resume. A successful source write resets the guard. The full batch starts
+resume. If `run_command` repeatedly reports Docker network creation failures such as
+`all predefined address pools have been fully subnetted`, stop retrying the
+same command. Check `docker network ls` and inspect candidate networks for
+attached containers, then confirm no other Agent/evaluator task is active. Do
+not prune Docker networks or remove names whose owning task is unknown; this
+host may have shared or active task networks. Resume only after capacity is
+recovered through a network known to belong to an archived task, or mark the
+attempt invalid/incomplete and preserve its environment. Record the error and
+recovery in the shared and batch issue logs.
+
+A successful source write resets the guard. The full batch starts
 proactive compaction at 24,000 estimated tokens, permits up to 256 estimated
 tokens of soft-threshold overage, and prioritizes the original request, recent
 source writes, test outcomes, diff reviews, and failures in its extractive
@@ -86,6 +145,14 @@ summary. If the newest complete turn still cannot fit the soft budget, Sigma
 shrinks tool output and retains that turn up to the 64,000 hard context ceiling.
 A small soft-threshold overage is not a run failure; stop only when the newest
 complete turn cannot fit the hard ceiling.
+
+When resuming a saved session whose last message is a tool result, prefer
+`--resume` without `--task`. In the current OpenAI-compatible serializer, an
+additional user prompt can be coalesced with that tool-result message and sent
+before the tool reply, which providers reject as an invalid tool-call sequence.
+If the continuation needs new guidance, preserve the failed attempt and use a
+separately validated recovery path; do not repeatedly retry the same malformed
+transcript. Record the condition and workaround in the batch issue log.
 
 ## Keep evaluator inputs fresh
 
@@ -100,6 +167,16 @@ and create the final scoring patch before launching the evaluator. Do not start
 a second evaluator container just to discover a deterministic patch conflict;
 start a fresh evaluator only when the validated candidate or evaluation
 condition changes. Gold control and candidate scoring remain separate runs.
+
+The SWE-bench wrapper `run_swebench_preserve_container.py` writes its per-run `logs/run_evaluation/<run-id>` directory relative to the current working directory, separately from `--report-dir`. Run it with a working directory under `var`, then move the completed task archive under `archive/benchmarks/swebench-verified-mini/` after evaluation. Keep active evaluator logs under `var` until the task archive is complete. Before closing the archive, verify that no run-specific evaluator logs remain under the project root.
+
+For a local single-task dataset, pass a `.json` file containing a one-element
+array (`[{...}]`) or a `.jsonl` file with one JSON object per line to
+`--dataset`. Do not pass a bare JSON object: the installed SWE-bench loader
+iterates it as keys and fails before creating an evaluator container. Parse the
+file back before scoring and verify that it contains exactly the intended
+`instance_id`. The `--dataset` value may also be an official dataset name; keep
+that separate from the prediction JSONL passed through `--predictions`.
 
 When Multi-SWE-Bench supplies a separate `test_patch`, save the Agent's patch unchanged as the raw candidate, then prepare a second scoring patch that excludes Agent-authored Go `*_test.go` changes. Run the same evaluator with that source-only patch so overlapping test edits do not prevent the benchmark tests from compiling. Keep both application results: a raw-patch conflict remains an evaluator/patch-integration failure, while target tests passing on the source-only patch is evidence about the production implementation. Do not replace the raw patch or report the two outcomes as the same score. Prepare both files and a checksum manifest with:
 
@@ -137,6 +214,8 @@ image outside the Agent run, then rerun the offline preflight. If dependencies
 are still missing, mark the task `infra-invalid`/`invalid-incomplete` and retain
 the environment until the run is resolved or archived.
 
+With container networking disabled, Sigma command containers should use Docker network none and allocate no custom bridge subnet; verify the pinned runtime includes this behavior before a large offline batch.
+
 Before starting Sigma, resolve the exact task-specific official evaluator image
 and the command image. Run `evals/prepare-swebench-task.ps1` to pull missing
 images through the host Docker daemon and then run the offline preflight. Build
@@ -145,6 +224,70 @@ task's interpreter and preinstalled dependencies while removing the baked
 `/testbed` checkout; mount only the sanitized base-commit workspace at
 `/workspace`. Do not substitute another repository, task tag, or Python version
 when the exact evaluator image is unavailable.
+
+### Prepare a Windows checkout from an official task image
+
+When a clean source tree must come from the official evaluator image, keep the
+source container alive explicitly; the image's default entrypoint may exit as
+soon as it starts:
+
+```powershell
+docker create --name <task>-source --entrypoint /bin/bash <exact-evaluator-image> -lc "sleep infinity"
+docker start <task>-source
+docker exec <task>-source /bin/bash -lc "cd /testbed && git rev-parse HEAD"
+```
+
+Inside `/testbed`, check that the dataset's exact `base_commit` exists and
+checkout that commit detached. The image's current HEAD or
+`environment_setup_commit` can differ from `base_commit`; never assume they are
+interchangeable. Verify `git rev-parse HEAD` and a clean `git status` inside
+Linux before copying.
+
+For Windows-hosted Django checkouts, set local Git options before exposing the
+tree to Sigma:
+
+```sh
+git config core.symlinks false
+git config core.filemode false
+git config core.autocrlf false
+```
+
+`docker cp` may fail with `A required privilege is not held by the client` when
+it tries to create a Linux symlink on Windows. Find tracked symlinks by mode
+`120000` and materialize each as its exact Git target-text blob in Linux before
+copying. For paths without embedded newlines:
+
+```sh
+git ls-files -s | awk '$1 == "120000" { sub(/^[^\t]*\t/, ""); print }' |
+while IFS= read -r path; do
+  git show "HEAD:$path" > "$path.materialized"
+  mv -f "$path.materialized" "$path"
+done
+```
+
+Keep the host worktree at a short path such as
+`go-runtime\var\worktrees\<date>\<short-task-id>`; deeply nested Windows paths
+can make Git report `Filename too long`. After `docker cp`, set the three local
+Git options again on the host and require all of the following before model
+execution: exact base commit, empty `git status --porcelain`, empty
+`git diff --stat`, and symlink target-text files matching the tracked blobs.
+Record every affected path and recovery in the batch issue log.
+
+When exporting official patches from a dataset on Windows, preserve their LF
+bytes. Text APIs can silently rewrite the patch to CRLF, causing host
+`git apply --check` to fail even when the official evaluator accepts the same
+patch text. Write the original string as UTF-8 bytes without newline
+translation, verify no `\r` bytes were introduced, and record the exact patch
+hash before preflight.
+
+Build the command image from the exact evaluator image, then compare interpreter
+versions through the actual preflight shells. A plain `docker run ... python`
+can select a different Conda interpreter from the evaluator's `/bin/bash -lc`
+startup. If the evaluator prepends its task environment (for example
+`/opt/miniconda3/envs/testbed/bin`), set the verified environment path first in
+the command image's `PATH`. Rerun `prepare-swebench-task.ps1` with the exact
+expected version; do not start Sigma until command and evaluator versions match
+and the offline mount preflight passes.
 
 Use the configured task command image first. In particular, do not let
 `prepare_environment` default to building a generic image such as
@@ -159,8 +302,10 @@ continue only if the exact task image can safely run the needed commands.
 When a pull/build fails:
 
 1. Stop repeated attempts against the same unreachable registry.
-2. Record the command, image reference, stage, exact error, and recovery in the
-   evaluation issue log, even if the run later recovers.
+2. Record the command, image reference, stage, exact error, impact on validity,
+   and recovery in the batch's `runs/<batch>/evaluation-issues.md`, even if the
+   run later recovers. Add or update a corresponding entry in the shared index
+   at `../../archive/benchmarks/swebench-verified-mini/evaluation-issues.md` relative to `go-runtime/evals/benchmark-protocol.md`.
 3. Inspect whether the exact task image is already local and whether it has the
    needed runtime/dependencies. Do not infer availability from a similarly
    named image.
@@ -261,3 +406,15 @@ The CLI `--task` flag takes the task text itself; it does not open a file path. 
 ### Empty model finish reason
 
 If the provider stream returns no finish reason, the runtime preserves the session and retries the original task with a short recovery prompt at most twice. A third consecutive empty finish reason ends the run with a specific error. Record such attempts as incomplete, retain the session and benchmark environment, and do not start an evaluator until the Agent produces a candidate patch. The raw provider SSE payload is not currently retained, so distinguish the observed empty runtime reason from an unverified claim about the provider's raw response.
+
+### Windows shell and image setup checks
+
+- When a command is sent through host PowerShell to `docker exec`, host-side `|` pipelines execute in PowerShell unless the entire pipeline is explicitly passed to a container shell. Do not append Linux commands such as `grep` to a bare `docker exec` invocation; either run a deliberate `/bin/bash -lc` command with simple quoting or capture the output and filter it with PowerShell.
+
+
+- When passing shell snippets through PowerShell into `docker exec`, avoid nested command substitutions and quote-heavy `awk` expressions. Use simple separate commands or a script file, and verify the source container's exact Git HEAD/status before copying the checkout.
+- Compare command/evaluator Python using the same probe shells as preflight. If `/bin/sh -lc` and `/bin/bash -lc` resolve different Python installations, explicitly set the sanitized command image PATH to the evaluator's testbed environment (for example, `/opt/miniconda3/envs/testbed/bin`) and rerun offline preflight. Never accept a version mismatch.
+- Run Sigma and `--index-memory` from the `go-runtime` project root when relying on local `.secrets/embedding-config.json`; do not copy credentials into task configs or logs.
+- For a one-row SWE-bench dataset created with PowerShell, ensure the JSON file is a one-element array (`[...]`) and parse it back to verify the expected `instance_id` before starting the evaluator.
+
+- If copying a large checkout from a source container returns an error such as `unexpected EOF`, retain the source container and reject the partial host copy even if its HEAD matches. Create a tar archive inside the container, copy and extract it into a separate clean directory, and verify the base commit, tracked-file count, and clean Git status before preflight.

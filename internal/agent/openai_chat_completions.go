@@ -214,8 +214,13 @@ type openAIStreamChunk struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens          int  `json:"prompt_tokens"`
+		CompletionTokens      int  `json:"completion_tokens"`
+		PromptCacheHitTokens  *int `json:"prompt_cache_hit_tokens"`
+		PromptCacheMissTokens *int `json:"prompt_cache_miss_tokens"`
+		PromptTokensDetails   struct {
+			CachedTokens *int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 	Choices []struct {
 		Delta struct {
@@ -259,6 +264,16 @@ func decodeOpenAIChatStream(body io.Reader, onEvent func(ModelEvent)) (ModelResp
 		}
 		response.InputTokens = chunk.Usage.PromptTokens
 		response.OutputTokens = chunk.Usage.CompletionTokens
+		if chunk.Usage.PromptCacheHitTokens != nil {
+			response.CacheReadInputTokens = *chunk.Usage.PromptCacheHitTokens
+		} else if chunk.Usage.PromptTokensDetails.CachedTokens != nil {
+			response.CacheReadInputTokens = *chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		if chunk.Usage.PromptCacheMissTokens != nil {
+			response.CacheMissInputTokens = *chunk.Usage.PromptCacheMissTokens
+		} else if chunk.Usage.PromptTokensDetails.CachedTokens != nil {
+			response.CacheMissInputTokens = max(0, chunk.Usage.PromptTokens-response.CacheReadInputTokens)
+		}
 		if len(chunk.Choices) == 0 {
 			return nil
 		}

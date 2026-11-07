@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -76,7 +75,7 @@ func TestToolDefinitionFilteringPreservesDefinitions(t *testing.T) {
 	}
 }
 
-func TestRequiredSkillBootstrapExposesOnlyReadSkill(t *testing.T) {
+func TestRequiredSkillBootstrapKeepsToolSchemaStable(t *testing.T) {
 	definitions := []ToolDefinition{
 		{Name: "read_skill"},
 		{Name: "search_memory"},
@@ -85,8 +84,8 @@ func TestRequiredSkillBootstrapExposesOnlyReadSkill(t *testing.T) {
 		{Name: "run_command"},
 	}
 	got := requiredSkillBootstrapTools(definitions, []string{"python-issue-workflow"})
-	if !reflect.DeepEqual(toolNames(got), []string{"read_skill"}) {
-		t.Fatalf("bootstrap tools = %v, want only read_skill", toolNames(got))
+	if !reflect.DeepEqual(toolNames(got), []string{"read_skill", "search_memory", "list_files", "search_code", "run_command"}) {
+		t.Fatalf("bootstrap tools = %v, want the stable full tool schema", toolNames(got))
 	}
 	got = requiredSkillBootstrapTools(definitions, nil)
 	if !reflect.DeepEqual(toolNames(got), []string{"read_skill", "search_memory", "list_files", "search_code", "run_command"}) {

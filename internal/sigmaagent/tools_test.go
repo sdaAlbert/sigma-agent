@@ -71,6 +71,19 @@ func TestIsolatedTestNetworkUsesBridgeWhenNetworkIsEnabled(t *testing.T) {
 	}
 }
 
+func TestCommandContainerNetworkUsesNoneWhenNetworkIsDisabled(t *testing.T) {
+	network, err := commandContainerNetwork(context.Background(), false)
+	if err != nil {
+		t.Fatalf("commandContainerNetwork(false) error = %v", err)
+	}
+	if network != "none" {
+		t.Fatalf("commandContainerNetwork(false) = %q, want none", network)
+	}
+	if err := removeIsolatedTestNetwork(network); err != nil {
+		t.Fatalf("remove built-in none network: %v", err)
+	}
+}
+
 // run_command must advertise the container network mode so the model knows
 // whether it can download dependencies.
 func TestRunCommandDescribesTheConfiguredNetworkMode(t *testing.T) {

@@ -7,13 +7,13 @@ contribute Agent Skills and, through their MCP server, new tools.
 
 ```bash
 # user scope: ~/.sigma-agent/packages/
-sigma-agent --install npm:pi-web-access
+sigma --install npm:pi-web-access
 
 # project scope: <repo>/.sigma-agent/packages/
-sigma-agent --install npm:pi-web-access --local --repo .
+sigma --install npm:pi-web-access --local --repo .
 
-sigma-agent --list-packages
-sigma-agent --uninstall npm:pi-web-access
+sigma --list-packages
+sigma --uninstall npm:pi-web-access
 ```
 
 Supported sources:
@@ -161,7 +161,7 @@ against the package root. That is how a package that ships an MCP server is
 wired up without hardcoding an install path:
 
 ```bash
-sigma-agent --install npm:pi-web-access
+sigma --install npm:pi-web-access
 ```
 
 ```json
@@ -179,7 +179,7 @@ sigma-agent --install npm:pi-web-access
 ## Check the connection
 
 ```bash
-sigma-agent --list-mcp
+sigma --list-mcp
 ```
 
 The command connects to every enabled server, prints the tools each one
