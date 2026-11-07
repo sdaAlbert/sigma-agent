@@ -26,7 +26,6 @@ matched comparison.
 
 ## Shared inputs and local outputs
 
-- [`fixtures/`](fixtures/) contains shared issue-workflow test fixtures.
 - The planned memory study keeps its labeled query dataset and isolated fixture
   together under [`planned/skills-memory/`](planned/skills-memory/).
 - [`templates/issue-only.json`](templates/issue-only.json) is an example for
@@ -39,7 +38,6 @@ evals/
 ├── swebench-verified-mini/  # primary benchmark: plan, evidence, configs, scripts
 ├── planned/                 # experiments that still need to be run or frozen
 ├── historical/              # early Go evidence and superseded plans
-├── fixtures/                # shared checked-in test workspaces
 ├── templates/               # reusable examples, not scored configs
 └── benchmark-protocol.md    # shared run validity and environment rules
 ```
