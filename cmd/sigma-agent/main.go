@@ -32,7 +32,7 @@ func main() {
 	serve := flag.Bool("serve", false, "run the HTTP/SSE task service")
 	indexMemory := flag.Bool("index-memory", false, "synchronize repository memory into Qdrant")
 	evalMemory := flag.Bool("eval-memory", false, "compare BM25, vector, and hybrid retrieval on labeled repository-memory queries")
-	memoryDataset := flag.String("memory-dataset", "evals/memory-retrieval-v1.json", "labeled memory retrieval queries")
+	memoryDataset := flag.String("memory-dataset", "evals/planned/skills-memory/datasets/memory-retrieval-v1.json", "labeled memory retrieval queries")
 	memoryTopK := flag.Int("memory-top-k", 5, "number of memory results used for retrieval metrics")
 	configPath := flag.String("config", "config.json", "JSON file with tunable runtime limits")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")

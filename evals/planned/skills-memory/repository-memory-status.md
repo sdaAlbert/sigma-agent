@@ -18,14 +18,14 @@ a derived index. Current source and tests take precedence over stale memory.
 
 ## Phase A: six-query plumbing check
 
-The query labels are in [`memory-retrieval-v1.json`](../../memory-retrieval-v1.json)
+The query labels are in [`datasets/memory-retrieval-v1.json`](datasets/memory-retrieval-v1.json)
 and the isolated fixture is
-[`fixtures/memory-retrieval-v1`](../../fixtures/memory-retrieval-v1). Run from the
+[`fixtures/memory-retrieval-v1`](fixtures/memory-retrieval-v1). Run from the
 repository root after configuring a real embedding provider and Qdrant:
 
 ```powershell
 docker compose up -d qdrant
-go run ./cmd/sigma-agent --eval-memory --repo .\evals\fixtures\memory-retrieval-v1 --memory-dataset .\evals\memory-retrieval-v1.json --memory-top-k 5
+go run ./cmd/sigma-agent --eval-memory --repo .\evals\planned\skills-memory\fixtures\memory-retrieval-v1 --memory-dataset .\evals\planned\skills-memory\datasets\memory-retrieval-v1.json --memory-top-k 5
 ```
 
 The command reports Recall@5 and MRR for BM25, dense search, and reciprocal-rank

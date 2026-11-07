@@ -342,7 +342,7 @@ To compare BM25, vector, and hybrid ranking against the checked-in labeled
 memory query set, use its isolated fixture corpus:
 
 ```powershell
-go run ./cmd/sigma-agent --eval-memory --repo .\evals\fixtures\memory-retrieval-v1
+go run ./cmd/sigma-agent --eval-memory --repo .\evals\planned\skills-memory\fixtures\memory-retrieval-v1 --memory-dataset .\evals\planned\skills-memory\datasets\memory-retrieval-v1.json
 ```
 
 The evaluation indexes only the fixture's six reviewed memory facts using the

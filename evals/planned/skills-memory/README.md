@@ -25,6 +25,8 @@
 - [`configs/`](configs/) contains the default-based paired config files. Add
   task-specific fields identically to both arms and retain the exact resolved
   configs with the run record.
+- [`datasets/`](datasets/) and [`fixtures/`](fixtures/) hold the labeled
+  retrieval set and its isolated synthetic repository.
 
 Do not claim an effect until the preselected matched task set has completed
 under fixed conditions with all attempts and costs reported.

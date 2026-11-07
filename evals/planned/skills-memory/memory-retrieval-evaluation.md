@@ -8,13 +8,13 @@ Memory facts should describe durable information that is costly to rediscover an
 
 ## Phase A: labeled retrieval plumbing check
 
-The versioned query set is [`memory-retrieval-v1.json`](../../memory-retrieval-v1.json). Its six queries have human-assigned relevant source/fact labels and run against an isolated six-fact fixture at [`fixtures/memory-retrieval-v1`](../../fixtures/memory-retrieval-v1). These examples are deliberately small and synthetic: they test loading, repository isolation, labels, ranking, and metrics, not production distribution or coding ability.
+The versioned query set is [`datasets/memory-retrieval-v1.json`](datasets/memory-retrieval-v1.json). Its six queries have human-assigned relevant source/fact labels and run against an isolated six-fact fixture at [`fixtures/memory-retrieval-v1`](fixtures/memory-retrieval-v1). These examples are deliberately small and synthetic: they test loading, repository isolation, labels, ranking, and metrics, not production distribution or coding ability.
 
 With a real embedding endpoint and Qdrant configured, run from `go-runtime`:
 
 ```powershell
 docker compose up -d qdrant
-go run ./cmd/sigma-agent --eval-memory --repo .\evals\fixtures\memory-retrieval-v1 --memory-dataset .\evals\memory-retrieval-v1.json --memory-top-k 5
+go run ./cmd/sigma-agent --eval-memory --repo .\evals\planned\skills-memory\fixtures\memory-retrieval-v1 --memory-dataset .\evals\planned\skills-memory\datasets\memory-retrieval-v1.json --memory-top-k 5
 ```
 
 The evaluator indexes the fixture's reviewed facts and reports per-query Recall@5 and MRR for three arms: local BM25, dense vector search, and reciprocal-rank fusion (RRF). Relevant facts match by both labeled source and fact substring. Record the embedding provider/model, vector dimensions, Qdrant version/collection, configuration, elapsed time, and full output. Do not substitute deterministic or random vectors in this quality measurement. It makes embedding requests but does not call the MiniMax generation model.

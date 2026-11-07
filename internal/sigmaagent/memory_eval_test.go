@@ -9,7 +9,7 @@ import (
 )
 
 func TestCheckedInMemoryRetrievalLabelsMatchFixture(t *testing.T) {
-	root := filepath.Join("..", "..", "evals", "fixtures", "memory-retrieval-v1")
+	root := filepath.Join("..", "..", "evals", "planned", "skills-memory", "fixtures", "memory-retrieval-v1")
 	entries, err := LoadMemoryEntries(root)
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +24,7 @@ func TestCheckedInMemoryRetrievalLabelsMatchFixture(t *testing.T) {
 	if entries[0].RepoID == isolatedEntries[0].RepoID || entries[0].ID == isolatedEntries[0].ID {
 		t.Fatal("evaluation namespace must not reuse the current Git repository identity or point ID")
 	}
-	data, err := os.ReadFile(filepath.Join("..", "..", "evals", "memory-retrieval-v1.json"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "evals", "planned", "skills-memory", "datasets", "memory-retrieval-v1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

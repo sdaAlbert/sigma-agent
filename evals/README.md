@@ -26,16 +26,11 @@ matched comparison.
 
 ## Shared inputs and local outputs
 
-- [`fixtures/`](fixtures/) contains small test workspaces, including the
-  synthetic memory-retrieval fixture and Skill fixture.
-- [`memory-retrieval-v1.json`](memory-retrieval-v1.json) stays at this path
-  because the evaluator and tests read it directly. It is a labeled query
-  dataset, not a run config or completed result.
+- [`fixtures/`](fixtures/) contains shared issue-workflow test fixtures.
+- The planned memory study keeps its labeled query dataset and isolated fixture
+  together under [`planned/skills-memory/`](planned/skills-memory/).
 - [`templates/issue-only.json`](templates/issue-only.json) is an example for
   preparing a future issue-only run; it is not a frozen experiment config.
-- `results/` contains ignored local reports. Full transcripts, patches,
-  evaluator outputs, and resumable run state remain in the separate central
-  archive and are not part of this Git repository.
 
 ## Directory map
 
@@ -44,8 +39,7 @@ evals/
 ├── swebench-verified-mini/  # primary benchmark: plan, evidence, configs, scripts
 ├── planned/                 # experiments that still need to be run or frozen
 ├── historical/              # early Go evidence and superseded plans
-├── fixtures/                # small checked-in input workspaces
+├── fixtures/                # shared checked-in test workspaces
 ├── templates/               # reusable examples, not scored configs
-├── results/                 # ignored local run summaries
 └── benchmark-protocol.md    # shared run validity and environment rules
 ```
