@@ -165,15 +165,57 @@ func openAIRequestMessages(system string, messages []Message) ([]map[string]any,
 				toolResults = append(toolResults, map[string]any{"role": "tool", "tool_call_id": block.ToolUseID, "content": content})
 			}
 		}
+		result = append(result, toolResults...)
 		if userText.Len() > 0 {
 			result = append(result, map[string]any{"role": "user", "content": userText.String()})
 		}
-		result = append(result, toolResults...)
 	}
 	if len(result) == 0 {
 		return nil, errors.New("model request has no messages")
 	}
+	if err := validateOpenAIToolCallSequence(result); err != nil {
+		return nil, err
+	}
 	return result, nil
+}
+
+func validateOpenAIToolCallSequence(messages []map[string]any) error {
+	pending := make(map[string]struct{})
+	for _, message := range messages {
+		role, _ := message["role"].(string)
+		if role == "assistant" {
+			if len(pending) > 0 {
+				return fmt.Errorf("OpenAI message sequence has unanswered tool calls before the next assistant message")
+			}
+			calls, _ := message["tool_calls"].([]map[string]any)
+			for _, call := range calls {
+				id, _ := call["id"].(string)
+				if id == "" {
+					return errors.New("OpenAI assistant tool call is missing an id")
+				}
+				if _, exists := pending[id]; exists {
+					return fmt.Errorf("OpenAI assistant message repeats tool call id %q", id)
+				}
+				pending[id] = struct{}{}
+			}
+			continue
+		}
+		if role == "tool" {
+			id, _ := message["tool_call_id"].(string)
+			if _, exists := pending[id]; !exists {
+				return fmt.Errorf("OpenAI tool response has no preceding tool call for id %q", id)
+			}
+			delete(pending, id)
+			continue
+		}
+		if len(pending) > 0 {
+			return fmt.Errorf("OpenAI message sequence has unanswered tool calls before role %q", role)
+		}
+	}
+	if len(pending) > 0 {
+		return errors.New("OpenAI message sequence ends with unanswered tool calls")
+	}
+	return nil
 }
 
 func openAIRequestTools(tools []ToolDefinition) ([]map[string]any, error) {
