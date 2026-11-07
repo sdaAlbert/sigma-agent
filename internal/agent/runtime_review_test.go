@@ -6,44 +6,6 @@ import (
 	"testing"
 )
 
-func TestFinalizationToolDefinitionsKeepToolsAvailable(t *testing.T) {
-	definitions := []ToolDefinition{
-		{Name: "read_file"},
-		{Name: "record_change_contract"},
-		{Name: "run_command"},
-		{Name: "git_diff"},
-		{Name: "search_code"},
-		{Name: "list_files"},
-		{Name: "create_file"},
-		{Name: "edit_file"},
-		{Name: "apply_patch"},
-	}
-	tests := []struct {
-		name                 string
-		reviewOnly           bool
-		testsNeeded          bool
-		diffNeeded           bool
-		verificationComplete bool
-	}{
-		{name: "checks outstanding", reviewOnly: true, testsNeeded: true, diffNeeded: true},
-		{name: "review complete", reviewOnly: true},
-		{name: "verified source", verificationComplete: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gotDefinitions := finalizationToolDefinitions(definitions, test.reviewOnly, test.testsNeeded, test.diffNeeded, test.verificationComplete)
-			got := make([]string, 0, len(gotDefinitions))
-			for _, definition := range gotDefinitions {
-				got = append(got, definition.Name)
-			}
-			if !reflect.DeepEqual(got, toolNames(definitions)) {
-				t.Fatalf("tools = %v, want all tools %v", got, toolNames(definitions))
-			}
-		})
-	}
-}
-
 func TestMissingModelStopReasonIsRecoverable(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -61,17 +23,6 @@ func TestMissingModelStopReasonIsRecoverable(t *testing.T) {
 				t.Fatalf("shouldRecoverMissingStopReason(%q) = %t, want %t", test.stopReason, got, test.want)
 			}
 		})
-	}
-}
-
-func TestToolDefinitionFilteringPreservesDefinitions(t *testing.T) {
-	definitions := []ToolDefinition{
-		{Name: "run_command", InputSchema: json.RawMessage(`{"type":"object"}`)},
-		{Name: "git_diff", InputSchema: json.RawMessage(`{"type":"object"}`)},
-	}
-	got := finalizationToolDefinitions(definitions, true, true, true, false)
-	if !reflect.DeepEqual(got, definitions) {
-		t.Fatalf("definitions = %#v, want %#v", got, definitions)
 	}
 }
 

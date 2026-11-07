@@ -92,6 +92,17 @@ The labeled retrieval harness is `evals/memory-retrieval-v1.json`, paired with a
 
 ## Skills and repository memory
 
+Shared coding workflow instructions live in the embedded
+`cmd/sigma-agent/workflow-guidance.md` resource, separate from the session
+orchestrator. Per-run edit/test/diff state, repeated-command recovery, and
+long-task checkpoints live in `internal/agent/workflow_policy.go`; concise
+state changes are returned after relevant tools or as checkpoint messages.
+The system prompt prefix and ordered tool schema stay stable across turns.
+The orchestrator retains only the hook and the finalization gate: it asks the
+policy for current state, holds a premature final response when checks are
+stale, and preserves an incomplete candidate with a continuation instruction
+when the turn limit is reached.
+
 If the repository root contains `AGENTS.md`, Sigma reads it at session start
 and adds its bounded contents (up to 16 KiB) as project instructions. This
 project-level file is for stable conventions and pointers; Sigma currently
