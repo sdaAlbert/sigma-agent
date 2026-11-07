@@ -33,7 +33,7 @@ public summary does not rewrite that source record.
 
 1. Use a clean task checkout at the exact base commit and a fresh Sigma session.
 2. Prepare the command image and official evaluator image before the model run.
-   Run [`preflight-swebench-task.ps1`](../preflight-swebench-task.ps1) and
+   Run [`preflight-swebench-task.ps1`](../scripts/preflight-swebench-task.ps1) and
    require a successful offline preflight.
 3. Build Sigma and record the executable SHA-256, Git commit, provider/model,
    reasoning settings, effective config, Skills/Memory state, and task base.

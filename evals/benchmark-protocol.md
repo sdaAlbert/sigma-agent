@@ -96,7 +96,7 @@ is shown to preserve the same TeX behavior.
 
 ## Preflight and serial task execution
 
-Before starting a model session, run `evals/preflight-swebench-task.ps1` with
+Before starting a model session, run `evals/scripts/preflight-swebench-task.ps1` with
 the clean task checkout, the task's command-image config, and the official
 evaluator image. It checks Docker, verifies both images are already local,
 mounts the checkout read-only at `/workspace` in the command image, and checks
@@ -110,7 +110,7 @@ Example for the retained `django__django-11880` task:
 
 ```powershell
 $repoPath = "C:\work\swb5\django__django-11880"
-.\evals\preflight-swebench-task.ps1 `
+.\evals\scripts\preflight-swebench-task.ps1 `
   -RepoPath $repoPath `
   -ConfigPath evals\configs\full-sigma-5-django-11880-shared-profile.json `
   -EvaluatorImage swebench/sweb.eval.x86_64.django_1776_django-11880:latest `
@@ -182,7 +182,7 @@ that separate from the prediction JSONL passed through `--predictions`.
 When Multi-SWE-Bench supplies a separate `test_patch`, save the Agent's patch unchanged as the raw candidate, then prepare a second scoring patch that excludes Agent-authored Go `*_test.go` changes. Run the same evaluator with that source-only patch so overlapping test edits do not prevent the benchmark tests from compiling. Keep both application results: a raw-patch conflict remains an evaluator/patch-integration failure, while target tests passing on the source-only patch is evidence about the production implementation. Do not replace the raw patch or report the two outcomes as the same score. Prepare both files and a checksum manifest with:
 
 ```powershell
-.\evals\prepare-go-benchmark-patches.ps1 `
+.\evals\scripts\prepare-go-benchmark-patches.ps1 `
   -CandidatePatch $candidatePatch `
   -OutputDirectory $artifactDirectory
 ```
@@ -218,7 +218,7 @@ the environment until the run is resolved or archived.
 With container networking disabled, Sigma command containers should use Docker network none and allocate no custom bridge subnet; verify the pinned runtime includes this behavior before a large offline batch.
 
 Before starting Sigma, resolve the exact task-specific official evaluator image
-and the command image. Run `evals/prepare-swebench-task.ps1` to pull missing
+and the command image. Run `evals/scripts/prepare-swebench-task.ps1` to pull missing
 images through the host Docker daemon and then run the offline preflight. Build
 the command image from that same task image when necessary. The command image should retain the
 task's interpreter and preinstalled dependencies while removing the baked
@@ -286,7 +286,7 @@ versions through the actual preflight shells. A plain `docker run ... python`
 can select a different Conda interpreter from the evaluator's `/bin/bash -lc`
 startup. If the evaluator prepends its task environment (for example
 `/opt/miniconda3/envs/testbed/bin`), set the verified environment path first in
-the command image's `PATH`. Rerun `prepare-swebench-task.ps1` with the exact
+the command image's `PATH`. Rerun `evals/scripts/prepare-swebench-task.ps1` with the exact
 expected version; do not start Sigma until command and evaluator versions match
 and the offline mount preflight passes.
 
