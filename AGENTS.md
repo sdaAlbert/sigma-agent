@@ -23,7 +23,9 @@ isolated task workspace as an external profile. Keep it short and stable.
 - When benchmark reference files are available in the active workspace, read
   `evals/swebench-verified-mini/benchmark-protocol.md` and the relevant plan under `evals/` before
   preparing or interpreting a run. The 50-task SWE-bench Verified Mini list
-  and results live in `evals/swebench-verified-mini-50-evaluation-plan.md`.
+  and scores live in `evals/swebench-verified-mini/evaluation-results.md`; use
+  `evals/swebench-verified-mini/experiment-method.md` for study design and run
+  conditions.
 - A separate task checkout does not inherit this file automatically. If a run
   config supplies it externally, treat Sigma-repository paths as references to
   the profile source, not as files in the task checkout.

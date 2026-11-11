@@ -5,13 +5,19 @@ and historical issue-repair work.
 
 ## Primary: SWE-bench Verified Mini
 
-The primary study's [50-task results (English)](swebench-verified-mini/evaluation-results.md)
-are the starting point; the [Chinese results](swebench-verified-mini/evaluation-results.zh-CN.md)
-are also available. See the [failure analysis](swebench-verified-mini/failure-analysis.md)
-for causes and iteration evidence, the [experiment method](swebench-verified-mini/experiment-method.md)
-for run design and recurring operational issues, and the [benchmark protocol](swebench-verified-mini/benchmark-protocol.md)
-for step-by-step preparation and evaluation. Task-specific records are indexed in
-[`swebench-verified-mini/tasks/`](swebench-verified-mini/tasks/README.md).
+Use this reading order for the primary study:
+
+1. Start with the [50-task results (English)](swebench-verified-mini/evaluation-results.md);
+   the [Chinese results](swebench-verified-mini/evaluation-results.zh-CN.md)
+   contain the same table in Chinese.
+2. Read the [experiment method](swebench-verified-mini/experiment-method.md)
+   for the study scope, issue-only rules, comparison conditions, and how each
+   task run proceeds.
+3. See the [failure analysis](swebench-verified-mini/failure-analysis.md)
+   for why tasks failed and how benchmark evidence informed Sigma iterations.
+4. Follow the [benchmark protocol](swebench-verified-mini/benchmark-protocol.md)
+   to prepare and evaluate a new run. The [task report index](swebench-verified-mini/tasks/README.md)
+   links task-level run conditions and archived evidence.
 
 ## Planned studies
 
@@ -36,9 +42,8 @@ matched comparison.
 
 ```text
 evals/
-├── swebench-verified-mini/  # results, experiment method, task records, configs, scripts
+├── swebench-verified-mini/  # primary study: results, method, task records, protocol
 ├── planned/                 # experiments that still need to be run or frozen
 ├── historical/              # early Go evidence and superseded plans
-├── templates/               # reusable examples, not scored configs
-└── swebench-verified-mini/  # primary study, protocol, and task records
+└── templates/               # reusable examples, not scored configs
 ```
