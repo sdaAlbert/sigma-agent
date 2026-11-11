@@ -1,6 +1,6 @@
 # Sigma Agent user guide
 
-This guide covers Sigma's local interactive TUI: configuring a model, selecting a repository, starting a task, continuing a session, and changing runtime permissions. The HTTP task API and low-level settings have separate guides linked at the end.
+This guide covers Sigma's local interactive TUI: configuring a model, starting a task in the current folder, continuing a session, and changing runtime permissions. Git is optional. Ask Sigma in natural language for local status, diff, repository initialization, staging, or commits; remote operations such as push and pull remain terminal tasks. The HTTP task API and low-level settings have separate guides linked at the end.
 
 ## 1. Start Sigma
 
@@ -12,6 +12,20 @@ go build -o (Join-Path $binDir 'sigma.exe') ./cmd/sigma-agent
 sigma --version
 ```
 
+Go does not add `GOPATH\bin` to Windows `PATH` automatically. To use `sigma`
+from any folder in the current PowerShell window, add the install directory to
+that window's path after building:
+
+```powershell
+$env:Path = "$binDir;$env:Path"
+sigma --version
+```
+
+For future terminals, add the same `$binDir` (normally `%USERPROFILE%\go\bin`)
+to your Windows user `Path` once. After that, open a new PowerShell window and
+run `sigma` from the repository you want Sigma to work in. If you do not want
+to change `Path`, run it by its full path: `& (Join-Path $binDir 'sigma.exe')`.
+
 You can also build an executable once and run it from the same working directory:
 
 ```powershell
@@ -19,7 +33,7 @@ go build -o sigma.exe ./cmd/sigma-agent
 .\sigma.exe
 ```
 
-The installed command starts the integrated setup screen and can be run from any directory. Sigma needs Git, Docker Desktop, and an API key for one supported model provider. Go 1.26+ is needed to build from source, not for each launch. With no `--repo` flag, the setup TUI starts in the current directory; use `/repo <path>` to select another repository. Rerun the build command from the checkout to update `sigma.exe`. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
+The installed command starts the integrated setup screen in the current directory and can be run from any folder. Sigma needs Docker Desktop and an API key for one supported model provider; Git is optional. Go 1.26+ is needed to build from source, not for each launch. Sigma works on the folder where you run it; change folders with `cd`. Rerun the build command from the checkout to update `sigma.exe`. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
 
 ## 2. Configure the model
 
@@ -43,57 +57,47 @@ Supported providers:
 | `deepseek` | OpenAI Chat Completions-compatible | `DEEPSEEK_API_KEY` |
 | `openrouter` | OpenAI Chat Completions-compatible | `OPENROUTER_API_KEY` |
 
-Then inspect provider/key status and choose a model:
+In TUI, type `/model`, choose a provider with Up/Down, then choose a model from the provider catalog below the input:
 
 ```text
-/model list
-/model minimax/MiniMax-M3.1-Flash
+/model
 /model save
 ```
 
-`/model list` lists supported providers and whether a key is configured; it does not fetch a live model catalog. Enter the model ID accepted by your provider. `/model save` makes the current selection the default for new sessions. Without an explicit model selection, Sigma uses its saved default; on a fresh configuration its built-in default is `minimax/MiniMax-M3.1-Flash`.
+The provider catalog is fetched using its configured API key. If no key is configured, use `/login` first. `/model save` makes the current selection the default for new sessions. Without an explicit model selection, Sigma uses its saved default; on a fresh configuration its built-in default is `minimax/MiniMax-M3.1-Flash`.
 
-During an interactive coding session, `/model` displays the current selection and provider/key status. `/model <provider>/<model-id>` switches models between turns; `/model save` saves that selection as the default for new sessions.
+During an interactive coding session, `/model` opens the same provider and model suggestions; `/model save` saves that selection as the default for new sessions.
 
 For a one-shot task or a resumed session, pass `--model <provider>/<model-id>`
 to override the saved selection and the model recorded in the session. This is
 useful when continuing a session after a provider quota interruption.
 
-## 3. Select a repository and start a task
+## 3. Start a task in the current folder
 
-Sigma starts in the current folder. Git is optional; when a Git worktree is
-available, Sigma can show a diff. Existing staged, unstaged, and non-ignored
-untracked changes are allowed. The TUI works directly in the selected folder,
-like Pi; Agent edits appear here immediately.
+Sigma uses the current folder directly, like Pi. It does not ask you to select
+a repository or require Git. Use `cd C:\work\target-folder` before running
+Sigma to choose a different working folder. Agent edits appear there
+immediately. Ask Sigma to perform local Git operations when you want them;
+Sigma does not initialize a repository or commit unless you ask.
 
-```text
-/repo C:\work\target-repository
-```
-
-Type a task in the input and press `Enter` to start, or use `Shift+Enter` to add lines. Use `/start` to open an empty interactive session:
+Sigma opens an interactive session automatically. Slash commands are available from the input immediately; type a task and press `Enter`, or use `Shift+Enter` to add lines:
 
 ```text
 Fix issue #123. Inspect the relevant code and repository instructions, implement the smallest appropriate fix, run the relevant tests, and review the complete diff. Do not commit or push.
 ```
 
-All new tasks use the selected folder as their workspace. Sigma's file
+All new tasks use the current folder as their workspace. Sigma's file
 tools edit it directly, and Docker mounts the same folder at `/workspace`
 for commands and tests. Local model API calls run from the Sigma process.
 Uncommitted changes need no copying; they are already in the workspace.
 
 ## Integrated TUI
 
-Run `sigma --tui` to configure and use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. The setup screen accepts `/repo`, `/model`, `/login`, `/logout`, `/session`, `/resume`, and `/network`. Type a task and press `Enter`, or use `/start` to open an empty session. In chat, `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/diff`, `/model`, `/steer`, `/followup`, `/abort`, and `/exit` are handled in the TUI. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
+Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. A session starts automatically; the same command suggestions are available from the input at startup and in chat. `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/diff`, `/model`, `/session`, `/new`, `/fork`, `/clone`, `/steer`, `/followup`, and `/abort` are handled in the TUI. `/new` saves the current session and begins another; `/session` shows details for the current session. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
 
-TUI shortcuts: `Enter` submits, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes slash commands and file paths (`@path` in prompts and paths after `/repo`), `Up`/`Down` browse prompt history at the start/end of the input, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
+TUI shortcuts: `Enter` submits or accepts the highlighted suggestion, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes file paths (`@path` in prompts), `Up`/`Down` navigate command/model suggestions or browse prompt history, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
-Docker command containers have outbound networking disabled by default. Use this in setup to enable it for project dependencies:
-
-```text
-/network on
-```
-
-Use `/network off` to disable it again. With networking on, container commands and package install scripts can contact external services; see [configuration](CONFIGURATION.md) for details.
+Docker commands use one reusable foreground container during an interactive session. `/quit` removes that container while keeping Docker images and `.sigma-agent/container-home` caches for the next session. Use `/settings` to change Docker network access. See [Docker command environments](DOCKER.md) for container reuse, image preparation, caches, background tasks, and shutdown behavior.
 
 ## 4. Setup commands
 
@@ -102,20 +106,17 @@ Use `/network off` to disable it again. With networking on, container commands a
 | `/login` | Open a picker for GitHub or a model provider, then securely enter its credential. |
 | `/login` | Open the credential picker for a model provider or GitHub, then securely enter its key. |
 | `/login github` | Save a GitHub token for GitHub MCP. |
-| `/model` or `/model list` | Show the selected model and provider/key status. |
-| `/model <provider>/<model-id>` | Select a model for this session. |
+| `/model` | Choose a provider and model from the suggestions below the input. |
 | `/model save` | Save the selected provider/model as the default for new sessions. |
 | `/logout <provider>` | Remove a saved model key. Environment variables can still provide credentials. |
 | `/logout github` | Remove the saved GitHub token. |
-| `/repo <path>` | Select any existing local folder as the workspace. |
 | `/session <id>` | Set an explicit ID for a new session. |
 | `/resume <id>` | Resume a saved session. Use the same repository as the original session. |
-| `/network on\|off` | Allow or block internet access inside Docker command/test containers for this session. |
-| `/start` | Start an empty interactive conversation with the current settings. |
+| `/settings` | Change saved runtime settings, including Docker network access. |
 | `/help` | Show setup commands. |
-| `/exit` | Leave setup without starting a task. |
+| `/quit` | Save and close Sigma. |
 
-For GitHub issue context, configure `/login github`. The GitHub MCP integration is read-only. Use ordinary Git commands in the Docker shell or your terminal for branch, commit, and push operations; Sigma does not add a separate publish workflow.
+For GitHub issue context, configure `/login github`. The GitHub MCP integration is read-only. The built-in `git` tool handles local status, diff, init, staging, and commits when requested. Use your terminal for remote operations such as push and pull.
 
 ## 5. Interactive session commands
 
@@ -125,13 +126,15 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | --- | --- |
 | `/help` | Show interactive-session commands. |
 | `/model` | Show or change the model between turns; `/model save` saves the default. |
+| `/session` | Show the current session ID. |
+| `/new` | Save the current session and return to setup to start a fresh one. |
 | `/diff` | Show a summary of changes in the active repository, compared with its starting commit. This includes pre-existing local changes. |
 | `/tree` | In the TUI, open the session history picker and choose a point to continue from. The previous history remains available as another branch; the terminal CLI prints the tree. |
 | `/tree <entry-id>` | Continue from a specific saved conversation entry. Find the ID in `/tree`. |
 | `/steer <guidance>` | Queue guidance while an Agent turn is active. Plain text during an active turn does the same. |
 | `/followup <instruction>` | Queue a new instruction to run after the active task settles. |
 | `/abort` | Cancel the active Agent turn while keeping the session open. |
-| `/exit` or `/quit` | Stop the active turn if needed, save the session, and exit. |
+| `/quit` | Stop the active turn if needed, save the session, and exit. |
 
 When a run exits, Sigma prints its session ID, snapshot path, run-artifact path, and active repository path. Use that session ID in `/resume <id>` at the next setup prompt. Sessions created by older versions that used a worktree continue to resume from their saved workspace. There is no `/sessions` listing command in the current CLI.
 
@@ -179,7 +182,7 @@ Sigma can install npm, git, and local packages that contribute Skills and MCP se
 
 ## 7. Other ways to run Sigma
 
-- **One task:** `sigma --repo C:\work\target-repository --task "Fix issue #123"`
+- **One task:** change into the folder with `cd C:\work\target-repository`, then run `sigma --task "Fix issue #123"`.
 - **JSONL process integration:** Add `--json` to emit versioned lifecycle events and a final result on stdout. This mode is one-shot; resume later with `--resume <session-id>`.
 - **HTTP/SSE task service:** Start with `sigma --serve --max-concurrent 2`. Use the API examples and endpoint reference in [architecture](ARCHITECTURE.md).
 

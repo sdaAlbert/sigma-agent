@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EvaluatorImage,
 
-    [string]$ConfigPath = "evals/swebench-verified-mini/configs/full-sigma-5.json",
+    [Parameter(Mandatory = $true)]
+    [string]$ConfigPath,
     [string]$ExpectedPython = ""
 )
 

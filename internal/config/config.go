@@ -24,6 +24,7 @@ type Runtime struct {
 	MaxRetrievalQueryBytes           int               `json:"max_retrieval_query_bytes"`
 	ModelOutputTokens                int               `json:"model_output_tokens"`
 	ModelReasoningEffort             string            `json:"model_reasoning_effort"`
+	DeepSeekThinkingEnabled          bool              `json:"deepseek_thinking_enabled"`
 	ToolTimeoutMS                    int               `json:"tool_timeout_ms"`
 	ModelTimeoutMS                   int               `json:"model_timeout_ms"`
 	MaxRetries                       int               `json:"max_retries"`
@@ -61,7 +62,7 @@ func Defaults() Runtime {
 	return Runtime{
 		MaxTurns: 128, MaxToolCalls: 256, MaxContextTokens: 64000,
 		ContextCompactionThresholdTokens: 0,
-		SummaryTokens:                    800, MaxToolResultBytes: 16 * 1024,
+		SummaryTokens:                    800, MaxToolResultBytes: 50 * 1024,
 		MaxRetrievalQueryBytes: 8 * 1024,
 		ModelOutputTokens:      16384, ModelReasoningEffort: "max", ToolTimeoutMS: 600000,
 		ModelTimeoutMS: 120000, MaxRetries: 2,

@@ -12,7 +12,7 @@ import (
 	"github.com/sdaAlbert/sigma-agent/internal/mcp"
 	"github.com/sdaAlbert/sigma-agent/internal/mcpconfig"
 	"github.com/sdaAlbert/sigma-agent/internal/pkgmgr"
-	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
+	workspaceagent "github.com/sdaAlbert/sigma-agent/internal/workspace"
 )
 
 // packageScope describes where the packages of one scope live.
@@ -207,12 +207,12 @@ func resolveMCPEntries(entries []mcpconfig.Entry, installers []*pkgmgr.Installer
 
 // packageSkills returns the Agent Skills contributed by the installed
 // packages.
-func packageSkills(scopes []packageScope) ([]sigmaagent.PackageSkills, error) {
+func packageSkills(scopes []packageScope) ([]workspaceagent.PackageSkills, error) {
 	packages, err := installedPackages(scopes)
 	if err != nil {
 		return nil, err
 	}
-	var result []sigmaagent.PackageSkills
+	var result []workspaceagent.PackageSkills
 	for _, installed := range packages {
 		skillFiles, err := installed.SkillFiles()
 		if err != nil {
@@ -229,7 +229,7 @@ func packageSkills(scopes []packageScope) ([]sigmaagent.PackageSkills, error) {
 			}
 		}
 		sort.Strings(directories)
-		result = append(result, sigmaagent.PackageSkills{
+		result = append(result, workspaceagent.PackageSkills{
 			Root:   installed.Root,
 			Dirs:   directories,
 			Source: installed.Name,
@@ -257,6 +257,44 @@ func packageExtensions(scopes []packageScope) ([]string, error) {
 		}
 	}
 	return paths, nil
+}
+
+func packageExtensionLabels(scopes []packageScope) []string {
+	packages, err := installedPackages(scopes)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var labels []string
+	for _, installed := range packages {
+		paths, err := installed.ResourcePaths(pkgmgr.ResourceExtensions)
+		if err != nil {
+			continue
+		}
+		for _, path := range paths {
+			switch strings.ToLower(filepath.Ext(path)) {
+			case ".js", ".mjs", ".cjs":
+			default:
+				continue
+			}
+			relative, err := filepath.Rel(installed.Root, path)
+			if err != nil {
+				continue
+			}
+			parts := strings.Split(filepath.ToSlash(relative), "/")
+			labelPath := parts[0]
+			if labelPath == "." {
+				labelPath = filepath.Base(relative)
+			}
+			label := installed.Name + ":" + labelPath
+			if !seen[label] {
+				seen[label] = true
+				labels = append(labels, label)
+			}
+		}
+	}
+	sort.Strings(labels)
+	return labels
 }
 
 // mcpConfigPaths returns the MCP configuration files of the given scopes,
@@ -333,6 +371,13 @@ func startConfiguredMCPServers(ctx context.Context, scopes []packageScope, disab
 
 // runPackageCommand implements the package management flags.
 func runPackageCommand(install string, uninstall string, list bool, listMCP bool, local bool, repo string) error {
+	if local && strings.TrimSpace(repo) == "" {
+		workspace, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("resolve current folder for project packages: %w", err)
+		}
+		repo = workspace
+	}
 	scopes, err := packageScopes(repo)
 	if err != nil {
 		return err

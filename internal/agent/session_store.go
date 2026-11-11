@@ -28,6 +28,7 @@ func ValidSessionID(id string) bool { return validSessionID.MatchString(id) }
 type SessionSnapshot struct {
 	Version            int            `json:"version"`
 	ID                 string         `json:"id"`
+	Name               string         `json:"name,omitempty"`
 	System             string         `json:"system_prompt"`
 	Messages           []Message      `json:"messages"`
 	CompactionSummary  string         `json:"compaction_summary,omitempty"`
@@ -182,7 +183,7 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 		return nil, errors.New("invalid session snapshot")
 	}
 	session := &Session{
-		ID: snapshot.ID, System: snapshot.System, Model: model, Tools: tools, Store: store,
+		ID: snapshot.ID, Name: snapshot.Name, System: snapshot.System, Model: model, Tools: tools, Store: store,
 		messages: cloneMessages(snapshot.Messages), steering: cloneMessages(snapshot.Steering),
 		compactionSummary: snapshot.CompactionSummary, compactionBoundary: snapshot.CompactionBoundary,
 		followUps: cloneMessages(snapshot.FollowUps), pendingTools: append([]ContentBlock(nil), snapshot.PendingTools...),
@@ -226,7 +227,7 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 
 func (s *Session) snapshotLocked() SessionSnapshot {
 	return SessionSnapshot{
-		Version: sessionSchemaVersion, ID: s.ID, System: s.System,
+		Version: sessionSchemaVersion, ID: s.ID, Name: s.Name, System: s.System,
 		Messages: cloneMessages(s.messages), Steering: cloneMessages(s.steering),
 		CompactionSummary: s.compactionSummary, CompactionBoundary: s.compactionBoundary,
 		FollowUps: cloneMessages(s.followUps), PendingTools: append([]ContentBlock(nil), s.pendingTools...),
@@ -392,6 +393,88 @@ func (s *Session) HeadID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.head
+}
+
+// SetName stores a display name with the session snapshot.
+func (s *Session) SetName(name string) error {
+	if strings.ContainsAny(name, "\r\n\x00") || len(name) > 160 {
+		return errors.New("session name must be a single line no longer than 160 characters")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return errors.New("cannot rename a session while it is running")
+	}
+	previous := s.Name
+	s.Name = strings.TrimSpace(name)
+	if err := s.persistLocked(); err != nil {
+		s.Name = previous
+		return fmt.Errorf("persist session name: %w", err)
+	}
+	return nil
+}
+
+func (s *Session) DisplayName() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Name
+}
+
+// CloneAt persists a copy of this session rooted at entryID under newID.
+// The source session is left unchanged.
+func (s *Session) CloneAt(newID, entryID string) error {
+	if !ValidSessionID(newID) {
+		return errors.New("invalid clone session id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return errors.New("cannot clone while the session is running")
+	}
+	if len(s.pendingTools) > 0 {
+		return errors.New("cannot clone while tool calls are pending")
+	}
+	messages, err := s.messagesAtHead(entryID)
+	if err != nil {
+		return err
+	}
+	if len(messages) > 0 && !validTranscriptSuffix(messages) {
+		return errors.New("cannot clone from a point inside an incomplete tool exchange")
+	}
+	found := entryID == ""
+	for _, entry := range s.entries {
+		if entry.ID == entryID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("session entry %q was not found", entryID)
+	}
+	snapshot := s.snapshotLocked()
+	snapshot.ID = newID
+	snapshot.Messages = messages
+	snapshot.Head = entryID
+	snapshot.Steering = nil
+	snapshot.FollowUps = nil
+	snapshot.PendingTools = nil
+	if entryID != s.head {
+		snapshot.CompactionSummary = ""
+		snapshot.CompactionBoundary = 0
+	}
+	for current := entryID; current != ""; {
+		entry := s.entryByID(current)
+		if entry.Type == "model_change" {
+			snapshot.ModelID = entry.ModelID
+			break
+		}
+		current = entry.ParentID
+	}
+	snapshot.UpdatedAt = time.Now().UTC()
+	if s.Store == nil {
+		return errors.New("session storage is unavailable")
+	}
+	return s.Store.Save(snapshot)
 }
 
 func (s *Session) entryByID(id string) SessionEntry {

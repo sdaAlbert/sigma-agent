@@ -136,6 +136,20 @@ func TestModelReasoningEffortCanBeConfigured(t *testing.T) {
 	}
 }
 
+func TestDeepSeekThinkingCanBeConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"deepseek_thinking_enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DeepSeekThinkingEnabled {
+		t.Fatal("DeepSeek thinking mode should be enabled by config")
+	}
+}
+
 func TestCommandFilesystemScopeDefaultsAndCanBeRestricted(t *testing.T) {
 	if got := Defaults().CommandFilesystemScope; got != "unrestricted" {
 		t.Fatalf("default command_filesystem_scope = %q, want unrestricted", got)

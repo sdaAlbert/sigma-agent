@@ -12,3 +12,18 @@ evals/results/
 *.exe
 __pycache__/
 docs/PROJECT_STATUS.md
+/research/
+
+# Flattened local SWE-bench raw records; task README files contain curated summaries
+evals/swebench-verified-mini/tasks/*/record--*
+evals/swebench-verified-mini/tasks/batch-issue--*.md
+evals/swebench-verified-mini/tasks/batch-issues.md
+
+
+
+# Original SWE-bench archive payloads stored locally under their task
+evals/swebench-verified-mini/tasks/*/archive/
+evals/swebench-verified-mini/tasks/_shared-archive/
+
+# Raw repository memory snapshots may contain benchmark-specific knowledge.
+/evals/swebench-verified-mini/reference/memory/

@@ -6,15 +6,30 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
-	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
 	"github.com/sdaAlbert/sigma-agent/internal/workflow"
+	workspaceagent "github.com/sdaAlbert/sigma-agent/internal/workspace"
 )
+
+func TestResolveWorkspacePathUsesExplicitRepoAndRejectsMissingFolders(t *testing.T) {
+	want := t.TempDir()
+	got, err := resolveWorkspacePath(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(want) {
+		t.Fatalf("resolveWorkspacePath() = %q, want %q", got, filepath.Clean(want))
+	}
+	if _, err := resolveWorkspacePath(filepath.Join(want, "missing")); err == nil {
+		t.Fatal("resolveWorkspacePath() accepted a missing folder")
+	}
+}
 
 type interactiveSteerModel struct {
 	call     int
@@ -90,7 +105,7 @@ func TestInteractiveSessionSteersActiveRunAtSafeTurn(t *testing.T) {
 	workspace := t.TempDir()
 	finished := make(chan error, 1)
 	go func() {
-		_, runErr := interactiveSession(ctx, session, workspace, "start the task", false, "", config.Runtime{}, sigmaagent.ProjectGuidance{}, workflow.NewHost(consoleWorkflowHandler{}))
+		_, runErr := interactiveSession(ctx, session, workspace, "start the task", false, "", config.Runtime{}, workspaceagent.ProjectGuidance{}, workflow.NewHost(consoleWorkflowHandler{}))
 		finished <- runErr
 	}()
 	steeringQueued := make(chan struct{}, 2)
@@ -132,7 +147,7 @@ func TestInteractiveSessionSteersActiveRunAtSafeTurn(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Agent did not issue the next model request")
 	}
-	if _, err := io.WriteString(inputW, "/exit\n"); err != nil {
+	if _, err := io.WriteString(inputW, "/quit\n"); err != nil {
 		t.Fatal(err)
 	}
 	select {

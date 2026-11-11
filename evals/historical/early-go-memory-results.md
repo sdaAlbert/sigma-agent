@@ -31,4 +31,4 @@ The run IDs and task/dataset keys above are the source references for the local 
 
 ## How this relates to the primary evaluation
 
-These Go and memory experiments are historical design evidence. The active, externally comparable evaluation track is [SWE-bench Verified Mini](../swebench-verified-mini/README.md). Do not merge these early single-task or retrieval-only outcomes into its score.
+These Go and memory experiments are historical design evidence. The active evaluation track is [SWE-bench Verified Mini](../swebench-verified-mini/evaluation-results.md). Do not merge these early single-task or retrieval-only outcomes into its score.

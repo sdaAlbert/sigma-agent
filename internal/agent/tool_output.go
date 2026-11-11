@@ -20,7 +20,7 @@ import (
 const (
 	maxExternalToolOutputBytes = 32 << 20
 	maxToolOutputSessionBytes  = 128 << 20
-	maxToolOutputReadBytes     = 12 << 10
+	maxToolOutputReadBytes     = 50 << 10
 )
 
 var toolOutputIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -205,14 +205,32 @@ func ReadToolOutputTool(store ToolOutputStore, inlineLimit int) Tool {
 		if err != nil {
 			return "", err
 		}
+		startOffset := nextOffset - int64(len(content))
+		if limited, truncated := limitOutputLines(content, 1999); truncated {
+			content = limited
+			nextOffset = startOffset + int64(len(content))
+		}
 		return fmt.Sprintf("artifact_id=%s | requested_offset=%d | next_offset=%d | size_bytes=%d\n%s", args.ArtifactID, args.Offset, nextOffset, size, content), nil
 	}}
 }
 
+func limitOutputLines(content string, maxLines int) (string, bool) {
+	lineCount := 0
+	for index := 0; index < len(content); index++ {
+		if content[index] == '\n' {
+			lineCount++
+			if lineCount >= maxLines {
+				return content[:index+1], index+1 < len(content)
+			}
+		}
+	}
+	return content, false
+}
+
 func externalizedToolOutput(ref ToolOutputRef, output string, inlineLimit int) string {
-	previewBytes := inlineLimit / 8
-	if previewBytes > 1024 {
-		previewBytes = 1024
+	previewBytes := (inlineLimit - 512) / 2
+	if previewBytes > maxToolOutputReadBytes/2 {
+		previewBytes = maxToolOutputReadBytes / 2
 	}
 	if previewBytes < 128 {
 		previewBytes = 128
@@ -223,11 +241,27 @@ func externalizedToolOutput(ref ToolOutputRef, output string, inlineLimit int) s
 	for tailStart < len(data) && !utf8.RuneStart(data[tailStart]) {
 		tailStart++
 	}
-	preview := string(data[:headEnd])
+	head := limitPreviewLines(string(data[:headEnd]), 999, true)
+	tail := ""
 	if tailStart > headEnd {
-		preview += "\n[… middle stored in artifact …]\n" + string(data[tailStart:])
+		tail = limitPreviewLines(string(data[tailStart:]), 1000, false)
+	}
+	preview := head
+	if tail != "" {
+		preview += "\n[… middle stored in artifact …]\n" + tail
 	}
 	return fmt.Sprintf("Large tool result saved to session artifact. artifact_id=%s | size_bytes=%d | sha256=%s. Use read_tool_output with this artifact_id and offset to inspect the complete result.\n--- preview ---\n%s", ref.ID, ref.SizeBytes, ref.SHA256, preview)
+}
+
+func limitPreviewLines(content string, maxLines int, keepHead bool) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxLines {
+		return content
+	}
+	if keepHead {
+		return strings.Join(lines[:maxLines], "\n")
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
 }
 
 func utf8PrefixLength(data []byte, limit int) int {
@@ -250,4 +284,14 @@ func truncateToolOutput(output string, limit int) string {
 	}
 	limit = utf8PrefixLength(data, limit)
 	return string(data[:limit]) + "\n[tool output truncated]"
+}
+
+func truncateToolOutputLines(output string, maxLines int) string {
+	lines := strings.Split(output, "\n")
+	if len(lines) <= maxLines {
+		return output
+	}
+	headLines := (maxLines - 1) / 2
+	tailLines := maxLines - headLines - 1
+	return strings.Join(lines[:headLines], "\n") + "\n[... lines omitted ...]\n" + strings.Join(lines[len(lines)-tailLines:], "\n")
 }

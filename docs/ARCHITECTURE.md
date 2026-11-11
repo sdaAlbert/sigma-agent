@@ -1,6 +1,6 @@
 # Go Agent Runtime
 
-This runtime uses Pi Agent as an architecture reference, not as a dependency. It keeps the agent loop, transcript, tool lifecycle, policy hooks, cancellation, and event model in Go. Provider adapters normalize Anthropic Messages and OpenAI Chat Completions-compatible APIs into Sigma's model interface; the interactive CLI exposes `/login` for model and GitHub credentials and `/model` for model selection.
+This runtime uses Pi Agent as an architecture reference, not as a dependency. It keeps the agent loop, transcript, tool lifecycle, policy hooks, cancellation, and event model in Go. Provider adapters normalize Anthropic Messages and OpenAI Chat Completions-compatible APIs into Sigma's model interface; the interactive CLI exposes `/login` for model and GitHub credentials and `/model` for model selection. For the rationale and evidence limits behind Skills, memory, retrieval, cache-stable prompts, and runtime workflow safeguards, see [Agent context and reliability design notes](AGENT_DESIGN_NOTES.md).
 
 ## Runtime flow
 
@@ -37,20 +37,21 @@ Prompt / steering / follow-up
 
 ## Terminal interaction
 
-The CLI supports one-shot tasks and a persistent terminal conversation. All new sessions follow Pi's direct-workspace behavior: file tools and Docker commands work in the selected checkout, and changes are visible immediately. Sigma does not create task worktrees or provide dedicated publish, branch, commit, or push commands. Sessions keep one transcript across prompts and checkpoint each prompt for later resume. Sessions created by older versions can still resume from their saved worktree.
+The CLI supports one-shot tasks and a persistent terminal conversation. All new sessions follow Pi's direct-workspace behavior: file tools and Docker commands work in the selected checkout, and changes are visible immediately. Sigma does not create task worktrees. Its built-in Git tool performs local status, diff, history, branch listing, init, staging, and commit operations in the workspace; remote operations remain outside the tool. Sessions keep one transcript across prompts and checkpoint each prompt for later resume. Sessions created by older versions can still resume from their saved worktree.
 
 ```powershell
-# Start an interactive session
-go run ./cmd/sigma-agent --repo C:\path\to\clean\repo --interactive
+# Start an interactive session in the current folder
+cd C:\path\to\workspace
+go run ./cmd/sigma-agent
 
 # Start with an initial instruction
-go run ./cmd/sigma-agent --repo C:\path\to\clean\repo --interactive --task "Find and fix the bug in ..."
+go run ./cmd/sigma-agent --task "Find and fix the bug in ..."
 
 # Resume a saved session
-go run ./cmd/sigma-agent --repo C:\path\to\clean\repo --interactive --resume <session-id>
+go run ./cmd/sigma-agent --resume <session-id>
 ```
 
-Interactive invocations start the Bubble Tea TUI. Setup, credential entry, model/repository/session selection, multiline prompts, streamed responses, tool cards, and session commands are handled inside the same UI. It switches to the alternate screen for a full-screen interface, then restores the terminal on exit. Use `--task` without `--tui` for the one-shot CLI; `--json` and `--serve` remain separate modes. See [the user guide](USAGE.md) for setup and command details.
+Interactive invocations start the Bubble Tea TUI in the process's current directory. Setup, credential entry, model/session selection, multiline prompts, streamed responses, tool cards, and session commands are handled inside the same UI. It switches to the alternate screen for a full-screen interface, then restores the terminal on exit. Use `--task` for a one-shot CLI task in that same directory; `--json` and `--serve` remain separate modes. See [the user guide](USAGE.md) for setup and command details.
 
 `run_command` supports foreground execution plus `action=start`, `action=list`, `action=status`, and `action=stop` for detached Docker commands. Job metadata is stored under the session directory and survives `--resume`; one task can run at a time and expires after 30 minutes. Read-only repository tools remain available while it runs. File edits, shell commands, and tests wait until the job completes or is stopped, because the container shares the active repository workspace.
 
@@ -86,7 +87,7 @@ query -> local BM25 ranks ----------------------------------------------\
 query -> embedding -> repository-filtered vector ranks -------------------+-> RRF -> search_memory
 ```
 
-The Markdown file remains the source of truth. `--index-memory --repo <path>` syncs only its facts into the derived Qdrant collection. At runtime, the `search_memory` tool combines local BM25 with vector candidates using reciprocal-rank fusion; Qdrant filters by exact repository ID. If embedding/Qdrant is unavailable or no vector candidates match, it falls back to BM25. Returned facts retain source, category, and date; current source and tests take precedence. When `memory_auto_write` is enabled, a successful non-interactive run gets a separate bounded post-run model call that may append up to three facts; failed/interrupted runs do not write. Markdown stays outside the result patch, and vector indexing is refreshed after additions.
+The Markdown file remains the source of truth. Run `--index-memory` from its workspace to sync only its facts into the derived Qdrant collection. At runtime, the `search_memory` tool combines local BM25 with vector candidates using reciprocal-rank fusion; Qdrant filters by exact workspace identity. If embedding/Qdrant is unavailable or no vector candidates match, it falls back to BM25. Returned facts retain source, category, and date; current source and tests take precedence. When `memory_auto_write` is enabled, a successful non-interactive run gets a separate bounded post-run model call that may append up to three facts; failed/interrupted runs do not write. Markdown stays outside the result patch, and vector indexing is refreshed after additions.
 
 Repository memory is used during ordinary task runs through the on-demand
 `search_memory` tool. Mini SWE configs may enable it, but a memory-enabled run
@@ -133,7 +134,7 @@ is the selected checkout; isolated sessions use their worktree. `--index-memory`
 also uses the configured external source. When `memory_auto_write` is enabled,
 successful sessions append to the external source and refresh that same scope.
 
-`--index-memory --repo <path>` synchronizes memory facts to `sigma_agent_memory`; no code collection or code indexing command exists. Vector search applies exact `repo_id` filtering and returns kind, provenance, and age. Entries older than 180 days are marked for revalidation. The prompt asks the Agent to verify retrieved facts against current code/tests, treats memory as untrusted reference data, and gives current source and user instructions precedence. Automatic capture is controlled by `memory_auto_write` and must remain disabled in controlled memory/no-memory evaluations to prevent cross-task leakage. Symlink paths are rejected so project context cannot escape the worktree.
+`--index-memory` synchronizes current-workspace memory facts to `sigma_agent_memory`; no code collection or code indexing command exists. Vector search applies exact `repo_id` filtering and returns kind, provenance, and age. Entries older than 180 days are marked for revalidation. The prompt asks the Agent to verify retrieved facts against current code/tests, treats memory as untrusted reference data, and gives current source and user instructions precedence. Automatic capture is controlled by `memory_auto_write` and must remain disabled in controlled memory/no-memory evaluations to prevent cross-task leakage. Symlink paths are rejected so project context cannot escape the workspace.
 
 ## Pi concepts to reproduce in Go
 
@@ -146,7 +147,7 @@ successful sessions append to the external source and refresh that same scope.
 - Retry is bounded and limited to retryable provider failures. Cancellation propagates to provider requests and tools.
 - Steering messages interrupt at a safe turn boundary; follow-up messages run only after the current request settles.
 - Session events and tool policy hooks are independent of the provider adapter. The file session store checkpoints transcript and queues; the context manager compacts only the provider request while retaining canonical history.
-- A read-only GitHub MCP adapter can add issue, repository, and pull-request context when credentials are configured. Git branch, commit, push, and pull-request creation use ordinary tools outside Sigma's dedicated workflow. The runtime owns JSON-RPC framing, version discovery/fallback, tool listing, and process cleanup; all remote tools are namespaced and serialized.
+- A read-only GitHub MCP adapter can add issue, repository, and pull-request context when credentials are configured. Local Git operations use the workspace's built-in Git tool; push and pull-request creation remain outside Sigma's remote integrations. The runtime owns JSON-RPC framing, version discovery/fallback, tool listing, and process cleanup; all remote tools are namespaced and serialized.
 - A shared MCP client (`internal/mcp`) serves every stdio MCP server. The GitHub adapter and the `mcp.json` servers use the same protocol layer, so version discovery, frame limits, tool namespacing, and process cleanup behave identically. Remote tools are exposed as `mcp__<server>__<tool>` and run in sequence.
 - A package manager (`internal/pkgmgr`) installs npm and git packages into a scope directory and records them in a scope registry. A package contributes Agent Skills, stdio MCP servers, and JavaScript workflow extensions. The workflow host supports slash commands, Agent tool registration, notifications, TUI confirmations, and read-only lifecycle events; it does not expose mutable session state or custom TUI rendering. Built-in GitHub MCP and configured MCP server tools use the same host tool registration and dispatch path.
 - Configured external command tools run one trusted host executable per tool call with JSON stdin and bounded stdout. They inherit the user's environment and permissions; this adapter is not a sandbox or package manager.

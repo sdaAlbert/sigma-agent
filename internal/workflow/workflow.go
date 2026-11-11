@@ -225,7 +225,7 @@ func validToolName(name string) bool {
 
 func reservedCommand(name string) bool {
 	switch name {
-	case "help", "repo", "model", "login", "logout", "session", "resume", "network", "start", "exit", "quit", "diff", "tree", "steer", "followup", "abort", "skill":
+	case "help", "repo", "model", "login", "logout", "session", "resume", "network", "start", "new", "exit", "quit", "diff", "tree", "steer", "followup", "abort", "skill":
 		return true
 	default:
 		return false

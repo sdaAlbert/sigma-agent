@@ -21,7 +21,7 @@ isolated task workspace as an external profile. Keep it short and stable.
 - Treat `config.json` and `evals/configs/*.json` as the source of runtime and
   experiment settings. Avoid copying their values into long-lived notes.
 - When benchmark reference files are available in the active workspace, read
-  `evals/benchmark-protocol.md` and the relevant plan under `evals/` before
+  `evals/swebench-verified-mini/benchmark-protocol.md` and the relevant plan under `evals/` before
   preparing or interpreting a run. The 50-task SWE-bench Verified Mini list
   and results live in `evals/swebench-verified-mini-50-evaluation-plan.md`.
 - A separate task checkout does not inherit this file automatically. If a run
@@ -52,7 +52,7 @@ isolated session workspace and searches it under the configured stable ID.
 
 ## Benchmark archive layout
 
-- Put completed SWE-bench task and batch archives under `../archive/benchmarks/swebench-verified-mini/runs`. Keep the shared issue index at `var/benchmark-data/swebench-verified-mini/evaluation-issues.md`; this local benchmark log is ignored and is not a commit artifact.
+- Keep the study index, 50 task pages, config snapshots, and compact result summaries under `evals/swebench-verified-mini`. Keep full task/batch archives under `../archive/benchmarks/swebench-verified-mini/runs`; maintain the shared issue-pattern summary in the `Operational issue patterns and recoveries` section of `evals/swebench-verified-mini/experiment-method.md`. `var` is for active run logs and resumable runtime state, not the permanent study index.
 - Keep run-specific temporary logs and active evaluation staging under `var`; after the Agent run, official evaluation, and archive are complete, move the finished archive into the central `../archive` tree.
 - Keep Sigma's resumable runtime state in `var/runs` and `var/sessions`; do not move incomplete session state as part of archive cleanup.
 - Historical `swb5/outputs` records are in `../archive/legacy/swb5/outputs`; shared datasets and task checkouts remain under the sibling `../swb5` cache.

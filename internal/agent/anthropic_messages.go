@@ -386,6 +386,7 @@ type sseEnvelope struct {
 	Delta        struct {
 		Type        string `json:"type"`
 		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
@@ -460,8 +461,13 @@ func decodeMessagesStream(body io.Reader, onEvent func(ModelEvent)) (ModelRespon
 					onEvent(ModelEvent{Type: "tool_input_delta", Text: event.Delta.PartialJSON, Index: event.Index})
 				}
 			case "thinking_delta":
-				if onEvent != nil {
-					onEvent(ModelEvent{Type: "thinking_delta", Text: event.Delta.Text, Index: event.Index})
+				thinking := event.Delta.Thinking
+				if thinking == "" {
+					thinking = event.Delta.Text
+				}
+				block.Text += thinking
+				if onEvent != nil && strings.TrimSpace(thinking) != "" {
+					onEvent(ModelEvent{Type: "thinking_delta", Text: thinking, Index: event.Index})
 				}
 			}
 		case "content_block_stop":

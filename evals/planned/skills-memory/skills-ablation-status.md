@@ -33,7 +33,7 @@ image, turn/tool/token limits, and evaluator identical. Change only
   all invalid/incomplete attempts.
 
 Run setup and scoring from the shared
-[benchmark protocol](../../benchmark-protocol.md). Use a fresh issue set for a
+[benchmark protocol](../../swebench-verified-mini/benchmark-protocol.md). Use a fresh issue set for a
 causal comparison; historical retests are not a substitute for the paired arms.
 
 ## Current evidence

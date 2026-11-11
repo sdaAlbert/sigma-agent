@@ -21,10 +21,6 @@ func missingStopReasonRecoveryPrompt() string {
 	return "The previous model response ended without a finish reason. Continue the original task from the current repository state. Make one concrete tool call or provide a final answer; do not repeat completed exploration."
 }
 
-func verificationRecoveryPrompt(missing []string) string {
-	return "Your attempted final response was held because the latest source changes still need " + strings.Join(missing, " and ") + ". Continue from the current patch, complete those checks, and revise the conclusion if the evidence changes."
-}
-
 func toolErrorOutput(toolName, message string) string {
 	return "Tool error: " + message + "\nRecovery guidance: " + toolErrorRecoveryHint(toolName, message)
 }

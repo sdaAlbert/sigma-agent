@@ -1,10 +1,86 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestDeepSeekThinkingRoundTripsAcrossToolTurns(t *testing.T) {
+	messages := []Message{
+		{Role: "assistant", Content: []ContentBlock{
+			{Type: "thinking", Text: "inspect the field path"},
+			{Type: "text", Text: "I will inspect the model field."},
+			{Type: "tool_use", ID: "call-1", Name: "read_file", Input: json.RawMessage(`{"path":"django/forms/models.py"}`)},
+		}},
+		{Role: "user", Content: []ContentBlock{{Type: "tool_result", ToolUseID: "call-1", Content: "source"}}},
+	}
+	requestMessages, err := openAIRequestMessages("system", messages, "deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requestMessages[1]["reasoning_content"]; got != "inspect the field path" {
+		t.Fatalf("reasoning_content = %v, want preserved DeepSeek reasoning", got)
+	}
+	if _, ok := requestMessages[1]["tool_calls"]; !ok {
+		t.Fatal("tool calls were dropped while preserving reasoning_content")
+	}
+
+	stream := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"follow the field\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	response, err := decodeOpenAIChatStream(strings.NewReader(stream), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Content) != 2 || response.Content[0].Type != "thinking" || response.Content[0].Text != "follow the field" {
+		t.Fatalf("decoded thinking content = %#v", response.Content)
+	}
+	if response.Content[1].Type != "text" || response.Content[1].Text != "Done." {
+		t.Fatalf("decoded answer content = %#v", response.Content)
+	}
+}
+
+func TestDeepSeekThinkingRequestConfiguration(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	model := &OpenAIChatCompletionsModel{Provider: "deepseek", Model: "deepseek-flash", BaseURL: server.URL}
+	model.ConfigureDeepSeekThinking(true)
+	model.ConfigureReasoningEffort("medium")
+	if _, err := model.Stream(context.Background(), "system", []Message{{Role: "user", Content: []ContentBlock{{Type: "text", Text: "task"}}}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	thinking, ok := request["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" {
+		t.Fatalf("thinking request = %#v, want enabled", request["thinking"])
+	}
+	if request["reasoning_effort"] != "medium" {
+		t.Fatalf("reasoning_effort = %v, want medium", request["reasoning_effort"])
+	}
+}
 
 func TestOpenAIRequestMessagesAnswersToolCallBeforeAdjacentUserText(t *testing.T) {
 	messages := []Message{

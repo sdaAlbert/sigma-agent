@@ -15,13 +15,15 @@ import (
 )
 
 type OpenAIChatCompletionsModel struct {
-	Provider        string
-	Model           string
-	BaseURL         string
-	APIKey          string
-	Client          *http.Client
-	MaxRetries      int
-	MaxOutputTokens int
+	Provider         string
+	Model            string
+	BaseURL          string
+	APIKey           string
+	Client           *http.Client
+	MaxRetries       int
+	MaxOutputTokens  int
+	ReasoningEffort  string
+	DeepSeekThinking bool
 }
 
 func (m *OpenAIChatCompletionsModel) ModelID() string { return m.Provider + "/" + m.Model }
@@ -32,6 +34,14 @@ func (m *OpenAIChatCompletionsModel) ConfigureRuntime(maxRetries, maxOutputToken
 	m.Client = &http.Client{Timeout: timeout}
 }
 
+func (m *OpenAIChatCompletionsModel) ConfigureReasoningEffort(effort string) {
+	m.ReasoningEffort = strings.TrimSpace(effort)
+}
+
+func (m *OpenAIChatCompletionsModel) ConfigureDeepSeekThinking(enabled bool) {
+	m.DeepSeekThinking = enabled
+}
+
 func (m *OpenAIChatCompletionsModel) Stream(ctx context.Context, system string, messages []Message, tools []ToolDefinition, onEvent func(ModelEvent)) (ModelResponse, error) {
 	if m.Client == nil {
 		m.Client = defaultModelHTTPClient()
@@ -40,7 +50,7 @@ func (m *OpenAIChatCompletionsModel) Stream(ctx context.Context, system string, 
 	if err != nil {
 		return ModelResponse{}, err
 	}
-	requestMessages, err := openAIRequestMessages(system, messages)
+	requestMessages, err := openAIRequestMessages(system, messages, m.Provider)
 	if err != nil {
 		return ModelResponse{}, err
 	}
@@ -52,11 +62,15 @@ func (m *OpenAIChatCompletionsModel) Stream(ctx context.Context, system string, 
 		"model": m.Model, "messages": requestMessages, "stream": true,
 		"max_tokens": outputTokenLimit(m.MaxOutputTokens),
 	}
-	// DeepSeek enables its thinking mode by default. Sigma's Chat Completions
-	// adapter does not preserve DeepSeek's reasoning_content across tool turns,
-	// and coding-agent tool loops benefit from the faster non-thinking mode.
 	if strings.EqualFold(m.Provider, "deepseek") {
-		requestBody["thinking"] = map[string]string{"type": "disabled"}
+		thinkingType := "disabled"
+		if m.DeepSeekThinking {
+			thinkingType = "enabled"
+			if m.ReasoningEffort != "" {
+				requestBody["reasoning_effort"] = m.ReasoningEffort
+			}
+		}
+		requestBody["thinking"] = map[string]string{"type": thinkingType}
 	}
 	if len(requestTools) > 0 {
 		requestBody["tools"] = requestTools
@@ -115,7 +129,11 @@ func (m *OpenAIChatCompletionsModel) Stream(ctx context.Context, system string, 
 	}
 }
 
-func openAIRequestMessages(system string, messages []Message) ([]map[string]any, error) {
+func openAIRequestMessages(system string, messages []Message, providers ...string) ([]map[string]any, error) {
+	provider := ""
+	if len(providers) > 0 {
+		provider = providers[0]
+	}
 	result := make([]map[string]any, 0, len(messages)+1)
 	if system != "" {
 		result = append(result, map[string]any{"role": "system", "content": system})
@@ -124,11 +142,16 @@ func openAIRequestMessages(system string, messages []Message) ([]map[string]any,
 		if message.Role == "assistant" {
 			entry := map[string]any{"role": "assistant"}
 			var text strings.Builder
+			var reasoning strings.Builder
 			toolCalls := make([]map[string]any, 0)
 			for _, block := range message.Content {
 				switch block.Type {
 				case "text":
 					text.WriteString(block.Text)
+				case "thinking":
+					if strings.EqualFold(provider, "deepseek") {
+						reasoning.WriteString(block.Text)
+					}
 				case "tool_use":
 					arguments := block.Input
 					if len(arguments) == 0 || !json.Valid(arguments) {
@@ -147,6 +170,17 @@ func openAIRequestMessages(system string, messages []Message) ([]map[string]any,
 			}
 			if len(toolCalls) > 0 {
 				entry["tool_calls"] = toolCalls
+			}
+			if reasoning.Len() > 0 {
+				entry["reasoning_content"] = reasoning.String()
+			}
+			// DeepSeek may return a thinking-only response when it reaches the
+			// output-token limit. Sending that history item back with null content
+			// and no tool calls is rejected by the API. The following recovery
+			// prompt already asks the model to continue from the preceding context,
+			// so omit this non-actionable assistant message.
+			if text.Len() == 0 && len(toolCalls) == 0 {
+				continue
 			}
 			result = append(result, entry)
 			continue
@@ -266,8 +300,9 @@ type openAIStreamChunk struct {
 	} `json:"usage"`
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`
@@ -320,6 +355,23 @@ func decodeOpenAIChatStream(body io.Reader, onEvent func(ModelEvent)) (ModelResp
 			return nil
 		}
 		choice := chunk.Choices[0]
+		if choice.Delta.ReasoningContent != "" {
+			position := -1
+			for i := range response.Content {
+				if response.Content[i].Type == "thinking" {
+					position = i
+					break
+				}
+			}
+			if position < 0 {
+				position = len(response.Content)
+				response.Content = append(response.Content, ContentBlock{Type: "thinking"})
+			}
+			response.Content[position].Text += choice.Delta.ReasoningContent
+			if onEvent != nil {
+				onEvent(ModelEvent{Type: "thinking_delta", Text: choice.Delta.ReasoningContent, Index: position})
+			}
+		}
 		if choice.Delta.Content != "" {
 			position := -1
 			for i := range response.Content {

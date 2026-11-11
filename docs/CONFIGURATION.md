@@ -12,7 +12,7 @@ defaults. A file can contain only the settings that need changing.
   "max_context_tokens": 64000,
   "context_compaction_threshold_tokens": 30000,
   "summary_tokens": 800,
-  "max_tool_result_bytes": 16384,
+  "max_tool_result_bytes": 51200,
   "max_retrieval_query_bytes": 8192,
   "model_output_tokens": 16384,
   "model_reasoning_effort": "max",
@@ -60,16 +60,17 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `max_context_tokens` | 64000 | 512–1000000 | Hard estimated context ceiling; proactive compaction normally uses the lower threshold below. If MiniMax explicitly rejects an oversized prompt, Sigma Agent compacts the request and retries up to three times |
 | `context_compaction_threshold_tokens` | `min(30000, max_context_tokens)` | 0–`max_context_tokens` | Proactively compact older conversation history when estimated input exceeds this soft threshold. The context manager permits up to 256 estimated tokens above the threshold, capped by `max_context_tokens`; if the newest complete turn still cannot fit the soft budget, it can retain that turn up to the hard context ceiling after shrinking tool output. `0` selects the automatic default. |
 | `summary_tokens` | 800 | 0 to less than compaction threshold | Maximum estimated size of summaries produced by automatic or model-requested context compaction |
-| `max_tool_result_bytes` | 16384 | 1024–4194304 | Inline limit for each tool result. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. If artifact storage fails or reaches its cap, the inline result is truncated. |
+| `max_tool_result_bytes` | 51200 | 1024–4194304 | Inline limit for each tool result, matching Pi's 50 KiB output budget. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. Use `read_tool_output` with offsets to fetch long results in chunks. If artifact storage fails or reaches its cap, the inline result is truncated. |
 | `max_retrieval_query_bytes` | 8192 | 500–65536 | Maximum UTF-8 bytes accepted by `search_memory` (legacy setting name) |
 | `model_output_tokens` | 16384 | 256–65536 | Requested output limit for each model response; truncated responses get up to two continuation attempts |
-| `model_reasoning_effort` | `max` | `low`, `medium`, `high`, `xhigh`, `max` | For MiniMax M3.1 Flash, sends `output_config.effort`. M3.1 Flash always thinks; lower effort can reduce latency and reasoning tokens. The current DeepSeek Chat Completions adapter explicitly disables thinking for faster tool loops; other models ignore this setting. |
+| `model_reasoning_effort` | `max` | `low`, `medium`, `high`, `xhigh`, `max` | For MiniMax M3.1 Flash, sends `output_config.effort`. M3.1 Flash always thinks; lower effort can reduce latency and reasoning tokens. For DeepSeek, this value is sent as `reasoning_effort` only when `deepseek_thinking_enabled` is true. |
+| `deepseek_thinking_enabled` | `false` | boolean | Enables DeepSeek Chat Completions thinking mode for non-TUI runs. In the TUI setup screen, `/thinking on` or `/thinking off` overrides this for the current TUI run. Sigma preserves returned `reasoning_content` in the session and sends it back on subsequent tool turns, as required by DeepSeek. |
 | `tool_timeout_ms` | 600000 | 1000–1800000 | Timeout for each tool execution, including Docker environment image preparation |
 | `model_timeout_ms` | 120000 | 1000–1800000 | HTTP timeout for a model request |
 | `max_retries` | 2 | 0–10 | Retries for retryable transport/server failures, including HTTP 429 and 529 |
 | `command_execution_image` | `debian:trixie-slim` | Linux Docker image reference | Fallback image used by `run_command` until the Agent prepares an environment or chooses an image for a command |
 | `command_filesystem_scope` | `unrestricted` | `unrestricted` or `workspace` | In `workspace` mode, rejects explicit absolute paths outside `/workspace` and parent-directory traversal before starting a command. This is a command admission guard, not a complete OS sandbox against programs that construct paths dynamically |
-| `allow_container_network` | `false` | boolean | Allow command containers outbound internet access so project dependencies can be downloaded. Set it to `true` or use `/network on` to enable it; commands and package install scripts can contact external services while it is enabled |
+| `allow_container_network` | `false` | boolean | Allow Docker command and environment-build steps to access the internet. Change the saved setting in the TUI `/settings` picker or set it in configuration; see [Docker command environments](DOCKER.md) |
 | `skills_enabled` | `true` | boolean | Discover project `.agents/skills/` and `.pi/skills/`, plus user `~/.agents/skills/` and `~/.pi/agent/skills/`. Set to `false` for a matched no-Skill evaluation; repository memory stays enabled |
 | `memory_enabled` | `true` | boolean | Enable repository memory context and `search_memory`. Set to `false` for a matched no-memory comparison; code browsing tools remain available |
 | `memory_auto_write` | `false` | boolean | After a successful non-interactive run, use one bounded model call to extract up to three durable repository facts into `.sigma-agent/MEMORY.md`, then refresh Qdrant when configured. Requires `memory_enabled`; generated notes and extra tokens are recorded in `run.json`. Set it to `true` to opt in. |
@@ -83,6 +84,8 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `tool_permissions` | `{}` | tool name → `allow` or `deny` | Exact per-tool overrides. Tool names match the names exposed to the model, including namespaced MCP tools. |
 
 Tool permissions are checked after argument validation and before the handler runs. A denied call is not executed; the Agent receives a tool error and the JSONL trace records `tool_permission_denied`. This first version supports policy-based allow/deny only; it does not prompt for interactive approval.
+
+In the TUI, `/trust` saves a per-folder decision under the user's Sigma configuration. Project-scoped JavaScript extensions and MCP servers stay disabled until that folder is trusted; use `/reload` after changing the decision. User-scoped integrations and project Skills remain available. Trust does not override `tool_permissions`, enable container networking, or grant operating-system permissions.
 
 The model can also call `compact_context` by itself when it judges that older
 conversation or tool output can be summarized without losing information needed
@@ -180,9 +183,9 @@ to enter one directly. It saves API keys or the GitHub token; `/model`
 to show or select a provider/model. The initial API-key providers are MiniMax,
 Anthropic, OpenAI, DeepSeek, and OpenRouter. MiniMax and Anthropic use the
 Anthropic Messages protocol; OpenAI, DeepSeek, and OpenRouter use Chat
-Completions-compatible endpoints. Model IDs are entered as
-`/model <provider>/<model-id>` rather than fetched from a remote catalog. Use
-`/model save` to set the default for new sessions. `/logout <provider>` removes
+Completions-compatible endpoints. In the TUI, `/model` loads the chosen
+provider's model catalog and displays it as keyboard suggestions below the
+input. Use `/model save` to set the default for new sessions. `/logout <provider>` removes
 the locally saved key; environment variables are used when no saved key exists.
 
 Keys entered through `/login` are stored as plaintext credentials in
@@ -195,60 +198,34 @@ kept outside the repository and created with restrictive directory/file
 permissions where the operating system supports them. Prefer environment
 variables for managed or ephemeral environments.
 
-Sigma does not provide dedicated publish, branch, commit, or push commands or
-tools. Tasks work directly in the selected repository, so normal Git commands
-are available through the Docker command tool or the user's terminal. The
-GitHub MCP integration is read-only and can provide issue, repository, and pull
-request context; it does not create pull requests or push code.
+Sigma's built-in `git` tool can inspect local status, diffs, history, and
+branches, initialize the current workspace, stage selected paths, and commit
+when requested. It runs on the Sigma host in the selected workspace, so Git
+does not need to be installed in the Docker command image. The tool does not
+contact remotes; use the terminal for push and pull. The GitHub MCP integration
+is read-only and can provide issue, repository, and pull-request context.
 
-`run_command` accepts any Docker image reference through its optional `image`
-field. The Agent should inspect the repository's Dockerfile/devcontainer, CI,
-README, and manifests, then use `prepare_environment` to select a matching base
-image and install missing system packages or libraries. Sigma builds a derived
-image from a generated Dockerfile and remembers it for subsequent commands and
-session resumes. The build context contains only that generated Dockerfile;
-Docker pulls a missing base image on first use and caches the resulting image.
-`command_execution_image` remains the fallback before an environment is
-prepared. All languages use their project-native build, lint, and test commands
-through `run_command`; Sigma does not hardcode language-specific test profiles.
+See [Docker command environments](DOCKER.md) for the full lifecycle and cache
+model. In brief, interactive foreground `run_command` calls reuse one named
+container during a session. Sigma removes that container on graceful exit; the
+selected Docker image, prepared image, mounted workspace, `.sigma-agent` state,
+and `.sigma-agent/container-home` package caches remain available to the next
+session. `prepare_environment` is optional and should be used only when the
+project needs a missing system tool or library. An empty setup command only
+selects an existing base image; a non-empty setup command builds a reusable
+derived image. The default `debian:trixie-slim` already supports simple shell
+tasks, which do not need environment preparation or dependency installation.
 
-Set `allow_container_network` to `true` or use `/network on` before starting
-a task when outbound access is needed. By default, command containers use a
-Docker internal network, so the Agent cannot download project dependencies such as
-`npm ci`, `pip install`, `mvn test`, or `cargo test`. The mounted selected repository persists between commands. Package-manager home caches
-also persist under `.sigma-agent/container-home`, so Maven, Cargo, pip, npm,
-and Go dependencies need not be downloaded again on every invocation. The mode
-does not install host software, expose the Docker socket to the container,
-start sibling service containers, or guarantee that arbitrary setup
-instructions will work. Each command gets a fresh container, but images built
-with `prepare_environment` preserve system package manager changes between
-commands. Networking is opt-in; package managers or install scripts can send
-requests to external services while it is enabled.
-
-Command containers use a temporary Docker internal network by default, giving
-tests a virtual network interface while blocking external egress; loopback
-remains available. Setting `allow_container_network` to `true` switches them to
-Docker's bridge network. Select a task-appropriate image with `command_execution_image`, the
-`run_command` image argument, or `prepare_environment`; for example, an
-evaluation task may use its own preloaded image and dependencies. Go, Python,
-JavaScript, Rust, and other test commands all run through the same tool and
-resource limits.
-
-`prepare_environment` accepts any valid Docker base image and a shell setup
-command. When network is enabled, that command can install OS packages, headers,
-and compilers into a derived image; those changes persist across test/build
-commands. Its generated build context contains no repository files. When
-network is disabled, Docker build steps have no network, so choose a base image
-that already contains needed packages or re-enable networking for the session.
-`run_command` executes one Linux shell command in the active prepared image (or
-the configured fallback), and an optional `image` can override the image for a
-single command. It mounts the active repository workspace as writable and is
-capped at 2 GiB RAM, 2 CPUs, 128 processes, and five minutes. Project dependency
-caches persist under `.sigma-agent/container-home`. Use the tool's
-`purpose=test` for test commands so the runtime can require a fresh test pass
-after workspace changes. The CLI's existing `default_tool_permission` and
-`tool_permissions` policies can deny `run_command` and
-`prepare_environment` when command execution is not wanted.
+The interactive session container mounts the current workspace at `/workspace`
+and is capped at 2 GiB RAM, 2 CPUs, 128 processes, and five minutes per command.
+The default network blocks external egress. Change the saved network setting in
+the TUI `/settings` picker when a task genuinely needs package downloads; this
+does not change how the host Sigma process reaches the model API. The separate
+background task container created by `run_command action=start` can continue
+after Sigma exits and is managed through `action=list`, `action=status`, and
+`action=stop`. The CLI's `default_tool_permission` and `tool_permissions`
+policies can deny `run_command` and `prepare_environment` when command execution
+is not wanted.
 
 Set `web_search_enabled` to `true` to expose an explicit `web_search` tool to
 the Agent. MiniMax performs the search server-side through its Anthropic
@@ -283,7 +260,7 @@ reads the Markdown directly, so no extra command or Qdrant service is needed
 for the local-only path. Set `memory_enabled` to `false` to disable memory for
 a run.
 
-When vector search is configured, run `--index-memory --repo <path>` after
+When vector search is configured, run `sigma --index-memory` from the workspace after
 updating entries so the derived Qdrant payloads include the category and new
 content hash. Local BM25 always reads the current Markdown file directly.
 
@@ -305,11 +282,11 @@ captured notes are model-generated and may be wrong; verify them before relying
 on them. Keep this setting disabled in controlled memory/no-memory evaluations
 so one task cannot alter another task's memory condition.
 
-Agent tasks run in detached Git worktrees, so this file must be present in the
-task's starting commit for `search_memory` to be registered. Vector results
+Agent tasks use the current working folder, so this file must be present there
+for `search_memory` to be registered. Vector results
 are validated against the current Markdown entry hashes before use.
 
-When vector settings are configured, run `--index-memory --repo <path>` to sync
+When vector settings are configured, run `sigma --index-memory` from the workspace to sync
 only repository memory facts into the `sigma_agent_memory` collection. Source files are
 not embedded or stored in Qdrant. The Agent keeps ordinary `search_code`,
 `list_files`, and `read_file` tools for current-code exploration.
@@ -342,7 +319,8 @@ docker compose up -d qdrant
 $env:SIGMA_AGENT_EMBEDDING_PROVIDER = 'huggingface'
 $env:SIGMA_AGENT_EMBEDDING_MODEL = '<Hugging-Face-model-id>'
 $env:HF_TOKEN = '<token>'
-go run ./cmd/sigma-agent --index-memory --repo C:\path\to\repository
+cd C:\path\to\workspace
+go run ./cmd/sigma-agent --index-memory
 ```
 
 The MiniMax chat key does not configure an embedding endpoint. For an

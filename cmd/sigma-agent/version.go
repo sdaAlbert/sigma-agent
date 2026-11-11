@@ -1,3 +1,3 @@
 package main
 
-const sigmaAgentVersion = "1.0.1"
+const sigmaAgentVersion = "1.1.3"

@@ -16,21 +16,21 @@ import (
 )
 
 type wireMessage struct {
-	Type        string          `json:"type"`
-	ID          string          `json:"id,omitempty"`
-	Name        string          `json:"name,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Event       string          `json:"event,omitempty"`
-	Args        string          `json:"args,omitempty"`
-	Message     string          `json:"message,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	OK          bool            `json:"ok,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Payload     Event           `json:"payload,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema,omitempty"`
-	Arguments   json.RawMessage `json:"arguments,omitempty"`
-	ExecutionMode string        `json:"execution_mode,omitempty"`
-	ModifiesWorkspace bool      `json:"modifies_workspace,omitempty"`
+	Type              string          `json:"type"`
+	ID                string          `json:"id,omitempty"`
+	Name              string          `json:"name,omitempty"`
+	Description       string          `json:"description,omitempty"`
+	Event             string          `json:"event,omitempty"`
+	Args              string          `json:"args,omitempty"`
+	Message           string          `json:"message,omitempty"`
+	Result            json.RawMessage `json:"result,omitempty"`
+	OK                bool            `json:"ok,omitempty"`
+	Error             string          `json:"error,omitempty"`
+	Payload           Event           `json:"payload,omitempty"`
+	InputSchema       json.RawMessage `json:"input_schema,omitempty"`
+	Arguments         json.RawMessage `json:"arguments,omitempty"`
+	ExecutionMode     string          `json:"execution_mode,omitempty"`
+	ModifiesWorkspace bool            `json:"modifies_workspace,omitempty"`
 }
 
 // LoadJavaScript starts a Node.js host for compiled JavaScript extension
@@ -66,13 +66,17 @@ func LoadJavaScript(ctx context.Context, paths []string, handler Handler) (*Host
 	if err != nil {
 		return nil, nil, err
 	}
-	command.Stderr = os.Stderr
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		return nil, nil, err
+	}
 	command.Args = append(command.Args, absolute...)
 	if err := command.Start(); err != nil {
 		return nil, nil, fmt.Errorf("start workflow extension host: %w", err)
 	}
 	process := &nodeHost{stdin: stdin, output: make(chan wireMessage, 32), done: make(chan struct{})}
 	go process.read(stdout)
+	go process.readDiagnostics(stderr, handler)
 	api := NewHost(handler)
 	process.api = api
 	initializeCtx, cancelInitialize := context.WithTimeout(ctx, 10*time.Second)
@@ -84,6 +88,17 @@ func LoadJavaScript(ctx context.Context, paths []string, handler Handler) (*Host
 	}
 	process.command = command
 	return api, process.Close, nil
+}
+
+func (p *nodeHost) readDiagnostics(reader io.Reader, handler Handler) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && handler != nil {
+			handler.Notify("Extension: " + line)
+		}
+	}
 }
 
 type nodeHost struct {

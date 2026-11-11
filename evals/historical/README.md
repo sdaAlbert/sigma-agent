@@ -1,16 +1,23 @@
 # Historical evaluation evidence
 
-This section holds early Go issue-repair runs, superseded task proposals, and
-cross-study observations. These records are useful for designing future runs;
-they are not comparable to the primary SWE-bench Verified Mini results.
+This folder contains historical Go issue results and early Skill/memory
+experiments. They are not comparable to the primary SWE-bench Verified Mini
+results.
 
-- [`early-go-memory-results.md`](early-go-memory-results.md) compresses the
-  early Go, Skill, and repository-memory result notes into one evidence-bounded
-  table. The detailed local notes and raw artifacts remain untracked.
-- [`go-issue-repair/`](go-issue-repair/README.md) indexes initial Go-zero
-  outcomes and superseded Multi-SWE-Bench Go selections.
-- [`cross-study-findings.md`](cross-study-findings.md) preserves the earlier
-  synthesis of validity, raw/source-only scoring, and agent-workflow lessons.
+- [`early-go-memory-results.md`](early-go-memory-results.md) summarizes early
+  Go, Skill, and repository-memory experiments.
+- [`issue-benchmark-inventory.md`](issue-benchmark-inventory.md) lists Go-zero
+  outcomes and assistance conditions.
+- [`subset-naming-research.md`](subset-naming-research.md) records how to label
+  project-selected Multi-SWE-Bench subsets.
+- [`pi-multiswe-go-evaluation-plan.md`](pi-multiswe-go-evaluation-plan.md) is
+  the unrun 50-task Pi baseline proposal, retained as historical planning.
+- [`prepare-go-benchmark-patches.ps1`](prepare-go-benchmark-patches.ps1)
+  preserves raw and source-only patches for diagnostics.
+
+The retired 10-task and paired-set proposals were never run and were
+superseded by later plans; their distinct evidence is summarized in the
+inventory and early results table.
 
 ## Archive access
 

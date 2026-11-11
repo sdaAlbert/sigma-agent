@@ -24,24 +24,24 @@ import (
 	"github.com/sdaAlbert/sigma-agent/internal/config"
 	modelconfig "github.com/sdaAlbert/sigma-agent/internal/model"
 	"github.com/sdaAlbert/sigma-agent/internal/server"
-	"github.com/sdaAlbert/sigma-agent/internal/sigmaagent"
 	"github.com/sdaAlbert/sigma-agent/internal/workflow"
+	workspaceagent "github.com/sdaAlbert/sigma-agent/internal/workspace"
 )
 
 func main() {
 	serve := flag.Bool("serve", false, "run the HTTP/SSE task service")
 	indexMemory := flag.Bool("index-memory", false, "synchronize repository memory into Qdrant")
+	repoArg := flag.String("repo", "", "workspace folder to work in (defaults to the current directory)")
 	configPath := flag.String("config", "config.json", "JSON file with tunable runtime limits")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")
 	maxConcurrent := flag.Int("max-concurrent", 2, "maximum concurrent agent tasks when --serve is enabled")
-	repoArg := flag.String("repo", "", "workspace folder to work in (defaults to the current directory in interactive setup)")
 	task := flag.String("task", "", "coding task text for the agent (not a file path), or an additional instruction when resuming")
 	interactive := flag.Bool("interactive", false, "start a persistent terminal conversation (default when no task or resume is given)")
 	tui := flag.Bool("tui", false, "start the integrated terminal UI for setup and Agent interaction")
 	jsonOutput := flag.Bool("json", false, "write Agent lifecycle events and the final run result as JSONL to stdout")
 	resumeID := flag.String("resume", "", "resume a persisted session by ID; omit --task to continue it")
 	githubMCP := flag.Bool("github-mcp", true, "enable read-only GitHub MCP tools when credentials are configured (default true)")
-	allowContainerNetwork := flag.Bool("allow-container-network", false, "advanced: allow container internet access at startup; interactive users can use /network")
+	allowContainerNetwork := flag.Bool("allow-container-network", false, "advanced: allow container internet access at startup")
 	maxTurns := flag.Int("max-turns", 0, "override config: maximum assistant turns")
 	maxToolCalls := flag.Int("max-tool-calls", 0, "override config: maximum tool calls per task")
 	contextTokens := flag.Int("context-tokens", 0, "override config: maximum estimated context tokens")
@@ -66,12 +66,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --install and --uninstall cannot be combined")
 		os.Exit(2)
 	}
-	if (*installSource != "" || *uninstallSource != "") && *localScope && strings.TrimSpace(*repoArg) == "" {
-		fmt.Fprintln(os.Stderr, "sigma-agent: --local requires --repo")
-		os.Exit(2)
-	}
 	if *installSource != "" || *uninstallSource != "" || *listInstalled || *listMCPServers {
-		if err := runPackageCommand(*installSource, *uninstallSource, *listInstalled, *listMCPServers, *localScope, *repoArg); err != nil {
+		if err := runPackageCommand(*installSource, *uninstallSource, *listInstalled, *listMCPServers, *localScope, ""); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
 		}
@@ -119,15 +115,16 @@ func main() {
 		os.Exit(2)
 	}
 	if *indexMemory {
-		if strings.TrimSpace(*repoArg) == "" {
-			fmt.Fprintln(os.Stderr, "sigma-agent: --index-memory requires --repo")
-			os.Exit(2)
+		workspacePath, pathErr := resolveWorkspacePath(*repoArg)
+		if pathErr != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", pathErr)
+			os.Exit(1)
 		}
 		var memoryCount int
 		if runtimeConfig.MemoryFile != "" {
-			memoryCount, err = sigmaagent.IndexProjectMemoryFile(runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID)
+			memoryCount, err = workspaceagent.IndexProjectMemoryFile(runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID)
 		} else {
-			memoryCount, err = sigmaagent.IndexRepositoryMemory(*repoArg)
+			memoryCount, err = workspaceagent.IndexRepositoryMemory(workspacePath)
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
@@ -156,13 +153,10 @@ func main() {
 		runtimeConfig.AllowContainerNetwork = true
 	}
 	if interactiveMode {
-		defaultRepo := strings.TrimSpace(*repoArg)
-		if defaultRepo == "" {
-			defaultRepo, err = os.Getwd()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "sigma-agent:", err)
-				os.Exit(1)
-			}
+		workspacePath, pathErr := resolveWorkspacePath(*repoArg)
+		if pathErr != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", pathErr)
+			os.Exit(1)
 		}
 		selection := requestedModel
 		if !modelExplicit {
@@ -176,45 +170,74 @@ func main() {
 			selection = modelconfig.Selection{Provider: "minimax", Model: modelconfig.DefaultModel("minimax")}
 		}
 		setup := interactiveSetupOptions{
-			repo: defaultRepo, sessionID: *sessionID, resumeID: *resumeID,
-			allowNetwork: runtimeConfig.AllowContainerNetwork,
-			githubMCP:    *githubMCP, model: selection, modelExplicit: modelExplicit,
+			workspace: workspacePath, sessionID: *sessionID, resumeID: *resumeID,
+			allowNetwork:            runtimeConfig.AllowContainerNetwork,
+			deepSeekThinking:        runtimeConfig.DeepSeekThinkingEnabled,
+			modelReasoningEffort:    runtimeConfig.ModelReasoningEffort,
+			projectInstructionsFile: runtimeConfig.ProjectInstructionsFile,
+			githubMCP:               *githubMCP, model: selection, modelExplicit: modelExplicit,
 			initialPrompt: *task,
 		}
 		if err := startTUI(setup, func(options interactiveSetupOptions, bridge *tuiBridge) error {
-			return run(options.repo, options.initialPrompt, runtimeConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge)
+			runConfig := runtimeConfig
+			runConfig.AllowContainerNetwork = options.allowNetwork
+			runConfig.DeepSeekThinkingEnabled = options.deepSeekThinking
+			if options.modelReasoningEffort != "" {
+				runConfig.ModelReasoningEffort = options.modelReasoningEffort
+			}
+			return run(options.workspace, options.initialPrompt, runConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge)
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
 		}
 		return
 	}
-	if strings.TrimSpace(*repoArg) == "" {
-		flag.Usage()
-		os.Exit(2)
+	workspacePath, err := resolveWorkspacePath(*repoArg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+		os.Exit(1)
 	}
-	if err := run(*repoArg, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil); err != nil {
+	if err := run(workspacePath, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
 }
 
-func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
-	repo, err := filepath.Abs(repoArg)
+func resolveWorkspacePath(repoArg string) (string, error) {
+	workspacePath := strings.TrimSpace(repoArg)
+	if workspacePath == "" {
+		var err error
+		workspacePath, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+	workspacePath, err := filepath.Abs(workspacePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	info, err := os.Stat(workspacePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace folder: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("workspace path must be a directory")
+	}
+	return workspacePath, nil
+}
+
+func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
+	workspacePath, err := filepath.Abs(workspaceArg)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
 	}
-	if info, statErr := os.Stat(repo); statErr != nil || !info.IsDir() {
+	if info, statErr := os.Stat(workspacePath); statErr != nil || !info.IsDir() {
 		if statErr != nil {
 			return fmt.Errorf("resolve workspace folder: %w", statErr)
 		}
 		return errors.New("workspace path must be a directory")
 	}
-	gitRoot, gitErr := gitOutput(repo, "rev-parse", "--show-toplevel")
-	gitDiffAvailable := gitErr == nil && sigmaagent.HasGitCommit(repo)
-	if gitErr == nil {
-		repo = filepath.Clean(strings.TrimSpace(gitRoot))
-	}
+	gitDiffAvailable := workspaceagent.HasGitCommit(workspacePath)
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -257,7 +280,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		return errors.New("invalid session id")
 	}
 	sessionDir := filepath.Join(sessionsDir, sessionID)
-	workspace := repo
+	workspace := workspacePath
 	var restoredSnapshot *agent.SessionSnapshot
 	if !newSession {
 		snapshot, loadErr := store.Load(sessionID)
@@ -271,7 +294,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	var runErr error
 	if newSession {
 		if gitDiffAvailable {
-			commit, commitErr := gitOutput(repo, "rev-parse", "HEAD")
+			commit, commitErr := gitOutput(workspacePath, "rev-parse", "HEAD")
 			if commitErr != nil {
 				return commitErr
 			}
@@ -281,7 +304,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 			return err
 		}
 		metadata, _ := json.MarshalIndent(map[string]any{
-			"repo": repo, "starting_commit": startingCommit,
+			"repo": workspacePath, "starting_commit": startingCommit,
 			"git_diff_available": gitDiffAvailable,
 			"workspace_mode":     workspaceMode,
 			"model_provider":     activeModelSelection.Provider, "model_id": activeModelSelection.Model,
@@ -305,12 +328,12 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		if err := json.Unmarshal(data, &metadata); err != nil {
 			return fmt.Errorf("decode session metadata: %w", err)
 		}
-		if filepath.Clean(metadata.Repo) != filepath.Clean(repo) {
-			return errors.New("resume repository does not match the session's original repository")
+		if filepath.Clean(metadata.Repo) != filepath.Clean(workspacePath) {
+			return errors.New("resume workspace does not match the session's original folder")
 		}
 		if metadata.WorkspaceMode != "direct" {
 			// Keep support for resuming sessions created before the direct-workspace
-			// migration. New sessions always use repo as the active workspace.
+			// migration. New sessions always use the current folder as the workspace.
 			workspaceMode = "isolated"
 			workspace = filepath.Join(sessionDir, "workspace")
 		}
@@ -342,7 +365,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	}
 	memorySourceHash := ""
 	if runtimeConfig.MemoryFile != "" {
-		memorySourceHash, err = sigmaagent.CopyProjectMemoryFromFile(runtimeConfig.MemoryFile, workspace, runtimeConfig.MemoryRepositoryID)
+		memorySourceHash, err = workspaceagent.CopyProjectMemoryFromFile(runtimeConfig.MemoryFile, workspace, runtimeConfig.MemoryRepositoryID)
 		if err != nil {
 			return fmt.Errorf("load configured shared memory into active workspace: %w", err)
 		}
@@ -405,11 +428,11 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		return err
 	}
 	configureModelRuntime(model, runtimeConfig)
-	backgroundTasks, err := sigmaagent.NewBackgroundCommandManager(workspace, runtimeConfig.CommandExecutionImage, filepath.Join(sessionDir, "background_tasks"), startingCommit, runtimeConfig.AllowContainerNetwork)
+	backgroundTasks, err := workspaceagent.NewBackgroundCommandManager(workspace, runtimeConfig.CommandExecutionImage, filepath.Join(sessionDir, "background_tasks"), startingCommit, runtimeConfig.AllowContainerNetwork)
 	if err != nil {
 		return fmt.Errorf("configure background task manager: %w", err)
 	}
-	tools, err := sigmaagent.BuiltinToolsWithNetworkAndMemoryRepositoryID(workspace, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.MemoryRepositoryID, startingCommit)
+	tools, err := workspaceagent.BuiltinToolsWithNetworkAndMemoryRepositoryID(workspace, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.MemoryRepositoryID, startingCommit)
 	if err != nil {
 		return err
 	}
@@ -424,19 +447,39 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		}
 		tools = append(tools, agent.CommandPluginTools(workspace, plugins)...)
 	}
-	commandTools, err := sigmaagent.CommandExecutionToolsWithEnvironmentPreparationAndFilesystemScope(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, startingCommit)
+	var commandTools []agent.Tool
+	var closeCommandSession func() error
+	if interactive {
+		commandTools, closeCommandSession, err = workspaceagent.CommandExecutionToolsWithSessionContainer(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, startingCommit)
+		if closeCommandSession != nil {
+			defer func() {
+				if closeErr := closeCommandSession(); closeErr != nil {
+					fmt.Fprintf(os.Stderr, "sigma-agent: Docker session cleanup failed: %v\n", closeErr)
+				}
+			}()
+		}
+	} else {
+		commandTools, err = workspaceagent.CommandExecutionToolsWithEnvironmentPreparationAndFilesystemScope(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, startingCommit)
+	}
 	if err != nil {
 		return fmt.Errorf("configure command execution tool: %w", err)
 	}
 	tools = append(tools, commandTools...)
 	tools = append(tools, agent.ReadToolOutputTool(toolOutputStore, runtimeConfig.MaxToolResultBytes))
-	packageScopes, err := packageScopes(repo)
+	allPackageScopes, err := packageScopes(workspacePath)
 	if err != nil {
 		return fmt.Errorf("resolve package scopes: %w", err)
 	}
+	executableScopes, projectTrusted, trustErr := executablePackageScopes(allPackageScopes, workspacePath)
+	if trustErr != nil && tui == nil {
+		fmt.Fprintln(os.Stderr, "sigma-agent: project trust settings could not be read; project extensions and MCP servers remain disabled")
+	}
+	if !projectTrusted && projectHasExecutableResources(workspacePath) && tui == nil {
+		fmt.Fprintln(os.Stderr, "sigma-agent: project extensions and MCP servers are disabled until this folder is trusted in the TUI with /trust")
+	}
 	var extensionPaths []string
 	if !runtimeConfig.DisableWorkflowExtensions {
-		extensionPaths, err = packageExtensions(packageScopes)
+		extensionPaths, err = packageExtensions(executableScopes)
 		if err != nil {
 			return fmt.Errorf("discover workflow extensions: %w", err)
 		}
@@ -458,7 +501,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 			fmt.Fprintln(os.Stderr, "sigma-agent: warning: close workflow extensions:", err)
 		}
 	}()
-	mcpTools, shutdownMCPServers, err := startConfiguredMCPServers(context.Background(), packageScopes, runtimeConfig.DisableConfiguredMCPServers)
+	mcpTools, shutdownMCPServers, err := startConfiguredMCPServers(context.Background(), executableScopes, runtimeConfig.DisableConfiguredMCPServers)
 	if runtimeConfig.DisableConfiguredMCPServers {
 		fmt.Fprintln(os.Stderr, "sigma-agent: configured MCP servers disabled by run config")
 	}
@@ -471,11 +514,11 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	}
 	defer shutdownMCPServers()
 	registerAgentTools(workflowHost, mcpTools)
-	contributedSkills, err := packageSkills(packageScopes)
+	contributedSkills, err := packageSkills(allPackageScopes)
 	if err != nil {
 		return fmt.Errorf("load package skills: %w", err)
 	}
-	projectGuidance, err := sigmaagent.LoadProjectGuidanceWithProfile(workspace, contributedSkills, runtimeConfig.ProjectInstructionsFile)
+	projectGuidance, err := workspaceagent.LoadProjectGuidanceWithProfile(workspace, contributedSkills, runtimeConfig.ProjectInstructionsFile)
 	if err != nil {
 		return fmt.Errorf("load repository skills and memory: %w", err)
 	}
@@ -502,7 +545,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		if !ok {
 			return fmt.Errorf("web_search is only supported with the MiniMax provider; current model is %s/%s", activeModelSelection.Provider, activeModelSelection.Model)
 		}
-		tools = append(tools, sigmaagent.WebSearchTool(searchProvider.WebSearch))
+		tools = append(tools, workspaceagent.WebSearchTool(searchProvider.WebSearch))
 	}
 	githubMCPEnabled := githubMCP && agent.GitHubMCPConfigured()
 	if githubMCPEnabled {
@@ -541,6 +584,11 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	if useMemorySearch {
 		systemPrompt = projectGuidance.SystemPromptWithMemorySearch(codingSystemPrompt)
 	}
+	if interactive {
+		systemPrompt = strings.Replace(systemPrompt,
+			"Use prepare_environment with the project's or ecosystem's appropriate base image and a minimal setup_command for missing system packages or libraries; Sigma builds and persists a derived image for subsequent commands and session resumes.",
+			"Reuse the configured or already prepared Docker image and the session's existing container. Do not create a virtual environment or cache as routine startup work; reuse project environments when available. Call prepare_environment only when a required system tool or library is missing, and keep setup minimal so identical Docker layers can be reused.", 1)
+	}
 	if workspaceMode == "direct" {
 		systemPrompt += "\n\nYou are working directly in the user's selected folder. File changes take effect there immediately. Preserve unrelated existing files and changes. If this folder has Git with a commit, review the diff before finishing; otherwise explain that Git diff is unavailable. Never revert user changes unless the user asks."
 	}
@@ -571,6 +619,18 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	workflowHost.Dispatch(workflow.Event{Type: "session_start", SessionID: session.ID})
 	ctx, cancel := signalContext()
 	defer cancel()
+	if tui != nil && tui.appContext != nil {
+		linkedContext, cancelLinked := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-tui.appContext.Done():
+				cancelLinked()
+			case <-linkedContext.Done():
+			}
+		}()
+		defer cancelLinked()
+		ctx = linkedContext
+	}
 	if requestedMessageFile != "" {
 		if _, err := consumeTaskMessages(requestedMessageFile, session); err != nil {
 			return fmt.Errorf("read queued task messages: %w", err)
@@ -600,8 +660,16 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	workflowHost.Dispatch(workflow.Event{Type: "session_end", SessionID: session.ID, Error: errorText(runErr)})
 	patch := ""
 	var diffErr error
+	if !gitDiffAvailable && workspaceagent.HasGitCommit(workspace) {
+		gitDiffAvailable = true
+		if startingCommit == "" {
+			if commit, commitErr := gitOutput(workspace, "rev-parse", "HEAD"); commitErr == nil {
+				startingCommit = strings.TrimSpace(commit)
+			}
+		}
+	}
 	if gitDiffAvailable {
-		patch, diffErr = sigmaagent.WorkspaceDiff(workspace, startingCommit)
+		patch, diffErr = workspaceagent.WorkspaceDiff(workspace, startingCommit)
 	}
 	if result.VerificationStatus == "no_changes" && strings.TrimSpace(patch) != "" {
 		// A resumed session can start this invocation with a candidate patch
@@ -624,7 +692,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 	if writeErr := os.WriteFile(filepath.Join(runDir, "transcript.json"), transcript, 0o600); writeErr != nil && runErr == nil {
 		runErr = writeErr
 	}
-	memoryWrite := sigmaagent.MemoryWriteReport{Status: "disabled"}
+	memoryWrite := workspaceagent.MemoryWriteReport{Status: "disabled"}
 	if runtimeConfig.MemoryEnabled && runtimeConfig.MemoryAutoWrite {
 		switch {
 		case !gitDiffAvailable:
@@ -633,10 +701,10 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 			memoryWrite.Status = "skipped_interactive"
 		case runErr != nil:
 			memoryWrite.Status = "skipped_unsuccessful_run"
-		case result.VerificationStatus == "incomplete" || result.VerificationStatus == "test_failed":
+		case result.VerificationStatus == "incomplete" || result.VerificationStatus == "diff_reviewed" || result.VerificationStatus == "test_failed":
 			memoryWrite.Status = "skipped_unverified_run"
 		default:
-			memoryWrite = sigmaagent.CaptureSuccessfulRunMemoryWithProfile(context.Background(), model, repo, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID, runID, task, patch, session.Messages())
+			memoryWrite = workspaceagent.CaptureSuccessfulRunMemoryWithProfile(context.Background(), model, workspacePath, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID, runID, task, patch, session.Messages())
 			event := agent.Event{At: time.Now().UTC(), Type: "memory_write_completed", Session: sessionID}
 			if memoryWrite.Warning != "" {
 				event.Error = memoryWrite.Warning
@@ -645,7 +713,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		}
 	}
 	metadata, _ := json.MarshalIndent(map[string]any{
-		"run_id": runID, "session_id": sessionID, "repo": repo, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": "",
+		"run_id": runID, "session_id": sessionID, "repo": workspacePath, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": "",
 		"verification_status":   result.VerificationStatus,
 		"git_diff_available":    gitDiffAvailable,
 		"candidate_patch_saved": patchSaved,
@@ -709,7 +777,7 @@ func run(repoArg, task string, runtimeConfig config.Runtime, resumeID string, gi
 		}
 	}
 
-	if !jsonOutput {
+	if !jsonOutput && tui == nil {
 		fmt.Fprintf(os.Stderr, "\n\nRun artifacts: %s\nPatch: %s\n", runDir, filepath.Join(runDir, "result.patch"))
 		fmt.Fprintf(os.Stderr, "Session ID: %s\nSession snapshot: %s\n", sessionID, filepath.Join(sessionsDir, sessionID+".json"))
 		fmt.Fprintf(os.Stderr, "Workspace: %s\n", workspace)
@@ -748,7 +816,7 @@ func parseModelCommand(value string, current agent.Model) (modelconfig.Selection
 		}
 	}
 	value = strings.TrimSpace(value)
-	if value == "" || value == "list" {
+	if value == "" {
 		return currentSelection, "show", nil
 	}
 	if value == "save" {
@@ -757,7 +825,7 @@ func parseModelCommand(value string, current agent.Model) (modelconfig.Selection
 	providerText, modelID, ok := strings.Cut(value, "/")
 	provider, valid := modelconfig.NormalizeProvider(providerText)
 	if !valid || !ok || strings.TrimSpace(modelID) == "" {
-		return modelconfig.Selection{}, "", errors.New("usage: /model <provider>/<model-id>, /model list, or /model save")
+		return modelconfig.Selection{}, "", errors.New("choose a model with the selector, or use /model save")
 	}
 	hasKey, err := modelconfig.ProviderHasAPIKey(provider)
 	if err != nil {
@@ -769,7 +837,7 @@ func parseModelCommand(value string, current agent.Model) (modelconfig.Selection
 	return modelconfig.Selection{Provider: provider, Model: strings.TrimSpace(modelID)}, "switch", nil
 }
 
-func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance sigmaagent.ProjectGuidance, extensions *workflow.Host, inputScanners ...*bufio.Scanner) (agent.Result, error) {
+func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance workspaceagent.ProjectGuidance, extensions *workflow.Host, inputScanners ...*bufio.Scanner) (agent.Result, error) {
 	type inputEvent struct {
 		line string
 		err  error
@@ -781,7 +849,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	commandNames := []string{"/help", "/model", "/diff", "/tree [entry-id]", "/skill:<name> <task>", "/abort", "/exit"}
+	commandNames := []string{"/help", "/model", "/diff", "/tree [entry-id]", "/skill:<name> <task>", "/abort", "/quit"}
 	for _, command := range extensions.Commands() {
 		commandNames = append(commandNames, "/"+command.Name)
 	}
@@ -899,7 +967,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 				}
 			}
 			switch {
-			case line == "/exit" || line == "/quit":
+			case line == "/quit":
 				if activeDone != nil {
 					exitWhenDone = true
 					session.Abort()
@@ -981,7 +1049,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintf(os.Stderr, "Switched to %s/%s.\n", selection.Provider, selection.Model)
 				}
 			case line == "/diff":
-				if !sigmaagent.HasGitCommit(workspace) {
+				if !workspaceagent.HasGitCommit(workspace) {
 					fmt.Fprintln(os.Stderr, "Git diff is unavailable in this folder")
 				} else {
 					diff, err := gitOutput(workspace, "diff", "--stat", startingCommit)
@@ -1085,6 +1153,18 @@ func gitOutput(directory string, args ...string) (string, error) {
 		return string(output), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return string(output), nil
+}
+
+func filterSigmaManagedGitPaths(output string) string {
+	paths := strings.Split(strings.TrimSpace(output), "\n")
+	filtered := paths[:0]
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" && !workspaceagent.IsSigmaManagedWorkspacePath(path) {
+			filtered = append(filtered, path)
+		}
+	}
+	return strings.Join(filtered, "\n")
 }
 
 func newRunID() (string, error) {
@@ -1196,5 +1276,8 @@ func configureModelRuntime(model agent.Model, runtimeConfig config.Runtime) {
 	}
 	if configurable, ok := model.(interface{ ConfigureReasoningEffort(string) }); ok {
 		configurable.ConfigureReasoningEffort(runtimeConfig.ModelReasoningEffort)
+	}
+	if configurable, ok := model.(interface{ ConfigureDeepSeekThinking(bool) }); ok {
+		configurable.ConfigureDeepSeekThinking(runtimeConfig.DeepSeekThinkingEnabled)
 	}
 }

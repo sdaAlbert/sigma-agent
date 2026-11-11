@@ -2,10 +2,8 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
@@ -13,20 +11,27 @@ import (
 )
 
 type interactiveSetupOptions struct {
-	repo          string
-	sessionID     string
-	resumeID      string
-	allowNetwork  bool
-	githubMCP     bool
-	initialPrompt string
-	model         modelconfig.Selection
-	modelExplicit bool
+	workspace               string
+	sessionID               string
+	resumeID                string
+	allowNetwork            bool
+	deepSeekThinking        bool
+	modelReasoningEffort    string
+	projectInstructionsFile string
+	githubMCP               bool
+	initialPrompt           string
+	model                   modelconfig.Selection
+	modelExplicit           bool
 }
 
 func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions, bool, *bufio.Scanner, error) {
-	options.repo = strings.TrimSpace(options.repo)
-	if options.repo == "" {
-		return options, false, nil, errors.New("interactive setup needs a repository path; use /repo <path>")
+	options.workspace = strings.TrimSpace(options.workspace)
+	if options.workspace == "" {
+		workspace, err := os.Getwd()
+		if err != nil {
+			return options, false, nil, fmt.Errorf("resolve current folder: %w", err)
+		}
+		options.workspace = workspace
 	}
 	if options.model.Provider == "" {
 		selection, err := modelconfig.LoadDefaultSelection()
@@ -39,7 +44,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 		options.model = modelconfig.Selection{Provider: "minimax", Model: modelconfig.DefaultModel("minimax")}
 	}
 	fmt.Fprintln(os.Stderr, "\nSigma setup — configure this session, then enter a task.")
-	fmt.Fprintln(os.Stderr, "Commands: /login <provider|github>, /model [provider/model-id|save], /logout <provider|github>, /repo <path>, /session <id>, /resume <id>, /network on|off, /start, /help, /exit")
+	fmt.Fprintln(os.Stderr, "Commands: /login <provider|github>, /model [provider/model-id|save], /logout <provider|github>, /session, /resume <id>, /help, /quit")
 	printSetupStatus(options)
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -120,7 +125,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 			}
 			fmt.Fprintf(os.Stderr, "Removed the saved %s API key. Any configured environment variable can still provide credentials.\n", provider)
 		case "/model":
-			if value == "" || value == "list" {
+			if value == "" {
 				printModelOptions(options.model)
 				continue
 			}
@@ -140,7 +145,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 			providerText, modelID, hasModel := strings.Cut(value, "/")
 			provider, ok := modelconfig.NormalizeProvider(providerText)
 			if !ok {
-				fmt.Fprintln(os.Stderr, "Usage: /model <provider>/<model-id> (see /model list)")
+				fmt.Fprintln(os.Stderr, "Usage: /model <provider>/<model-id> or /model save")
 				continue
 			}
 			if !hasModel {
@@ -162,36 +167,12 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 			options.model = modelconfig.Selection{Provider: provider, Model: strings.TrimSpace(modelID)}
 			options.modelExplicit = true
 			fmt.Fprintf(os.Stderr, "Selected model %s/%s for this session. Use /model save to make it the default.\n", provider, modelID)
-		case "/repo":
-			if value == "" {
-				fmt.Fprintln(os.Stderr, "Usage: /repo <path>")
-				continue
-			}
-			repoPath, err := filepath.Abs(value)
-			if err == nil {
-				var info os.FileInfo
-				info, err = os.Stat(repoPath)
-				if err == nil && info.IsDir() {
-					if top, gitErr := gitOutput(repoPath, "rev-parse", "--show-toplevel"); gitErr == nil {
-						repoPath = strings.TrimSpace(top)
-					}
-					options.repo = repoPath
-					fmt.Fprintf(os.Stderr, "Workspace folder: %s\n", options.repo)
-				} else if err == nil {
-					err = errors.New("workspace path must be an existing folder")
-				}
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Could not select workspace folder: %v\n", err)
-			}
 		case "/session":
-			if !agent.ValidSessionID(value) {
-				fmt.Fprintln(os.Stderr, "Usage: /session <id> (letters, numbers, _ and -; up to 128 characters)")
-				continue
+			if value != "" {
+				fmt.Fprintln(os.Stderr, "Session IDs are assigned automatically. Use /resume <id> to open a saved session.")
+			} else {
+				fmt.Fprintln(os.Stderr, "No session is active yet. A session will be created when you start a task.")
 			}
-			options.sessionID = value
-			options.resumeID = ""
-			fmt.Fprintf(os.Stderr, "New session ID: %s\n", value)
 		case "/resume":
 			if !agent.ValidSessionID(value) {
 				fmt.Fprintln(os.Stderr, "Usage: /resume <existing-session-id>")
@@ -200,24 +181,7 @@ func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions,
 			options.resumeID = value
 			options.sessionID = ""
 			fmt.Fprintf(os.Stderr, "Will resume session: %s\n", value)
-		case "/network":
-			switch value {
-			case "on":
-				options.allowNetwork = true
-			case "off":
-				options.allowNetwork = false
-			default:
-				fmt.Fprintln(os.Stderr, "Usage: /network on|off")
-				continue
-			}
-			printSetupStatus(options)
-		case "/start":
-			if err := validateSetupOptions(options); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				continue
-			}
-			return options, true, scanner, nil
-		case "/exit", "/quit":
+		case "/quit":
 			fmt.Fprintln(os.Stderr, "Setup cancelled.")
 			return options, false, scanner, nil
 		default:
@@ -244,12 +208,9 @@ func printSetupHelp() {
   /login <provider>    Save an API key or GitHub token (input is hidden)
   /model [provider/id] Show or select the model; /model save sets the default
   /logout <provider>   Remove a saved model key or GitHub token
-  /repo <path>          Select any local workspace folder
   /session <id>         Name a new saved session
   /resume <id>          Resume a saved session
-  /network on|off       Allow/block container internet access (on by default)
-  /start                Start an empty interactive conversation
-  /exit                 Quit setup
+  /quit                 Quit setup
 
 You can also type a task directly to start it with the current settings.`)
 }
@@ -287,5 +248,5 @@ func printSetupStatus(options interactiveSetupOptions) {
 	if configured, err := modelconfig.ProviderHasAPIKey(options.model.Provider); err == nil && configured {
 		modelKey = "key ready"
 	}
-	fmt.Fprintf(os.Stderr, "Repo: %s | Session: %s | Model: %s/%s (%s) | Container network: %s\n", options.repo, resume, options.model.Provider, options.model.Model, modelKey, network)
+	fmt.Fprintf(os.Stderr, "Folder: %s | Session: %s | Model: %s/%s (%s) | Container network: %s\n", options.workspace, resume, options.model.Provider, options.model.Model, modelKey, network)
 }

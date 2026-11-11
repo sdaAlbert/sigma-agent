@@ -39,7 +39,7 @@ const (
 	// ClientName identifies Sigma Agent in the MCP handshake.
 	ClientName = "sigmaagent-go"
 	// ClientVersion identifies Sigma Agent in the MCP handshake.
-	ClientVersion = "0.1.0"
+	ClientVersion = "1.1.3"
 	// DefaultStartupTimeout bounds the initialize handshake.
 	DefaultStartupTimeout = 15 * time.Second
 )

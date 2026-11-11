@@ -13,6 +13,9 @@ Sigma adds repository-filtered vector search and fuses the rankings. Qdrant
 contains vectors and provenance for memory facts, not source-code chunks,
 transcripts, secrets, or patches. See the [runtime usage and setup
 guide](../../../docs/CONFIGURATION.md#repository-long-term-memory).
+The public scope and retrieval setup are summarized in the
+[memory publication record](memory-publication.md); raw memory snapshots are
+not included because they may contain task-specific knowledge.
 
 ## Evidence from Mini SWE
 

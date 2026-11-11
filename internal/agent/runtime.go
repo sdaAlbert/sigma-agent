@@ -147,7 +147,7 @@ type Limits struct {
 }
 
 func DefaultLimits() Limits {
-	return Limits{MaxTurns: 128, MaxToolCalls: 256, MaxToolResultBytes: 16 * 1024, ToolTimeout: 60 * time.Second}
+	return Limits{MaxTurns: 128, MaxToolCalls: 256, MaxToolResultBytes: 50 * 1024, ToolTimeout: 60 * time.Second}
 }
 
 type Result struct {
@@ -167,6 +167,7 @@ type Result struct {
 
 type Session struct {
 	ID             string
+	Name           string
 	System         string
 	Model          Model
 	Tools          *ToolRegistry
@@ -563,21 +564,6 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			return result, err
 		}
 		s.emit(Event{Type: "turn_end", Turn: turn})
-		if len(workflow.missingChecks()) > 0 {
-			missing := strings.Join(workflow.missingChecks(), " and ")
-			if turn == limits.MaxTurns {
-				result.VerificationStatus = workflow.verificationStatus()
-				s.emit(Event{Type: "turn_limit_reached", Error: fmt.Sprintf("agent turn limit (%d) reached with verification still needed: %s", limits.MaxTurns, missing)})
-				if err := s.appendRecoveryPrompt(workflow.continuationAtLimit()); err != nil {
-					return result, err
-				}
-				return result, nil
-			}
-			if err := s.appendRecoveryPrompt(verificationRecoveryPrompt(workflow.missingChecks())); err != nil {
-				return result, err
-			}
-			continue
-		}
 		if response.StopReason != "end_turn" && response.StopReason != "stop" {
 			return result, fmt.Errorf("model stopped with unsupported reason %q", response.StopReason)
 		}
@@ -609,6 +595,9 @@ func currentVerificationStatus(lastWriteOrder, lastTestOrder, lastDiffOrder int,
 	if lastWriteOrder == 0 {
 		return "no_changes"
 	}
+	if lastDiffOrder > lastWriteOrder && lastTestOrder <= lastWriteOrder {
+		return "diff_reviewed"
+	}
 	if lastTestOrder > lastWriteOrder && lastDiffOrder > lastWriteOrder {
 		if lastTestPassed {
 			return "verified"
@@ -616,17 +605,6 @@ func currentVerificationStatus(lastWriteOrder, lastTestOrder, lastDiffOrder int,
 		return "test_failed"
 	}
 	return "incomplete"
-}
-
-func missingReviewChecks(lastWriteOrder, lastTestOrder, lastDiffOrder int) []string {
-	var missing []string
-	if lastTestOrder <= lastWriteOrder {
-		missing = append(missing, "a relevant run_command with purpose=test")
-	}
-	if lastDiffOrder <= lastWriteOrder {
-		missing = append(missing, "git_diff")
-	}
-	return missing
 }
 
 func (s *Session) hasMessageIDLocked(id string) bool {
@@ -841,19 +819,19 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 		output = "Tool completed with no output."
 	}
 	outputBytes := len(output)
-	if len(output) > maxResultBytes {
+	if len(output) > maxResultBytes || strings.Count(output, "\n") >= 2000 {
 		if s.ToolOutputs != nil && call.Name != "read_tool_output" {
 			artifact, saveErr := s.ToolOutputs.Save(output)
 			if saveErr == nil {
 				output = externalizedToolOutput(artifact, output, maxResultBytes)
 			} else {
-				output = truncateToolOutput(output, maxResultBytes) + "\n[full tool output was not saved: " + saveErr.Error() + "]"
+				output = truncateToolOutput(truncateToolOutputLines(output, 2000), maxResultBytes) + "\n[full tool output was not saved: " + saveErr.Error() + "]"
 			}
 		} else {
-			output = truncateToolOutput(output, maxResultBytes)
+			output = truncateToolOutput(truncateToolOutputLines(output, 2000), maxResultBytes)
 		}
 	}
-	event := Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Bytes: outputBytes, ResultSummary: truncateToolOutput(strings.TrimSpace(output), 1024), ResultOutput: truncateToolOutput(strings.TrimSpace(output), 16<<10), Status: "completed"}
+	event := Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Bytes: outputBytes, ResultSummary: truncateToolOutput(strings.TrimSpace(output), 1024), ResultOutput: truncateToolOutput(truncateToolOutputLines(strings.TrimSpace(output), 2000), 50<<10), Status: "completed"}
 	if callErr != nil {
 		event.Error = callErr.Error()
 		event.Status = "failed"
