@@ -2,6 +2,9 @@
 
 This runtime uses Pi Agent as an architecture reference, not as a dependency. It keeps the agent loop, transcript, tool lifecycle, policy hooks, cancellation, and event model in Go. Provider adapters normalize Anthropic Messages and OpenAI Chat Completions-compatible APIs into Sigma's model interface; the interactive CLI exposes `/login` for model and GitHub credentials and `/model` for model selection. For the rationale and evidence limits behind Skills, memory, retrieval, cache-stable prompts, and runtime workflow safeguards, see [Agent context and reliability design notes](AGENT_DESIGN_NOTES.md).
 
+For a folder-by-folder map of the tracked source, support files, evaluation data,
+examples, and scripts, see [Repository layout](REPOSITORY_LAYOUT.md).
+
 ## Runtime flow
 
 ```text

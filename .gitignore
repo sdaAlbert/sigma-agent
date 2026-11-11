@@ -13,6 +13,7 @@ evals/results/
 __pycache__/
 docs/PROJECT_STATUS.md
 /research/
+/scripts/test-service-e2e.ps1
 
 # Flattened local SWE-bench raw records; task README files contain curated summaries
 evals/swebench-verified-mini/tasks/*/record--*
