@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -387,6 +388,12 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		return err
 	}
 	defer traceFile.Close()
+	authorizationLogPath := filepath.Join(sessionDir, "authorizations.jsonl")
+	authorizationLog, err := os.OpenFile(authorizationLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open session authorization log: %w", err)
+	}
+	defer authorizationLog.Close()
 	var traceMu sync.Mutex
 	var stdoutMu sync.Mutex
 	var workflowHost *workflow.Host
@@ -421,6 +428,19 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 				workflowHost.Dispatch(projected)
 			}
 		}
+	}
+	authorizationAudit := func(event agent.Event) error {
+		var auditErr error
+		event, auditErr = appendAuthorizationAuditEvent(event, sessionID, authorizationLog, traceFile, &traceMu)
+		if auditErr != nil {
+			return auditErr
+		}
+		if jsonOutput {
+			stdoutMu.Lock()
+			defer stdoutMu.Unlock()
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"protocol_version": 1, "type": "agent_event", "event": event})
+		}
+		return nil
 	}
 
 	model, err := modelconfig.NewConfigured(activeModelSelection)
@@ -608,7 +628,12 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		session.RequiredSkills = projectGuidance.MatchingSkillNames(task)
 	}
 	session.ToolOutputs = toolOutputStore
-	session.BeforeTool = configuredToolPolicy(runtimeConfig)
+	var approveTool func(context.Context, agent.AuthorizationRequest) (bool, error)
+	if tui != nil {
+		approveTool = tui.ApproveTool
+	}
+	session.BeforeTool = configuredToolPolicy(runtimeConfig, approveTool, authorizationAudit, interactive)
+	session.SerializeToolCalls = hasAskPermissions(runtimeConfig)
 	session.Limits = agent.Limits{MaxTurns: runtimeConfig.MaxTurns, MaxToolCalls: runtimeConfig.MaxToolCalls, MaxRepeatedFailedCommands: runtimeConfig.MaxRepeatedFailedCommands, MaxToolResultBytes: runtimeConfig.MaxToolResultBytes, ToolTimeout: time.Duration(runtimeConfig.ToolTimeoutMS) * time.Millisecond}
 	session.Context = agent.WindowContextManager{
 		MaxTokens:                 runtimeConfig.MaxContextTokens,
@@ -721,6 +746,10 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		"workspace_mode":        workspaceMode,
 		"github_write_enabled":  false, "allow_container_network": runtimeConfig.AllowContainerNetwork,
 		"command_filesystem_scope":        runtimeConfig.CommandFilesystemScope,
+		"default_tool_permission":         runtimeConfig.DefaultToolPermission,
+		"risk_permissions":                runtimeConfig.RiskPermissions,
+		"tool_permissions":                runtimeConfig.ToolPermissions,
+		"authorization_log":               authorizationLogPath,
 		"github_mcp_enabled":              githubMCPEnabled,
 		"configured_mcp_servers_disabled": runtimeConfig.DisableConfiguredMCPServers,
 		"workflow_extensions_disabled":    runtimeConfig.DisableWorkflowExtensions,
@@ -1132,17 +1161,102 @@ func truncateText(text string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "…"
 }
 
-func configuredToolPolicy(runtimeConfig config.Runtime) agent.ToolPolicy {
+func configuredToolPolicy(runtimeConfig config.Runtime, approve func(context.Context, agent.AuthorizationRequest) (bool, error), audit func(agent.Event) error, interactive bool) agent.ToolPolicy {
 	return func(ctx context.Context, tool agent.Tool, input json.RawMessage) error {
+		request := agent.ClassifyToolAuthorization(tool.Definition.Name, input, runtimeConfig.AllowContainerNetwork)
+		request.ID = toolAuthorizationID(agent.ToolCallID(ctx), tool.Definition.Name)
 		permission := runtimeConfig.DefaultToolPermission
-		if override, ok := runtimeConfig.ToolPermissions[tool.Definition.Name]; ok {
-			permission = override
+		if classPermission, ok := runtimeConfig.RiskPermissions[request.RiskClass]; ok {
+			permission = classPermission
 		}
-		if permission == "deny" {
-			return fmt.Errorf("tool %q is denied by the configured permission policy", tool.Definition.Name)
+		if toolPermission, ok := runtimeConfig.ToolPermissions[tool.Definition.Name]; ok {
+			permission = toolPermission
 		}
-		return nil
+		emitAuthorization := func(status, decision, actor, detail string) error {
+			if audit == nil {
+				return errors.New("tool authorization audit log is unavailable; operation was not executed")
+			}
+			return audit(agent.Event{
+				Type: "tool_authorization", Tool: tool.Definition.Name, ToolCallID: agent.ToolCallID(ctx),
+				AuthorizationID: request.ID, RiskClass: request.RiskClass, Decision: decision, ApprovedBy: actor,
+				Target: request.Target, RiskReason: request.Reason, Args: request.Args, Status: status, Error: detail,
+			})
+		}
+		switch permission {
+		case "deny":
+			err := fmt.Errorf("tool %q denied by configured %s policy", tool.Definition.Name, request.RiskClass)
+			if auditErr := emitAuthorization("denied", "deny", "policy", err.Error()); auditErr != nil {
+				return auditErr
+			}
+			return err
+		case "ask":
+			if auditErr := emitAuthorization("requested", "ask", "", ""); auditErr != nil {
+				return auditErr
+			}
+			if !interactive || approve == nil {
+				err := errors.New("confirmation required but this run has no interactive approver; operation was not executed")
+				if auditErr := emitAuthorization("denied", "deny", "policy:noninteractive", err.Error()); auditErr != nil {
+					return auditErr
+				}
+				return err
+			}
+			approved, err := approve(ctx, request)
+			if err != nil {
+				if auditErr := emitAuthorization("cancelled", "deny", "policy:cancelled", err.Error()); auditErr != nil {
+					return auditErr
+				}
+				return fmt.Errorf("tool authorization cancelled: %w", err)
+			}
+			if !approved {
+				err := errors.New("operation was denied by the user")
+				if auditErr := emitAuthorization("denied", "deny", localAuthorizationActor(), err.Error()); auditErr != nil {
+					return auditErr
+				}
+				return err
+			}
+			if auditErr := emitAuthorization("allowed", "allow_once", localAuthorizationActor(), "approved for this tool call only"); auditErr != nil {
+				return auditErr
+			}
+			return nil
+		default:
+			if auditErr := emitAuthorization("allowed", "allow", "policy", "allowed by configured policy"); auditErr != nil {
+				return auditErr
+			}
+			return nil
+		}
 	}
+}
+
+func toolAuthorizationID(callID, tool string) string {
+	if strings.TrimSpace(callID) != "" {
+		return callID
+	}
+	return tool + ":missing-call-id"
+}
+
+func localAuthorizationActor() string {
+	current, err := user.Current()
+	if err != nil || strings.TrimSpace(current.Username) == "" {
+		return "local-user"
+	}
+	return current.Username
+}
+
+func hasAskPermissions(runtimeConfig config.Runtime) bool {
+	if runtimeConfig.DefaultToolPermission == "ask" {
+		return true
+	}
+	for _, permission := range runtimeConfig.ToolPermissions {
+		if permission == "ask" {
+			return true
+		}
+	}
+	for _, permission := range runtimeConfig.RiskPermissions {
+		if permission == "ask" {
+			return true
+		}
+	}
+	return false
 }
 
 func gitOutput(directory string, args ...string) (string, error) {

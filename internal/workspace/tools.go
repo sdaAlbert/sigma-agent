@@ -965,7 +965,8 @@ func (s *commandContainerSession) run(ctx context.Context, image, command, worki
 			_ = removeIsolatedTestNetwork(network)
 			return "", "", err
 		}
-		args := []string{"run", "--detach", "--init", "--name", container, "--network", network, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,exec,nosuid,size=256m"}
+		args := []string{"run", "--detach", "--init", "--name", container, "--network", network, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"}
+		args = append(args, commandContainerFilesystemArgs()...)
 		if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {
 			args = append(args, "--user", fmt.Sprintf("%d:%d", uid, gid))
 		}
@@ -1534,10 +1535,24 @@ func removeIsolatedTestNetwork(name string) error {
 }
 
 // containerRunArgs builds the shared docker run arguments for a command
-// container. The container is isolated with a bounded network, memory, CPU and
-// process budget, drops all capabilities, and mounts only the selected repository workspace.
+// container. The container has bounded network, memory, CPU, process, and
+// scratch-space budgets, drops all capabilities, and uses the selected
+// repository as its only persistent writable host mount.
 func containerRunArgs(containerName, networkName string) []string {
-	return []string{"run", "--rm", "--init", "--name", containerName, "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,exec,nosuid,size=256m"}
+	args := []string{"run", "--rm", "--init", "--name", containerName, "--network", networkName, "--memory", "2g", "--cpus", "2", "--pids-limit", "128", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"}
+	return append(args, commandContainerFilesystemArgs()...)
+}
+
+// commandContainerFilesystemArgs keeps the image filesystem immutable while
+// leaving explicit scratch locations writable. The selected workspace is a
+// separate read-write bind mount so Sigma can continue working in place.
+func commandContainerFilesystemArgs() []string {
+	return []string{
+		"--read-only",
+		"--env", "TMPDIR=/tmp",
+		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m",
+		"--tmpfs", "/var/tmp:rw,exec,nosuid,nodev,size=128m",
+	}
 }
 
 func (w workspace) gitDiffTool() agent.Tool {

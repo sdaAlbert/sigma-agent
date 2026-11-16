@@ -103,6 +103,44 @@ func TestAllowContainerNetworkCanBeDisabledInConfig(t *testing.T) {
 	}
 }
 
+func TestToolPermissionsDefaultToAllowUnlessConfigured(t *testing.T) {
+	defaults := Defaults()
+	if defaults.DefaultToolPermission != "allow" {
+		t.Fatalf("default_tool_permission = %q, want allow", defaults.DefaultToolPermission)
+	}
+	if len(defaults.RiskPermissions) != 0 {
+		t.Fatalf("default risk_permissions = %#v, want no risk-class overrides", defaults.RiskPermissions)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"risk_permissions":{"workspace_write":"ask"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DefaultToolPermission != "allow" || cfg.RiskPermissions["workspace_write"] != "ask" {
+		t.Fatalf("loaded permission policy = (default:%q, workspace_write:%q), want (allow, ask)", cfg.DefaultToolPermission, cfg.RiskPermissions["workspace_write"])
+	}
+}
+
+func TestLoadRejectsUnknownRiskClassesAndPermissionValues(t *testing.T) {
+	for _, contents := range []string{
+		`{"risk_permissions":{"filesystem":"ask"}}`,
+		`{"risk_permissions":{"workspace_write":"prompt"}}`,
+		`{"tool_permissions":{"edit_file":"prompt"}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Errorf("Load(%s) succeeded, want policy validation error", contents)
+		}
+	}
+}
+
 func TestBenchmarkCanDisableConfiguredMCPAndWorkflowExtensions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"disable_configured_mcp_servers":true,"disable_workflow_extensions":true}`), 0o600); err != nil {

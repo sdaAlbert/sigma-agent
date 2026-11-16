@@ -78,6 +78,20 @@ func (b *tuiBridge) Confirm(ctx context.Context, message string) (bool, error) {
 	}
 }
 
+func (b *tuiBridge) ApproveTool(ctx context.Context, request agent.AuthorizationRequest) (bool, error) {
+	if b == nil || b.program == nil {
+		return false, errors.New("interactive tool approval is unavailable")
+	}
+	response := make(chan bool, 1)
+	b.send(tuiToolApprovalMsg{request: request, response: response})
+	select {
+	case approved := <-response:
+		return approved, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
 type tuiAgentEventMsg agent.Event
 type tuiTurnStartMsg struct{}
 type tuiNoticeMsg string
@@ -86,6 +100,10 @@ type tuiOutputMsg string
 type tuiErrorMsg string
 type tuiConfirmMsg struct {
 	message  string
+	response chan bool
+}
+type tuiToolApprovalMsg struct {
+	request  agent.AuthorizationRequest
 	response chan bool
 }
 type tuiCommandsMsg []workflow.Command
@@ -201,6 +219,8 @@ type tuiModel struct {
 	hintStyle             lipgloss.Style
 	statusBarStyle        lipgloss.Style
 	confirmResult         chan bool
+	toolApprovalResult    chan bool
+	overlayDetail         string
 	commands              []workflow.Command
 	startupInfo           tuiStartupInfo
 	startupLoading        bool
@@ -619,6 +639,10 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmResult = msg.response
 		m.openOverlay("confirm", "Extension asks for confirmation", []tuiOverlayItem{{label: "Yes", value: "yes"}, {label: "No", value: "no"}})
 		m.appendLine("Extension confirmation: " + msg.message)
+	case tuiToolApprovalMsg:
+		m.toolApprovalResult = msg.response
+		m.overlayDetail = fmt.Sprintf("Tool: %s · Risk: %s\nTarget: %s\nReason: %s\nParams: %s", msg.request.Tool, msg.request.RiskClass, msg.request.Target, msg.request.Reason, truncateText(string(msg.request.Args), 640))
+		m.openOverlay("tool-authorization", "Approve this tool call?", []tuiOverlayItem{{label: "Deny and stop this operation", value: "deny"}, {label: "Allow this call once", value: "allow"}})
 	case tuiCommandsMsg:
 		m.commands = append([]workflow.Command(nil), msg...)
 	case tuiModelSelectionMsg:
@@ -662,6 +686,8 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				if m.overlay == "confirm" {
 					m.resolveConfirmation(false)
+				} else if m.overlay == "tool-authorization" {
+					m.resolveToolApproval(false)
 				}
 				m.closeOverlay()
 				return m, nil
@@ -1275,6 +1301,9 @@ func (m *tuiModel) openOverlay(kind, title string, items []tuiOverlayItem) {
 	m.overlayTitle = title
 	m.overlayItems = items
 	m.overlayIndex = 0
+	if kind != "tool-authorization" {
+		m.overlayDetail = ""
+	}
 	m.syncTranscriptHeight()
 }
 
@@ -1282,6 +1311,7 @@ func (m *tuiModel) closeOverlay() {
 	m.overlay = ""
 	m.overlayTitle = ""
 	m.overlayItems = nil
+	m.overlayDetail = ""
 	m.overlayIndex = 0
 	m.completion = nil
 	m.syncTranscriptHeight()
@@ -1301,7 +1331,7 @@ func (m *tuiModel) syncTranscriptHeight() {
 		if visible > 8 {
 			visible = 8
 		}
-		height -= visible + 5
+		height -= visible + 5 + m.overlayDetailRows()
 	}
 	if len(m.suggestions) > 6 {
 		height -= 6
@@ -1323,7 +1353,7 @@ func (m *tuiModel) inputScreenY() int {
 }
 
 func (m *tuiModel) overlayIndexAtMouseY(y int) int {
-	startY := m.transcript.Height() + 3 // top border, blank line, title
+	startY := m.transcript.Height() + 3 + m.overlayDetailRows() // top border, blank line, title, details
 	visible := 8
 	startIndex := 0
 	if m.overlayIndex >= visible {
@@ -1348,6 +1378,10 @@ func (m *tuiModel) selectOverlayItem() tea.Cmd {
 		return nil
 	case "confirm":
 		m.resolveConfirmation(item.value == "yes")
+		m.closeOverlay()
+		return nil
+	case "tool-authorization":
+		m.resolveToolApproval(item.value == "allow")
 		m.closeOverlay()
 		return nil
 	case "project-trust":
@@ -1493,6 +1527,28 @@ func (m *tuiModel) resolveConfirmation(confirmed bool) {
 	}
 }
 
+func (m *tuiModel) resolveToolApproval(approved bool) {
+	if m.toolApprovalResult != nil {
+		select {
+		case m.toolApprovalResult <- approved:
+		default:
+		}
+		m.toolApprovalResult = nil
+	}
+}
+
+func (m *tuiModel) overlayDetailRows() int {
+	if m.overlayDetail == "" {
+		return 0
+	}
+	width := max(20, m.width-10)
+	rows := 0
+	for _, line := range strings.Split(m.overlayDetail, "\n") {
+		rows += max(1, lipgloss.Height(lipgloss.Wrap(safeTerminalText(line), width, " ")))
+	}
+	return rows
+}
+
 func (m *tuiModel) renderOverlay() string {
 	var b strings.Builder
 	visible := 8
@@ -1505,6 +1561,12 @@ func (m *tuiModel) renderOverlay() string {
 		end = len(m.overlayItems)
 	}
 	b.WriteString("\n" + lipgloss.NewStyle().Bold(true).Render(m.overlayTitle) + "\n")
+	if m.overlayDetail != "" {
+		for _, line := range strings.Split(m.overlayDetail, "\n") {
+			wrapped := lipgloss.Wrap(safeTerminalText(line), max(20, m.width-10), " ")
+			b.WriteString(m.hintStyle.Render(wrapped) + "\n")
+		}
+	}
 	for index := start; index < end; index++ {
 		prefix := "  "
 		style := m.mutedStyle

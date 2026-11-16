@@ -56,6 +56,28 @@ directories. Manifest entries accept glob patterns and `!` exclusions.
 Skills contributed by a package are bounded by the package directory, so a
 Skill can only read reference files that ship with its own package.
 
+## MCP server configuration
+
+Sigma reads `mcp.json` from the user and project scopes, plus the project's
+`.pi/mcp.json`. Configure local servers with `command` and `args`, or remote
+servers with `url` and optional static `headers`:
+
+```json
+{
+  "mcpServers": {
+    "local-tools": { "command": "node", "args": ["./server.js"] },
+    "remote-docs": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer TOKEN" }
+    }
+  }
+}
+```
+
+Remote servers use Streamable HTTP. Keep credentials out of committed project
+configuration; static header values are sent with each request. OAuth sign-in
+and legacy HTTP+SSE transport are not implemented.
+
 ## Workflow extensions
 
 Sigma loads `.js`, `.mjs`, and `.cjs` files discovered under each installed

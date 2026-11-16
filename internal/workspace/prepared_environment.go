@@ -213,11 +213,7 @@ func buildCommandEnvironment(ctx context.Context, baseImage, setupCommand string
 	}
 	buildCtx, cancel := context.WithTimeout(ctx, 9*time.Minute)
 	defer cancel()
-	args := []string{"build", "--rm", "--file", dockerfilePath, "--tag", preparedImage}
-	if !allowNetwork {
-		args = append(args, "--network", "none")
-	}
-	args = append(args, buildDirectory)
+	args := dockerEnvironmentBuildArgs(dockerfilePath, preparedImage, buildDirectory, allowNetwork)
 	command := exec.CommandContext(buildCtx, "docker", args...)
 	command.Dir = buildDirectory
 	output := &limitedCommandBuffer{limit: maxCommandOutputBytes}
@@ -230,4 +226,12 @@ func buildCommandEnvironment(ctx context.Context, baseImage, setupCommand string
 		return "", output.String(), fmt.Errorf("build Docker environment image %s: %w\n%s", preparedImage, err, output.String())
 	}
 	return preparedImage, output.String(), nil
+}
+
+func dockerEnvironmentBuildArgs(dockerfilePath, image, buildDirectory string, allowNetwork bool) []string {
+	args := []string{"build", "--rm", "--file", dockerfilePath, "--tag", image}
+	if !allowNetwork {
+		args = append(args, "--network", "none")
+	}
+	return append(args, buildDirectory)
 }

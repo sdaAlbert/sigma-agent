@@ -39,9 +39,10 @@ type Server struct {
 	Package string `json:"package,omitempty"`
 	// Enabled turns the server off. A missing value means enabled.
 	Enabled *bool `json:"enabled,omitempty"`
-	// URL configures an HTTP MCP server. Sigma Agent does not support HTTP
-	// servers yet.
+	// URL configures a remote MCP server using Streamable HTTP.
 	URL string `json:"url,omitempty"`
+	// Headers are sent with each HTTP MCP request, commonly for authentication.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // IsEnabled reports whether the server should be started.
@@ -134,10 +135,10 @@ func Resolve(entries []Entry, installers ...*pkgmgr.Installer) ([]Resolved, erro
 		if !entry.Server.IsEnabled() {
 			continue
 		}
-		if strings.TrimSpace(entry.Server.URL) != "" {
-			return nil, fmt.Errorf("MCP server %q uses an HTTP url; Sigma Agent only supports stdio servers", entry.Name)
+		if strings.TrimSpace(entry.Server.URL) != "" && strings.TrimSpace(entry.Server.Command) != "" {
+			return nil, fmt.Errorf("MCP server %q must configure either url or command, not both", entry.Name)
 		}
-		if strings.TrimSpace(entry.Server.Command) == "" {
+		if strings.TrimSpace(entry.Server.URL) == "" && strings.TrimSpace(entry.Server.Command) == "" {
 			return nil, fmt.Errorf("MCP server %q needs a command", entry.Name)
 		}
 		workingDirectory := entry.Dir
@@ -160,6 +161,8 @@ func Resolve(entries []Entry, installers ...*pkgmgr.Installer) ([]Resolved, erro
 			Name: entry.Name,
 			Config: mcp.Config{
 				Name:    entry.Name,
+				URL:     entry.Server.URL,
+				Headers: entry.Server.Headers,
 				Command: entry.Server.Command,
 				Args:    arguments,
 				Env:     entry.Server.Env,

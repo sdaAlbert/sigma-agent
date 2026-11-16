@@ -41,17 +41,17 @@ func TestInstalledPackagesPreferProjectScope(t *testing.T) {
 	}
 }
 
-func TestResolveMCPEntriesKeepsValidServersWhenOneEntryIsInvalid(t *testing.T) {
+func TestResolveMCPEntriesKeepsValidHTTPAndStdioServers(t *testing.T) {
 	entries := []mcpconfig.Entry{
 		{Name: "remote", Server: mcpconfig.Server{URL: "https://example.invalid/mcp"}},
 		{Name: "local", Server: mcpconfig.Server{Command: "node", Args: []string{"server.js"}}},
 	}
 	resolved, failures := resolveMCPEntries(entries, nil)
-	if len(failures) != 1 {
-		t.Fatalf("resolveMCPEntries() failures = %d, want one", len(failures))
+	if len(failures) != 0 {
+		t.Fatalf("resolveMCPEntries() failures = %d, want none", len(failures))
 	}
-	if len(resolved) != 1 || resolved[0].Name != "local" {
-		t.Fatalf("resolveMCPEntries() = %+v, want the valid local server", resolved)
+	if len(resolved) != 2 {
+		t.Fatalf("resolveMCPEntries() = %+v, want both valid servers", resolved)
 	}
 }
 

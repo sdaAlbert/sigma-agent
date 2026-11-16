@@ -42,6 +42,7 @@ type Runtime struct {
 	WebSearchEnabled                 bool              `json:"web_search_enabled"`
 	DefaultToolPermission            string            `json:"default_tool_permission"`
 	ToolPermissions                  map[string]string `json:"tool_permissions,omitempty"`
+	RiskPermissions                  map[string]string `json:"risk_permissions,omitempty"`
 	CommandTools                     []CommandTool     `json:"command_tools,omitempty"`
 }
 
@@ -187,14 +188,22 @@ func (c Runtime) Validate() error {
 		return errors.New("command_filesystem_scope must be 'unrestricted' or 'workspace'")
 	}
 	if !validToolPermission(c.DefaultToolPermission) {
-		return errors.New("default_tool_permission must be 'allow' or 'deny'")
+		return errors.New("default_tool_permission must be 'allow', 'deny', or 'ask'")
 	}
 	for name, permission := range c.ToolPermissions {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("tool_permissions keys must be non-empty tool names")
 		}
 		if !validToolPermission(permission) {
-			return fmt.Errorf("tool_permissions[%q] must be 'allow' or 'deny'", name)
+			return fmt.Errorf("tool_permissions[%q] must be 'allow', 'deny', or 'ask'", name)
+		}
+	}
+	for risk, permission := range c.RiskPermissions {
+		if !validRiskClass(risk) {
+			return fmt.Errorf("risk_permissions[%q] is not a supported risk class", risk)
+		}
+		if !validToolPermission(permission) {
+			return fmt.Errorf("risk_permissions[%q] must be 'allow', 'deny', or 'ask'", risk)
 		}
 	}
 	seenCommandTools := make(map[string]bool, len(c.CommandTools))
@@ -246,5 +255,14 @@ func (c Runtime) EffectiveContextCompactionThresholdTokens() int {
 }
 
 func validToolPermission(permission string) bool {
-	return permission == "allow" || permission == "deny"
+	return permission == "allow" || permission == "deny" || permission == "ask"
+}
+
+func validRiskClass(risk string) bool {
+	switch risk {
+	case "read_only", "workspace_write", "network", "external_service", "commit_publish":
+		return true
+	default:
+		return false
+	}
 }

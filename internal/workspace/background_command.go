@@ -162,8 +162,8 @@ func (m *BackgroundCommandManager) StartWithImage(ctx context.Context, image, co
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--env", "HOME=/workspace/.sigma-agent/container-home", "--env", "GOPATH=/workspace/.sigma-agent/container-home/go",
 		"--env", "GOMODCACHE=/workspace/.sigma-agent/container-home/go/pkg/mod", "--env", "GOCACHE=/workspace/.sigma-agent/container-home/go/build-cache",
-		"--env", "TMPDIR=/tmp", "--tmpfs", "/tmp:rw,nosuid,size=256m",
 	}
+	args = append(args, commandContainerFilesystemArgs()...)
 	if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {
 		args = append(args, "--user", fmt.Sprintf("%d:%d", uid, gid))
 	}

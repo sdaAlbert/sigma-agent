@@ -58,6 +58,42 @@ Interactive invocations start the Bubble Tea TUI in the process's current direct
 
 `run_command` supports foreground execution plus `action=start`, `action=list`, `action=status`, and `action=stop` for detached Docker commands. Job metadata is stored under the session directory and survives `--resume`; one task can run at a time and expires after 30 minutes. Read-only repository tools remain available while it runs. File edits, shell commands, and tests wait until the job completes or is stopped, because the container shares the active repository workspace.
 
+## Tool authorization and execution isolation
+
+Before a registered tool handler runs, Sigma classifies the request as
+`read_only`, `workspace_write`, `network`, `external_service`, or
+`commit_publish`, then resolves the configured default, risk-class policy, and
+per-tool override in that order. Policies support `allow`, `deny`, and `ask`.
+An interactive `ask` pauses at a TUI approval card; denial, Esc, timeout, or a
+non-interactive run prevents the handler from running. The JSONL trace and a
+session-scoped audit file record the request parameters, target, reason,
+decision, tool-call ID, and local account label. Sigma flushes these records
+before the handler starts, so prior decisions remain available after session
+recovery. The policy configuration and limits are summarized in
+[runtime configuration](CONFIGURATION.md).
+
+This is an auditable tool gate plus a restricted command container, not a
+unified execution sandbox. Sigma's repository file tools still access the
+selected workspace from the host process, while project commands run in Docker
+with the selected repository mounted writable at `/workspace`. All command
+container modes use a read-only image root filesystem, bounded tmpfs scratch
+locations, resource limits, dropped Linux capabilities, and `no-new-privileges`;
+the network is disabled unless the session setting enables it. The Docker
+container is removed on graceful interactive exit. The mounted workspace is
+still fully visible to commands, including any credentials stored inside it.
+This workflow does not create a per-task worktree, filter workspace secrets,
+or route file operations through the same executor as commands. Network
+approval also does not change the session's network setting; networking must
+already be enabled for that container. Command risk classification is
+conservative but heuristic, so it cannot prove what arbitrary shell code will
+do.
+
+The next execution-isolation increment needs a real executor interface used by
+file, Git, command, and test operations; task-scoped workspace materialization;
+and explicit result integration/cleanup. Until those pieces exist, Docker
+limits should be described as command-container restrictions, not as a
+complete Agent sandbox.
+
 After a workspace write, runtime tracks whether tests and `git_diff` have run against that revision. During this review, it exposes only outstanding checks plus targeted file reads and edits; each new write reopens both checks. The finalization exploration budget limits broad searches and inspection commands, while targeted file reads remain available so a test or diff finding can be corrected and reverified.
 
 For process integrations that only need to submit a task and consume progress, `--json` writes one JSON object per stdout line, each with `protocol_version: 1`. Agent lifecycle events are wrapped as `{"type":"agent_event","event":...}`; the final record is `run_completed` or `run_failed` and includes the session ID and artifact paths. The existing session store persists state exactly as it does for CLI runs, so a client can later resume with `--resume <session-id>`. This mode is intentionally one-shot; bidirectional control while a task is running remains in the HTTP task API.
@@ -151,13 +187,13 @@ successful sessions append to the external source and refresh that same scope.
 - Steering messages interrupt at a safe turn boundary; follow-up messages run only after the current request settles.
 - Session events and tool policy hooks are independent of the provider adapter. The file session store checkpoints transcript and queues; the context manager compacts only the provider request while retaining canonical history.
 - A read-only GitHub MCP adapter can add issue, repository, and pull-request context when credentials are configured. Local Git operations use the workspace's built-in Git tool; push and pull-request creation remain outside Sigma's remote integrations. The runtime owns JSON-RPC framing, version discovery/fallback, tool listing, and process cleanup; all remote tools are namespaced and serialized.
-- A shared MCP client (`internal/mcp`) serves every stdio MCP server. The GitHub adapter and the `mcp.json` servers use the same protocol layer, so version discovery, frame limits, tool namespacing, and process cleanup behave identically. Remote tools are exposed as `mcp__<server>__<tool>` and run in sequence.
+- A shared MCP client (`internal/mcp`) supports stdio child processes and Streamable HTTP endpoints. It handles protocol discovery/fallback, JSON-RPC requests, tool listing, and transport shutdown. Configured HTTP servers can supply static request headers; OAuth and legacy HTTP+SSE are not implemented. The GitHub adapter and configured MCP servers use the same host tool registration and dispatch path. Remote tools are exposed as `mcp__<server>__<tool>` and run in sequence.
 - A package manager (`internal/pkgmgr`) installs npm and git packages into a scope directory and records them in a scope registry. A package contributes Agent Skills, stdio MCP servers, and JavaScript workflow extensions. The workflow host supports slash commands, Agent tool registration, notifications, TUI confirmations, and read-only lifecycle events; it does not expose mutable session state or custom TUI rendering. Built-in GitHub MCP and configured MCP server tools use the same host tool registration and dispatch path.
 - Configured external command tools run one trusted host executable per tool call with JSON stdin and bounded stdout. They inherit the user's environment and permissions; this adapter is not a sandbox or package manager.
 
 ## Initial scope and limits
 
-The current Go milestone implements local resumable sessions with streaming, tool policies, bounded retry/cancel, a JSONL event journal, extractive request-window compaction, and optional model-requested session summaries. Provider usage events capture cache-read and cache-creation tokens when returned; the actual MiniMax cache hit rate and token savings have not been measured. New sessions work directly in the selected repository; ordinary Git operations are available through the Docker command tool, while GitHub MCP is read-only. The CLI has basic session listing and transcript branching, plus a config-driven host-command tool adapter for trusted external executables. It also has a Pi-style terminal REPL, a loopback HTTP/SSE task service with bounded workers and persisted task records, ordinary source browsing, on-demand project Skills, optional repository memory with a memory-only Qdrant index, and optional post-run memory capture. Packages can be installed from npm, git, or a local path, and `mcp.json` servers contribute namespaced tools through the shared MCP client. JavaScript extensions can register commands and Agent tools, use notify/confirm, and observe read-only lifecycle events; built-in GitHub MCP and configured MCP servers use the same host tool registration path. HTTP MCP servers are not supported. Coding tasks run repository-native Linux build, lint, and test commands through a configured, resource-limited Docker image; Sigma has no language-specific built-in test profiles. Command containers have networking disabled by default; sessions can opt in when dependency downloads are needed. Host packages and external service stacks still need to be present/prepared separately. A matched Mini SWE study has not isolated memory's effect on issue resolution. One matched Skill smoke verified the workflow but showed no better result and used more tokens/calls; broader task-quality effects remain unmeasured. Multi-host workers, authentication, and production-grade queue guarantees are not implied by this milestone.
+The current Go milestone implements local resumable sessions with streaming, tool policies, bounded retry/cancel, a JSONL event journal, extractive request-window compaction, and optional model-requested session summaries. Provider usage events capture cache-read and cache-creation tokens when returned; the actual MiniMax cache hit rate and token savings have not been measured. New sessions work directly in the selected repository; ordinary Git operations are available through the Docker command tool, while GitHub MCP is read-only. The CLI has basic session listing and transcript branching, plus a config-driven host-command tool adapter for trusted external executables. It also has a Pi-style terminal REPL, a loopback HTTP/SSE task service with bounded workers and persisted task records, ordinary source browsing, on-demand project Skills, optional repository memory with a memory-only Qdrant index, and optional post-run memory capture. Packages can be installed from npm, git, or a local path, and `mcp.json` servers contribute namespaced tools through the shared MCP client over stdio or Streamable HTTP. JavaScript extensions can register commands and Agent tools, use notify/confirm, and observe read-only lifecycle events; built-in GitHub MCP and configured MCP server tools use the same host tool registration path. Coding tasks run repository-native Linux build, lint, and test commands through a configured, resource-limited Docker image; Sigma has no language-specific built-in test profiles. Command containers have networking disabled by default; sessions can opt in when dependency downloads are needed. Host packages and external service stacks still need to be present/prepared separately. A matched Mini SWE study has not isolated memory's effect on issue resolution. One matched Skill smoke verified the workflow but showed no better result and used more tokens/calls; broader task-quality effects remain unmeasured. Multi-host workers, authentication, and production-grade queue guarantees are not implied by this milestone.
 
 The Go module has no Agent SDK dependency. The archived TypeScript/Pi prototype is not part of the Go runtime's execution path.
 

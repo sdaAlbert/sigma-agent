@@ -20,6 +20,25 @@ type ToolDefinition struct {
 type ToolHandler func(context.Context, json.RawMessage) (string, error)
 
 type toolTurnContextKey struct{}
+type toolCallIDContextKey struct{}
+
+// ToolCallID returns the model-supplied ID for the tool call currently being
+// authorized or executed.
+func ToolCallID(ctx context.Context) string {
+	id, _ := ctx.Value(toolCallIDContextKey{}).(string)
+	return id
+}
+
+// AuthorizationRequest is the reviewable summary shown before a gated tool
+// operation runs and persisted in the authorization audit event.
+type AuthorizationRequest struct {
+	ID        string
+	Tool      string
+	RiskClass string
+	Target    string
+	Reason    string
+	Args      json.RawMessage
+}
 
 // ToolTurn returns the assistant turn in which the current tool call was made.
 func ToolTurn(ctx context.Context) (int, bool) {
@@ -132,6 +151,12 @@ type Event struct {
 	ResultSummary            string          `json:"result_summary,omitempty"`
 	ResultOutput             string          `json:"result_output,omitempty"`
 	Status                   string          `json:"status,omitempty"`
+	AuthorizationID          string          `json:"authorization_id,omitempty"`
+	RiskClass                string          `json:"risk_class,omitempty"`
+	Decision                 string          `json:"decision,omitempty"`
+	ApprovedBy               string          `json:"approved_by,omitempty"`
+	Target                   string          `json:"target,omitempty"`
+	RiskReason               string          `json:"risk_reason,omitempty"`
 }
 
 type EventSink func(Event)
@@ -166,19 +191,20 @@ type Result struct {
 }
 
 type Session struct {
-	ID             string
-	Name           string
-	System         string
-	Model          Model
-	Tools          *ToolRegistry
-	Limits         Limits
-	RequiredSkills []string
-	OnEvent        EventSink
-	BeforeTool     ToolPolicy
-	AfterTool      ToolObserver
-	Store          SessionStore
-	Context        ContextPreparer
-	ToolOutputs    ToolOutputStore
+	ID                 string
+	Name               string
+	System             string
+	Model              Model
+	Tools              *ToolRegistry
+	Limits             Limits
+	RequiredSkills     []string
+	OnEvent            EventSink
+	BeforeTool         ToolPolicy
+	AfterTool          ToolObserver
+	SerializeToolCalls bool
+	Store              SessionStore
+	Context            ContextPreparer
+	ToolOutputs        ToolOutputStore
 
 	mu                 sync.Mutex
 	messages           []Message
@@ -620,7 +646,7 @@ func (s *Session) hasMessageIDLocked(id string) bool {
 }
 
 func (s *Session) executeTools(ctx context.Context, turn int, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
-	parallel := len(calls) > 1
+	parallel := len(calls) > 1 && !s.SerializeToolCalls
 	if len(s.pendingRequiredSkills()) > 0 {
 		parallel = false
 	}
@@ -787,6 +813,7 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	toolCtx = context.WithValue(toolCtx, toolTurnContextKey{}, turn)
+	toolCtx = context.WithValue(toolCtx, toolCallIDContextKey{}, call.ID)
 	var output string
 	var callErr error
 	if s.BeforeTool != nil {

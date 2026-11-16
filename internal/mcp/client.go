@@ -1,5 +1,5 @@
-// Package mcp implements a Model Context Protocol client over the stdio
-// transport of a child process. It is the shared protocol layer for every MCP
+// Package mcp implements a Model Context Protocol client over stdio and
+// Streamable HTTP. It is the shared protocol layer for every MCP
 // server Sigma Agent connects to: the GitHub MCP server, and the servers
 // declared in mcp.json or contributed by an installed package.
 //
@@ -13,11 +13,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -49,6 +52,12 @@ type Config struct {
 	// Name identifies the server. It is used for tool namespacing and in
 	// diagnostics.
 	Name string
+	// URL connects to a remote MCP server using Streamable HTTP. When set,
+	// Command is not used.
+	URL string
+	// Headers are sent with each Streamable HTTP request (for example,
+	// Authorization: Bearer ...).
+	Headers map[string]string
 	// Command is the executable that starts the server.
 	Command string
 	// Args are the arguments passed to Command.
@@ -75,12 +84,16 @@ type outcome struct {
 	err    error
 }
 
-// Client is a connected MCP server. It owns the child process and the
-// JSON-RPC framing over its stdio pipes.
+// Client is a connected MCP server over stdio or Streamable HTTP.
 type Client struct {
-	name    string
-	command *exec.Cmd
-	stdin   io.WriteCloser
+	name            string
+	endpoint        string
+	headers         map[string]string
+	httpClient      *http.Client
+	sessionID       string
+	protocolVersion string
+	command         *exec.Cmd
+	stdin           io.WriteCloser
 
 	writeMu      sync.Mutex
 	mu           sync.Mutex
@@ -122,6 +135,9 @@ func (b *tailBuffer) String() string {
 func Start(ctx context.Context, cfg Config) (*Client, error) {
 	if strings.TrimSpace(cfg.Name) == "" {
 		return nil, errors.New("MCP server needs a name")
+	}
+	if strings.TrimSpace(cfg.URL) != "" {
+		return startHTTP(ctx, cfg)
 	}
 	if strings.TrimSpace(cfg.Command) == "" {
 		return nil, fmt.Errorf("MCP server %q needs a command", cfg.Name)
@@ -183,6 +199,28 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	return client, nil
 }
 
+func startHTTP(ctx context.Context, cfg Config) (*Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parsed, err := url.Parse(strings.TrimSpace(cfg.URL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return nil, fmt.Errorf("MCP server %q has an invalid HTTP url", cfg.Name)
+	}
+	client := &Client{name: cfg.Name, endpoint: parsed.String(), headers: cfg.Headers, protocolVersion: ProtocolVersion,
+		httpClient: &http.Client{Timeout: 0}, pending: make(map[string]chan outcome)}
+	timeout := cfg.StartupTimeout
+	if timeout <= 0 {
+		timeout = DefaultStartupTimeout
+	}
+	initCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := client.initialize(initCtx); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
 // Name returns the configured server name.
 func (c *Client) Name() string {
 	if c == nil {
@@ -225,7 +263,10 @@ func (c *Client) initialize(ctx context.Context) error {
 	}
 	var rpcErr *RPCError
 	if !errors.As(discoverErr, &rpcErr) || rpcErr.Code != -32601 {
-		return fmt.Errorf("discover MCP server %q: %w%s", c.name, discoverErr, c.stderrSuffix())
+		var httpErr *httpResponseError
+		if !errors.As(discoverErr, &httpErr) || !httpErr.allowsLegacyFallback() {
+			return fmt.Errorf("discover MCP server %q: %w%s", c.name, discoverErr, c.stderrSuffix())
+		}
 	}
 	c.modern = false
 	var initializeResult struct {
@@ -245,6 +286,9 @@ func (c *Client) initialize(ctx context.Context) error {
 	}
 	if initializeResult.ProtocolVersion == "" {
 		return fmt.Errorf("MCP server %q did not return a protocol version%s", c.name, c.stderrSuffix())
+	}
+	if c.endpoint != "" {
+		c.protocolVersion = initializeResult.ProtocolVersion
 	}
 	c.mu.Lock()
 	c.instructions = initializeResult.Instructions
@@ -336,6 +380,9 @@ func (c *Client) CallTool(ctx context.Context, name string, arguments json.RawMe
 }
 
 func (c *Client) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if c != nil && c.endpoint != "" {
+		return c.httpRequest(ctx, method, params, true)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -382,6 +429,10 @@ func (c *Client) request(ctx context.Context, method string, params any) (json.R
 }
 
 func (c *Client) notify(method string, params any) error {
+	if c != nil && c.endpoint != "" {
+		_, err := c.httpRequest(context.Background(), method, params, false)
+		return err
+	}
 	data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": c.withEnvelope(params)})
 	if err != nil {
 		return err
@@ -395,6 +446,183 @@ func (c *Client) notify(method string, params any) error {
 		return errors.New("MCP connection is closed")
 	}
 	return writeFrame(c.stdin, data)
+}
+
+func (c *Client) httpRequest(ctx context.Context, method string, params any, wantResult bool) (json.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil, errors.New("MCP connection is closed")
+	}
+	id := c.requestID.Add(1)
+	message := map[string]any{"jsonrpc": "2.0", "method": method, "params": c.withEnvelope(params)}
+	if wantResult {
+		message["id"] = id
+	}
+	body, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for key, value := range c.headers {
+		req.Header.Set(key, value)
+	}
+	if c.modern {
+		req.Header.Set("MCP-Protocol-Version", ModernProtocolVersion)
+	} else if method != "initialize" {
+		req.Header.Set("MCP-Protocol-Version", c.protocolVersion)
+	}
+	req.Header.Set("Mcp-Method", method)
+	if c.sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", c.sessionID)
+	}
+	if name := mcpHeaderName(method, params); name != "" {
+		req.Header.Set("Mcp-Name", encodeMCPHeader(name))
+	}
+	response, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP MCP %s: %w", method, err)
+	}
+	defer response.Body.Close()
+	if sid := response.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.sessionID = sid
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, MaxFrameBytes))
+		if rpcErr, ok := parseRPCError(data).(*RPCError); ok {
+			return nil, &httpResponseError{StatusCode: response.StatusCode, RPCError: rpcErr, HasRPCBody: true}
+		}
+		return nil, &httpResponseError{StatusCode: response.StatusCode, Message: fmt.Sprintf("HTTP MCP %s returned %s: %s", method, response.Status, strings.TrimSpace(string(data)))}
+	}
+	if !wantResult {
+		return nil, nil
+	}
+	data, err := readHTTPMCPResponse(response)
+	if err != nil {
+		return nil, err
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, fmt.Errorf("decode HTTP MCP response: %w", err)
+	}
+	if envelope.Error != nil {
+		return nil, &RPCError{Code: envelope.Error.Code, Message: envelope.Error.Message}
+	}
+	if len(envelope.Result) == 0 {
+		return nil, errors.New("JSON-RPC response omitted result")
+	}
+	return envelope.Result, nil
+}
+
+type httpResponseError struct {
+	StatusCode int
+	RPCError   *RPCError
+	HasRPCBody bool
+	Message    string
+}
+
+func (e *httpResponseError) Error() string {
+	if e.RPCError != nil {
+		return e.RPCError.Error()
+	}
+	return e.Message
+}
+
+func (e *httpResponseError) Unwrap() error { return e.RPCError }
+
+func (e *httpResponseError) allowsLegacyFallback() bool {
+	return !e.HasRPCBody && (e.StatusCode == http.StatusBadRequest || e.StatusCode == http.StatusNotFound || e.StatusCode == http.StatusMethodNotAllowed)
+}
+
+func readHTTPMCPResponse(response *http.Response) ([]byte, error) {
+	if strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
+		reader := bufio.NewReader(io.LimitReader(response.Body, MaxFrameBytes))
+		var data []string
+		for {
+			line, err := reader.ReadString('\n')
+			line = strings.TrimRight(line, "\r\n")
+			if strings.HasPrefix(line, "data:") {
+				data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+			if line == "" && len(data) > 0 {
+				candidate := []byte(strings.Join(data, "\n"))
+				data = nil
+				var envelope struct {
+					ID     json.RawMessage `json:"id"`
+					Result json.RawMessage `json:"result"`
+					Error  json.RawMessage `json:"error"`
+				}
+				if json.Unmarshal(candidate, &envelope) == nil && (len(envelope.ID) > 0 || len(envelope.Result) > 0 || len(envelope.Error) > 0) {
+					return candidate, nil
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, err
+			}
+		}
+		return nil, errors.New("HTTP MCP SSE stream ended without a JSON-RPC response")
+	}
+	return io.ReadAll(io.LimitReader(response.Body, MaxFrameBytes))
+}
+
+func parseRPCError(data []byte) error {
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(data, &envelope) == nil && envelope.Error != nil {
+		return &RPCError{Code: envelope.Error.Code, Message: envelope.Error.Message}
+	}
+	return nil
+}
+
+func mcpHeaderName(method string, params any) string {
+	if method != "tools/call" && method != "resources/read" && method != "prompts/get" {
+		return ""
+	}
+	b, _ := json.Marshal(params)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(b, &fields)
+	key := "name"
+	if method == "resources/read" {
+		key = "uri"
+	}
+	var name string
+	_ = json.Unmarshal(fields[key], &name)
+	return name
+}
+
+func encodeMCPHeader(value string) string {
+	unsafe := strings.TrimSpace(value) != value || strings.Contains(value, "=?base64?")
+	for _, r := range value {
+		if r < 0x20 || r > 0x7e {
+			unsafe = true
+		}
+	}
+	if unsafe {
+		return "=?base64?" + base64.StdEncoding.EncodeToString([]byte(value)) + "?="
+	}
+	return value
 }
 
 func writeFrame(writer io.Writer, data []byte) error {
@@ -516,6 +744,25 @@ func (c *Client) Close() error {
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()
+		if c.endpoint != "" {
+			if c.sessionID != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.endpoint, nil)
+				if err == nil {
+					req.Header.Set("Mcp-Session-Id", c.sessionID)
+					req.Header.Set("MCP-Protocol-Version", c.protocolVersion)
+					for key, value := range c.headers {
+						req.Header.Set(key, value)
+					}
+					response, requestErr := c.httpClient.Do(req)
+					if requestErr == nil {
+						response.Body.Close()
+					}
+				}
+			}
+			return
+		}
 		_ = c.stdin.Close()
 		if c.command.Process != nil {
 			_ = c.command.Process.Kill()

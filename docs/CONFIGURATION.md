@@ -25,8 +25,14 @@ defaults. A file can contain only the settings that need changing.
   "web_search_enabled": false,
   "default_tool_permission": "allow",
   "tool_permissions": {
-    "apply_patch": "deny",
-    "run_command": "allow"
+    "apply_patch": "deny"
+  },
+  "risk_permissions": {
+    "read_only": "allow",
+    "workspace_write": "ask",
+    "network": "ask",
+    "external_service": "ask",
+    "commit_publish": "ask"
   }
 }
 ```
@@ -80,12 +86,33 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `web_search_enabled` | `false` | boolean | Add MiniMax's hosted `web_search` as an explicit Agent tool. Uses provider credentials and quota. |
 | `disable_configured_mcp_servers` | `false` | boolean | Skip every MCP server in user/project `mcp.json`; use `true` for issue-only benchmark runs. |
 | `disable_workflow_extensions` | `false` | boolean | Skip user/project JavaScript workflow extensions, which can register additional tools. |
-| `default_tool_permission` | `allow` | `allow` or `deny` | Permission applied to every registered tool unless overridden below. Set to `deny` to use an allowlist. |
-| `tool_permissions` | `{}` | tool name → `allow` or `deny` | Exact per-tool overrides. Tool names match the names exposed to the model, including namespaced MCP tools. |
+| `default_tool_permission` | `allow` | `allow`, `deny`, or `ask` | Fallback permission applied to every registered tool. With no risk-class or per-tool override, registered tools run automatically. `ask` requires an interactive TUI approval; non-interactive runs deny it. |
+| `risk_permissions` | `{}` | risk class → `allow`, `deny`, or `ask` | Policy for `read_only`, `workspace_write`, `network`, `external_service`, and `commit_publish` actions. Applied after the default and before per-tool overrides. |
+| `tool_permissions` | `{}` | tool name → `allow`, `deny`, or `ask` | Exact per-tool overrides, highest precedence. Names match those exposed to the model, including namespaced MCP tools. |
 
-Tool permissions are checked after argument validation and before the handler runs. A denied call is not executed; the Agent receives a tool error and the JSONL trace records `tool_permission_denied`. This first version supports policy-based allow/deny only; it does not prompt for interactive approval.
+Every registered tool call is classified and checked after argument validation
+and before its handler runs. `ask` opens a TUI prompt with the tool, risk class,
+target, and reason; Esc means deny. A non-interactive run cannot approve a call
+and therefore denies `ask` by default. Each automatic decision and human
+approval/denial is written to the run's JSONL trace as `tool_authorization`,
+including the tool-call ID, decision, risk, target, reason, and local account
+label that approved it. The label is the local OS account name, not a
+cryptographic identity assertion. Authorization events are flushed before
+execution. The same events append to the session's
+`var/sessions/<session-id>/authorizations.jsonl`, so they remain queryable after
+resuming the session; the effective policy and audit-log path are copied into
+`run.json`.
 
-In the TUI, `/trust` saves a per-folder decision under the user's Sigma configuration. Project-scoped JavaScript extensions and MCP servers stay disabled until that folder is trusted; use `/reload` after changing the decision. User-scoped integrations and project Skills remain available. Trust does not override `tool_permissions`, enable container networking, or grant operating-system permissions.
+Classification is a tool-level policy, not a complete command-language
+analyzer. For example, `run_command` is treated as a workspace write by
+default, as network when container networking or common download commands are
+detected, and as commit/publish for common push/publish commands. Arbitrary
+shell programs can hide their effects, so these classifications do not replace
+the isolated executor described in the [architecture notes](ARCHITECTURE.md).
+Approving a `network` request does not turn container networking on; configure
+`allow_container_network` separately before starting the session.
+
+In the TUI, `/trust` saves a per-folder decision under the user's Sigma configuration. Project-scoped JavaScript extensions and MCP servers stay disabled until that folder is trusted; use `/reload` after changing the decision. User-scoped integrations and project Skills remain available. Trust does not override `risk_permissions` or `tool_permissions`, enable container networking, or grant operating-system permissions.
 
 The model can also call `compact_context` by itself when it judges that older
 conversation or tool output can be summarized without losing information needed

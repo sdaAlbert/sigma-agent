@@ -62,7 +62,7 @@ func TestResolveSkipsDisabledServers(t *testing.T) {
 	}
 }
 
-func TestResolveRejectsHTTPServers(t *testing.T) {
+func TestResolveHTTPServers(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, FileName)
 	write(t, path, `{"mcpServers":{"remote":{"url":"https://example.com/mcp"}}}`)
@@ -70,8 +70,12 @@ func TestResolveRejectsHTTPServers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() = %v", err)
 	}
-	if _, err := Resolve(entries, nil); err == nil {
-		t.Fatal("Resolve() accepted an HTTP server, want an error")
+	resolved, err := Resolve(entries, nil)
+	if err != nil {
+		t.Fatalf("Resolve() = %v", err)
+	}
+	if len(resolved) != 1 || resolved[0].Config.URL != "https://example.com/mcp" {
+		t.Fatalf("Resolve() = %+v, want remote HTTP server", resolved)
 	}
 }
 
