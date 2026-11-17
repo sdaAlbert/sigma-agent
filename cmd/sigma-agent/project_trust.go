@@ -130,15 +130,14 @@ func saveProjectTrustDecision(project string, trusted bool) error {
 
 func executablePackageScopes(scopes []packageScope, project string) ([]packageScope, bool, error) {
 	trusted, err := projectTrustDecision(project)
-	if trusted {
-	}
 	filtered := make([]packageScope, 0, len(scopes))
 	for _, scope := range scopes {
-		if scope.Name != "project" {
-			filtered = append(filtered, scope)
+		if scope.Name == "project" && !trusted {
+			continue
 		}
+		filtered = append(filtered, scope)
 	}
-	return filtered, false, err
+	return filtered, trusted, err
 }
 
 func projectHasExecutableResources(project string) bool {
