@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
+	"github.com/sdaAlbert/sigma-agent/internal/buildinfo"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
 	modelconfig "github.com/sdaAlbert/sigma-agent/internal/model"
 	"github.com/sdaAlbert/sigma-agent/internal/server"
@@ -60,7 +61,7 @@ func main() {
 	localScope := flag.Bool("local", false, "install or remove the package in the project scope instead of the user scope")
 	flag.Parse()
 	if *showVersion {
-		fmt.Printf("sigma-agent v%s\n", sigmaAgentVersion)
+		fmt.Printf("sigma-agent v%s\n", buildinfo.Version)
 		return
 	}
 	if *installSource != "" && *uninstallSource != "" {

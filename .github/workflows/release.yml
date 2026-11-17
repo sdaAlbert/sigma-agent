@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify tagged source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build all packages
+        run: go build ./...
+
+  publish:
+    name: Package and publish binaries
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build platform archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag must be vMAJOR.MINOR.PATCH (optional prerelease suffix): $tag" >&2
+            exit 1
+          fi
+
+          mkdir -p dist
+          for target in "windows amd64" "windows arm64" "linux amd64" "linux arm64" "darwin amd64" "darwin arm64"; do
+            read -r goos goarch <<< "$target"
+            stage="$(mktemp -d)"
+            binary="sigma"
+            if [[ "$goos" == "windows" ]]; then binary="sigma.exe"; fi
+            archive="sigma-agent_${version}_${goos}_${goarch}"
+
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build \
+              -trimpath \
+              -ldflags "-s -w -X github.com/sdaAlbert/sigma-agent/internal/buildinfo.Version=$version" \
+              -o "$stage/$binary" ./cmd/sigma-agent
+            cp README.md LICENSE "$stage/"
+
+            if [[ "$goos" == "windows" ]]; then
+              (cd "$stage" && python3 -m zipfile -c "$GITHUB_WORKSPACE/dist/$archive.zip" "$binary" README.md LICENSE)
+            else
+              tar -C "$stage" -czf "dist/$archive.tar.gz" "$binary" README.md LICENSE
+            fi
+            rm -rf "$stage"
+          done
+
+          (cd dist && sha256sum *.zip *.tar.gz > SHA256SUMS)
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --verify-tag --title "${GITHUB_REF_NAME}" --generate-notes

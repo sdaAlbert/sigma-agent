@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
+	"github.com/sdaAlbert/sigma-agent/internal/buildinfo"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
 	"github.com/sdaAlbert/sigma-agent/internal/fsx"
 	modelconfig "github.com/sdaAlbert/sigma-agent/internal/model"
@@ -332,7 +333,7 @@ func (m *tuiModel) startupLines() []string {
 	repository := "Sigma edits this folder directly; changes appear here immediately."
 	lines := strings.Split(renderSigmaMark(), "\n")
 	lines = append(lines,
-		m.brandStyle.Render("Sigma Agent")+m.mutedStyle.Render(" · v"+sigmaAgentVersion),
+		m.brandStyle.Render("Sigma Agent")+m.mutedStyle.Render(" · v"+buildinfo.Version),
 		"Ask Sigma to explain the project, make a change, or run a verification task.",
 		repository,
 		"",

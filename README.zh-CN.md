@@ -141,3 +141,7 @@ go test ./...
 ```
 
 基于 Docker 的任务和基准检查还依赖特定镜像、网络和测试夹具；执行前请查看评测协议。Sigma 使用 [MIT License](LICENSE)。
+
+## 发布版本
+
+推送 `v主版本.次版本.修订版本` 格式的 Git tag 后，GitHub Actions 会先运行测试和构建，再发布 Windows、Linux、macOS 的 x64 与 ARM64 二进制压缩包。每个压缩包包含 README 和许可证，发布页附带 `SHA256SUMS` 校验文件。查看[最新发布版本](https://github.com/sdaAlbert/sigma-agent/releases/latest)。

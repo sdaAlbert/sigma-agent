@@ -28,6 +28,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sdaAlbert/sigma-agent/internal/buildinfo"
 )
 
 const (
@@ -41,8 +43,6 @@ const (
 	MaxFrameBytes = 4 * 1024 * 1024
 	// ClientName identifies Sigma Agent in the MCP handshake.
 	ClientName = "sigmaagent-go"
-	// ClientVersion identifies Sigma Agent in the MCP handshake.
-	ClientVersion = "1.1.3"
 	// DefaultStartupTimeout bounds the initialize handshake.
 	DefaultStartupTimeout = 15 * time.Second
 )
@@ -276,7 +276,7 @@ func (c *Client) initialize(ctx context.Context) error {
 	initializeRaw, err := c.request(ctx, "initialize", map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]string{"name": ClientName, "version": ClientVersion},
+		"clientInfo":      map[string]string{"name": ClientName, "version": buildinfo.Version},
 	})
 	if err != nil {
 		return fmt.Errorf("initialize MCP server %q: %w%s", c.name, err, c.stderrSuffix())
@@ -659,7 +659,7 @@ func (c *Client) withEnvelope(params any) any {
 	mapped["_meta"] = map[string]any{
 		"io.modelcontextprotocol/protocolVersion":    ModernProtocolVersion,
 		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
-		"io.modelcontextprotocol/clientInfo":         map[string]string{"name": ClientName, "version": ClientVersion},
+		"io.modelcontextprotocol/clientInfo":         map[string]string{"name": ClientName, "version": buildinfo.Version},
 	}
 	return mapped
 }

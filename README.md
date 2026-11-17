@@ -148,3 +148,10 @@ go test ./...
 ```
 
 Docker-backed task and benchmark checks have additional image, network, and fixture requirements; see the evaluation protocol before running them. Sigma is licensed under the [MIT License](LICENSE).
+
+## Releases
+
+Tagged `vMAJOR.MINOR.PATCH` releases are verified, then published with Windows,
+Linux, and macOS binaries for x64 and ARM64. Each archive includes the README
+and license; `SHA256SUMS` is attached for download verification. See the
+[latest release](https://github.com/sdaAlbert/sigma-agent/releases/latest).
