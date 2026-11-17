@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,7 @@ type ToolHandler func(context.Context, json.RawMessage) (string, error)
 
 type toolTurnContextKey struct{}
 type toolCallIDContextKey struct{}
+type toolIdempotencyKeyContextKey struct{}
 
 // ToolCallID returns the model-supplied ID for the tool call currently being
 // authorized or executed.
@@ -28,6 +31,29 @@ func ToolCallID(ctx context.Context) string {
 	id, _ := ctx.Value(toolCallIDContextKey{}).(string)
 	return id
 }
+
+// ToolIdempotencyKey returns a durable key for the current tool operation.
+// Adapters should forward it to external systems that support idempotency keys.
+func ToolIdempotencyKey(ctx context.Context) string {
+	key, _ := ctx.Value(toolIdempotencyKeyContextKey{}).(string)
+	return key
+}
+
+type ToolRecoveryResult struct {
+	Status string // "completed", "failed", "not_found", or "unknown".
+	Output string
+	Error  string
+}
+
+const (
+	ToolRecoveryCompleted = "completed"
+	ToolRecoveryFailed    = "failed"
+	ToolRecoveryNotFound  = "not_found"
+	ToolRecoveryUnknown   = "unknown"
+)
+
+type ToolRecoveryHandler func(context.Context, json.RawMessage, string) (ToolRecoveryResult, error)
+type ToolCompensationHandler func(context.Context, json.RawMessage, string) error
 
 // AuthorizationRequest is the reviewable summary shown before a gated tool
 // operation runs and persisted in the authorization audit event.
@@ -52,6 +78,22 @@ type Tool struct {
 	ModifiesWorkspace bool   // Successful calls force the normal test-and-diff review gate.
 	Validate          func(json.RawMessage) error
 	Handle            ToolHandler
+	Recover           ToolRecoveryHandler
+	Compensate        ToolCompensationHandler
+}
+
+// ToolOperation records the intent and outcome of one side-effect-capable call.
+type ToolOperation struct {
+	ToolCallID      string          `json:"tool_call_id"`
+	Turn            int             `json:"turn"`
+	Tool            string          `json:"tool"`
+	IdempotencyKey  string          `json:"idempotency_key"`
+	CompensationKey string          `json:"compensation_key,omitempty"`
+	Status          string          `json:"status"`
+	Args            json.RawMessage `json:"args,omitempty"`
+	Output          string          `json:"output,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 type ToolRegistry struct{ byName map[string]Tool }
@@ -217,6 +259,9 @@ type Session struct {
 	steering           []Message
 	followUps          []Message
 	pendingTools       []ContentBlock
+	modelDraft         string
+	modelDraftTurn     int
+	toolOperations     []ToolOperation
 	running            bool
 	cancel             context.CancelFunc
 }
@@ -312,6 +357,22 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		cancel()
 		return Result{}, errors.New("session is already running")
 	}
+	if continuation && s.modelDraft != "" {
+		previousMessages, previousEntries, previousHead := len(s.messages), len(s.entries), s.head
+		previousDraft, previousDraftTurn := s.modelDraft, s.modelDraftTurn
+		s.appendMessagesLocked([]Message{{Role: "assistant", Content: []ContentBlock{{Type: "text", Text: s.modelDraft}}}})
+		s.appendMessagesLocked([]Message{userMessage("The previous model stream stopped before its response completed. Continue from the saved draft above, preserving its content and avoiding repetition. Provider-level token-position resume is unavailable for this checkpoint.")})
+		s.modelDraft, s.modelDraftTurn = "", 0
+		if err := s.persistLocked(); err != nil {
+			s.messages = s.messages[:previousMessages]
+			s.entries = s.entries[:previousEntries]
+			s.head = previousHead
+			s.modelDraft, s.modelDraftTurn = previousDraft, previousDraftTurn
+			s.mu.Unlock()
+			cancel()
+			return Result{}, fmt.Errorf("prepare model draft continuation: %w", err)
+		}
+	}
 	if continuation && len(s.messages) > 0 && s.messages[len(s.messages)-1].Role == "assistant" {
 		if len(s.steering) > 0 {
 			if _, err := s.consumeQueueLocked(&s.steering); err != nil {
@@ -395,9 +456,29 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		}
 		toolDefinitions := s.Tools.Definitions()
 		toolDefinitions = requiredSkillBootstrapTools(toolDefinitions, s.pendingRequiredSkills())
+		var partialText string
+		var lastDraftCheckpoint time.Time
+		var draftCheckpointErr error
 		response, err := s.Model.Stream(ctx, systemPrompt, requestMessages, toolDefinitions, func(modelEvent ModelEvent) {
 			s.emit(Event{Type: "model_" + modelEvent.Type, Turn: turn, Text: modelEvent.Text, Tool: modelEvent.Name})
+			if modelEvent.Type == "text_delta" && modelEvent.Text != "" {
+				partialText += modelEvent.Text
+				if time.Since(lastDraftCheckpoint) >= 200*time.Millisecond || lastDraftCheckpoint.IsZero() {
+					if checkpointErr := s.setModelDraft(partialText, turn); checkpointErr != nil && draftCheckpointErr == nil {
+						draftCheckpointErr = checkpointErr
+					}
+					lastDraftCheckpoint = time.Now()
+				}
+			}
 		})
+		if partialText != "" {
+			if checkpointErr := s.setModelDraft(partialText, turn); checkpointErr != nil && draftCheckpointErr == nil {
+				draftCheckpointErr = checkpointErr
+			}
+		}
+		if draftCheckpointErr != nil {
+			return result, fmt.Errorf("persist interrupted model draft: %w", draftCheckpointErr)
+		}
 		if err != nil {
 			s.emit(Event{Type: "model_error", Turn: turn, Error: err.Error()})
 			return result, err
@@ -781,6 +862,154 @@ func toolCallChangedWorkspaceOrEnvironment(call, result ContentBlock, registry *
 	return strings.Contains(status, "workspace_changed=true")
 }
 
+func toolIdempotencyKey(sessionID string, turn int, call ContentBlock) string {
+	canonicalInput := call.Input
+	var value any
+	if json.Unmarshal(call.Input, &value) == nil {
+		if encoded, err := json.Marshal(value); err == nil {
+			canonicalInput = encoded
+		}
+	}
+	identity := fmt.Sprintf("sigma-tool-v1\x00%s\x00%d\x00%s\x00%s\x00%s", sessionID, turn, call.ID, call.Name, canonicalInput)
+	digest := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *Session) beginToolOperation(turn int, call ContentBlock, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := cloneToolOperations(s.toolOperations)
+	operation := ToolOperation{ToolCallID: call.ID, Turn: turn, Tool: call.Name, IdempotencyKey: key, Status: "running", Args: append(json.RawMessage(nil), call.Input...), UpdatedAt: time.Now().UTC()}
+	index := s.toolOperationIndexLocked(call.ID, turn)
+	if index >= 0 {
+		s.toolOperations[index] = operation
+	} else {
+		s.toolOperations = append(s.toolOperations, operation)
+	}
+	if err := s.persistLocked(); err != nil {
+		s.toolOperations = previous
+		return err
+	}
+	return nil
+}
+
+func (s *Session) finishToolOperation(callID string, turn int, status, output, operationError string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.toolOperationIndexLocked(callID, turn)
+	if index < 0 {
+		return errors.New("tool operation intent is missing")
+	}
+	previous := s.toolOperations[index]
+	s.toolOperations[index].Status = status
+	s.toolOperations[index].Output = output
+	s.toolOperations[index].Error = operationError
+	s.toolOperations[index].UpdatedAt = time.Now().UTC()
+	if err := s.persistLocked(); err != nil {
+		s.toolOperations[index] = previous
+		return err
+	}
+	return nil
+}
+
+func (s *Session) toolOperationIndexLocked(callID string, turn int) int {
+	for i := range s.toolOperations {
+		if s.toolOperations[i].ToolCallID == callID && s.toolOperations[i].Turn == turn {
+			return i
+		}
+	}
+	return -1
+}
+
+// CompensateToolOperation explicitly invokes a tool's configured compensator.
+// Compensation is never automatic because the correct rollback is domain-specific.
+func (s *Session) CompensateToolOperation(ctx context.Context, callID string) error {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return errors.New("cannot compensate while the session is running")
+	}
+	index := s.toolOperationIndexLocked(callID, 0)
+	if index < 0 {
+		for i := len(s.toolOperations) - 1; i >= 0; i-- {
+			if s.toolOperations[i].ToolCallID == callID {
+				index = i
+				break
+			}
+		}
+	}
+	if index < 0 {
+		s.mu.Unlock()
+		return errors.New("tool operation was not found")
+	}
+	operation := s.toolOperations[index]
+	var tool Tool
+	exists := false
+	if s.Tools != nil {
+		tool, exists = s.Tools.byName[operation.Tool]
+	}
+	s.mu.Unlock()
+	if !exists || tool.Compensate == nil {
+		return errors.New("tool does not provide compensation")
+	}
+	if operation.Status != "completed" && operation.Status != "compensating" && operation.Status != "compensation_unknown" {
+		return fmt.Errorf("cannot compensate tool operation in %q state", operation.Status)
+	}
+	if operation.CompensationKey == "" {
+		operation.CompensationKey = operation.IdempotencyKey + ":compensate"
+	}
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return errors.New("cannot compensate while the session is running")
+	}
+	index = s.toolOperationIndexLocked(callID, operation.Turn)
+	if index < 0 {
+		s.mu.Unlock()
+		return errors.New("tool operation disappeared before compensation")
+	}
+	previous := s.toolOperations[index]
+	s.toolOperations[index].Status = "compensating"
+	s.toolOperations[index].CompensationKey = operation.CompensationKey
+	s.toolOperations[index].UpdatedAt = time.Now().UTC()
+	if err := s.persistLocked(); err != nil {
+		s.toolOperations[index] = previous
+		s.mu.Unlock()
+		return fmt.Errorf("persist compensation intent: %w", err)
+	}
+	operation = s.toolOperations[index]
+	s.mu.Unlock()
+	ctx = context.WithValue(ctx, toolCallIDContextKey{}, operation.ToolCallID)
+	ctx = context.WithValue(ctx, toolIdempotencyKeyContextKey{}, operation.CompensationKey)
+	if err := tool.Compensate(ctx, operation.Args, operation.CompensationKey); err != nil {
+		s.mu.Lock()
+		index = s.toolOperationIndexLocked(callID, operation.Turn)
+		if index >= 0 {
+			s.toolOperations[index].Status = "compensation_unknown"
+			s.toolOperations[index].Error = err.Error()
+			s.toolOperations[index].UpdatedAt = time.Now().UTC()
+			_ = s.persistLocked()
+		}
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index = s.toolOperationIndexLocked(callID, operation.Turn)
+	if index < 0 {
+		return errors.New("tool operation disappeared during compensation")
+	}
+	previous = s.toolOperations[index]
+	s.toolOperations[index].Status = "compensated"
+	s.toolOperations[index].Error = ""
+	s.toolOperations[index].UpdatedAt = time.Now().UTC()
+	if err := s.persistLocked(); err != nil {
+		s.toolOperations[index] = previous
+		return err
+	}
+	return nil
+}
+
 func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
 	tool, exists := s.Tools.byName[call.Name]
 	started := time.Now()
@@ -810,12 +1039,20 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 			return toolResult(call.ID, "invalid tool arguments: "+err.Error(), true)
 		}
 	}
+	key := toolIdempotencyKey(s.ID, turn, call)
+	if err := s.beginToolOperation(turn, call, key); err != nil {
+		message := "could not persist tool operation intent: " + err.Error()
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		return toolResult(call.ID, message, true)
+	}
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	toolCtx = context.WithValue(toolCtx, toolTurnContextKey{}, turn)
 	toolCtx = context.WithValue(toolCtx, toolCallIDContextKey{}, call.ID)
+	toolCtx = context.WithValue(toolCtx, toolIdempotencyKeyContextKey{}, key)
 	var output string
 	var callErr error
+	handlerInvoked := false
 	if s.BeforeTool != nil {
 		callErr = s.BeforeTool(toolCtx, tool, call.Input)
 		if callErr != nil {
@@ -826,6 +1063,7 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 		callErr = toolCtx.Err()
 	}
 	if callErr == nil {
+		handlerInvoked = true
 		output, callErr = tool.Handle(toolCtx, call.Input)
 	}
 	if callErr == nil && call.Name == "read_skill" {
@@ -857,6 +1095,21 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 		} else {
 			output = truncateToolOutput(truncateToolOutputLines(output, 2000), maxResultBytes)
 		}
+	}
+	operationStatus, operationError := "completed", ""
+	if callErr != nil {
+		operationStatus, operationError = "failed", callErr.Error()
+		if handlerInvoked {
+			// Handler errors may happen after an external side effect, so only
+			// the adapter's recovery hook can resolve whether it took effect.
+			operationStatus = "unknown"
+		}
+	}
+	if err := s.finishToolOperation(call.ID, turn, operationStatus, output, operationError); err != nil {
+		// Keep the durable operation in "running" so recovery can query its
+		// external status instead of assuming the side effect failed.
+		callErr = fmt.Errorf("tool ran but its outcome could not be persisted: %w", err)
+		output = callErr.Error()
 	}
 	event := Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Bytes: outputBytes, ResultSummary: truncateToolOutput(strings.TrimSpace(output), 1024), ResultOutput: truncateToolOutput(truncateToolOutputLines(strings.TrimSpace(output), 2000), 50<<10), Status: "completed"}
 	if callErr != nil {
@@ -941,6 +1194,8 @@ func (s *Session) appendAssistant(content []ContentBlock, toolCalls []ContentBlo
 		return errors.New("cannot append an assistant response while tools are pending")
 	}
 	previousMessages, previousEntries, previousHead := len(s.messages), len(s.entries), s.head
+	previousDraft, previousDraftTurn := s.modelDraft, s.modelDraftTurn
+	s.modelDraft, s.modelDraftTurn = "", 0
 	s.appendMessagesLocked([]Message{{Role: "assistant", Content: append([]ContentBlock(nil), content...)}})
 	s.pendingTools = append([]ContentBlock(nil), toolCalls...)
 	if err := s.persistLocked(); err != nil {
@@ -948,7 +1203,20 @@ func (s *Session) appendAssistant(content []ContentBlock, toolCalls []ContentBlo
 		s.entries = s.entries[:previousEntries]
 		s.head = previousHead
 		s.pendingTools = nil
+		s.modelDraft, s.modelDraftTurn = previousDraft, previousDraftTurn
 		return fmt.Errorf("persist assistant response: %w", err)
+	}
+	return nil
+}
+
+func (s *Session) setModelDraft(text string, turn int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previousDraft, previousTurn := s.modelDraft, s.modelDraftTurn
+	s.modelDraft, s.modelDraftTurn = text, turn
+	if err := s.persistLocked(); err != nil {
+		s.modelDraft, s.modelDraftTurn = previousDraft, previousTurn
+		return err
 	}
 	return nil
 }

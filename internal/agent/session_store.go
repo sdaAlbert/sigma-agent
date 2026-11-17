@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sdaAlbert/sigma-agent/internal/filelock"
 	"github.com/sdaAlbert/sigma-agent/internal/fsx"
 )
 
-const sessionSchemaVersion = 2
+const sessionSchemaVersion = 3
+const previousSessionSchemaVersion = 2
 const legacySessionSchemaVersion = 1
 
 var validSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -26,20 +29,23 @@ func ValidSessionID(id string) bool { return validSessionID.MatchString(id) }
 // PendingTools are persisted before any handler runs so recovery never repeats an
 // operation whose outcome may be unknown.
 type SessionSnapshot struct {
-	Version            int            `json:"version"`
-	ID                 string         `json:"id"`
-	Name               string         `json:"name,omitempty"`
-	System             string         `json:"system_prompt"`
-	Messages           []Message      `json:"messages"`
-	CompactionSummary  string         `json:"compaction_summary,omitempty"`
-	CompactionBoundary int            `json:"compaction_boundary,omitempty"`
-	Steering           []Message      `json:"steering_queue,omitempty"`
-	FollowUps          []Message      `json:"follow_up_queue,omitempty"`
-	PendingTools       []ContentBlock `json:"pending_tools,omitempty"`
-	Entries            []SessionEntry `json:"entries,omitempty"`
-	Head               string         `json:"head,omitempty"`
-	ModelID            string         `json:"model_id,omitempty"`
-	UpdatedAt          time.Time      `json:"updated_at"`
+	Version            int             `json:"version"`
+	ID                 string          `json:"id"`
+	Name               string          `json:"name,omitempty"`
+	System             string          `json:"system_prompt"`
+	Messages           []Message       `json:"messages"`
+	CompactionSummary  string          `json:"compaction_summary,omitempty"`
+	CompactionBoundary int             `json:"compaction_boundary,omitempty"`
+	Steering           []Message       `json:"steering_queue,omitempty"`
+	FollowUps          []Message       `json:"follow_up_queue,omitempty"`
+	PendingTools       []ContentBlock  `json:"pending_tools,omitempty"`
+	ModelDraft         string          `json:"model_draft,omitempty"`
+	ModelDraftTurn     int             `json:"model_draft_turn,omitempty"`
+	ToolOperations     []ToolOperation `json:"tool_operations,omitempty"`
+	Entries            []SessionEntry  `json:"entries,omitempty"`
+	Head               string          `json:"head,omitempty"`
+	ModelID            string          `json:"model_id,omitempty"`
+	UpdatedAt          time.Time       `json:"updated_at"`
 }
 
 // SessionEntry is one immutable point in a session tree. Message and model-change
@@ -125,10 +131,27 @@ func (s *FileSessionStore) Load(id string) (SessionSnapshot, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return SessionSnapshot{}, fmt.Errorf("decode session snapshot: %w", err)
 	}
-	if (snapshot.Version != sessionSchemaVersion && snapshot.Version != legacySessionSchemaVersion) || snapshot.ID != id {
+	if (snapshot.Version != sessionSchemaVersion && snapshot.Version != previousSessionSchemaVersion && snapshot.Version != legacySessionSchemaVersion) || snapshot.ID != id {
 		return SessionSnapshot{}, fmt.Errorf("unsupported or mismatched session snapshot")
 	}
 	return snapshot, nil
+}
+
+// AcquireSession takes a non-blocking OS lock for one session ID. Keep the
+// returned lock for the lifetime of the process that may write that session.
+func (s *FileSessionStore) AcquireSession(id string) (*filelock.Lock, error) {
+	if !ValidSessionID(id) {
+		return nil, errors.New("invalid session id")
+	}
+	path := filepath.Join(s.Directory, ".locks", id+".lock")
+	lock, err := filelock.Acquire(path, false)
+	if errors.Is(err, filelock.ErrLocked) {
+		return nil, fmt.Errorf("session %q is already active in another Sigma process", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock session %q: %w", id, err)
+	}
+	return lock, nil
 }
 
 func (s *FileSessionStore) Save(snapshot SessionSnapshot) error {
@@ -179,7 +202,7 @@ func (s *FileSessionStore) Save(snapshot SessionSnapshot) error {
 // interrupted in-flight tool is converted into an explicit error result: the code
 // intentionally avoids replaying an operation that may already have changed state.
 func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, store SessionStore) (*Session, error) {
-	if (snapshot.Version != sessionSchemaVersion && snapshot.Version != legacySessionSchemaVersion) || !ValidSessionID(snapshot.ID) {
+	if (snapshot.Version != sessionSchemaVersion && snapshot.Version != previousSessionSchemaVersion && snapshot.Version != legacySessionSchemaVersion) || !ValidSessionID(snapshot.ID) {
 		return nil, errors.New("invalid session snapshot")
 	}
 	session := &Session{
@@ -187,7 +210,9 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 		messages: cloneMessages(snapshot.Messages), steering: cloneMessages(snapshot.Steering),
 		compactionSummary: snapshot.CompactionSummary, compactionBoundary: snapshot.CompactionBoundary,
 		followUps: cloneMessages(snapshot.FollowUps), pendingTools: append([]ContentBlock(nil), snapshot.PendingTools...),
-		entries: cloneSessionEntries(snapshot.Entries), head: snapshot.Head, modelID: snapshot.ModelID,
+		modelDraft: snapshot.ModelDraft, modelDraftTurn: snapshot.ModelDraftTurn,
+		toolOperations: cloneToolOperations(snapshot.ToolOperations),
+		entries:        cloneSessionEntries(snapshot.Entries), head: snapshot.Head, modelID: snapshot.ModelID,
 	}
 	if snapshot.Version == legacySessionSchemaVersion || len(session.entries) == 0 && len(session.messages) > 0 {
 		session.entries = nil
@@ -208,10 +233,19 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 		session.compactionBoundary = 0
 	}
 	needsSave := snapshot.Version != sessionSchemaVersion
+	if session.modelDraft != "" {
+		draft := session.modelDraft
+		session.modelDraft = ""
+		session.modelDraftTurn = 0
+		session.appendMessagesLocked([]Message{{Role: "assistant", Content: []ContentBlock{{Type: "text", Text: draft}}}})
+		session.appendMessagesLocked([]Message{userMessage("The previous model stream stopped before its response completed. Continue from the saved draft above, preserving its content and avoiding repetition. Provider-level token-position resume is unavailable for this checkpoint.")})
+		needsSave = true
+	}
 	if len(session.pendingTools) > 0 {
 		results := make([]ContentBlock, 0, len(session.pendingTools))
 		for _, call := range session.pendingTools {
-			results = append(results, toolResult(call.ID, "Previous process stopped while this tool was running. Its side-effect status is unknown; inspect the workspace before deciding whether to retry.", true))
+			result := session.recoverPendingTool(call, tools)
+			results = append(results, result)
 		}
 		session.appendMessagesLocked([]Message{{Role: "user", Content: results}})
 		session.pendingTools = nil
@@ -231,7 +265,9 @@ func (s *Session) snapshotLocked() SessionSnapshot {
 		Messages: cloneMessages(s.messages), Steering: cloneMessages(s.steering),
 		CompactionSummary: s.compactionSummary, CompactionBoundary: s.compactionBoundary,
 		FollowUps: cloneMessages(s.followUps), PendingTools: append([]ContentBlock(nil), s.pendingTools...),
-		Entries: cloneSessionEntries(s.entries), Head: s.head, ModelID: s.modelID,
+		ModelDraft: s.modelDraft, ModelDraftTurn: s.modelDraftTurn,
+		ToolOperations: cloneToolOperations(s.toolOperations),
+		Entries:        cloneSessionEntries(s.entries), Head: s.head, ModelID: s.modelID,
 		UpdatedAt: time.Now().UTC(),
 	}
 }
@@ -293,6 +329,71 @@ func cloneSessionEntries(entries []SessionEntry) []SessionEntry {
 		}
 	}
 	return cloned
+}
+
+func cloneToolOperations(operations []ToolOperation) []ToolOperation {
+	cloned := make([]ToolOperation, len(operations))
+	for i, operation := range operations {
+		cloned[i] = operation
+		cloned[i].Args = append(json.RawMessage(nil), operation.Args...)
+	}
+	return cloned
+}
+
+func (s *Session) recoverPendingTool(call ContentBlock, tools *ToolRegistry) ContentBlock {
+	operationIndex := -1
+	for i := len(s.toolOperations) - 1; i >= 0; i-- {
+		if s.toolOperations[i].ToolCallID == call.ID {
+			operationIndex = i
+			break
+		}
+	}
+	if operationIndex >= 0 {
+		operation := &s.toolOperations[operationIndex]
+		switch operation.Status {
+		case "completed":
+			return toolResult(call.ID, operation.Output, false)
+		case "failed":
+			return toolResult(call.ID, operation.Output, true)
+		}
+		if tools != nil {
+			tool, exists := tools.byName[operation.Tool]
+			if exists && tool.Recover != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				ctx = context.WithValue(ctx, toolCallIDContextKey{}, operation.ToolCallID)
+				ctx = context.WithValue(ctx, toolIdempotencyKeyContextKey{}, operation.IdempotencyKey)
+				recovered, err := tool.Recover(ctx, operation.Args, operation.IdempotencyKey)
+				if err == nil {
+					switch recovered.Status {
+					case "completed":
+						operation.Status, operation.Output, operation.Error = "completed", recovered.Output, ""
+						operation.UpdatedAt = time.Now().UTC()
+						return toolResult(call.ID, recovered.Output, false)
+					case "failed":
+						operation.Status, operation.Output, operation.Error = "failed", recovered.Error, recovered.Error
+						operation.UpdatedAt = time.Now().UTC()
+						return toolResult(call.ID, recovered.Error, true)
+					case "not_found":
+						operation.Status, operation.Error = "not_found", "External system reports no operation for this idempotency key. Retry only after reviewing the target state."
+						operation.UpdatedAt = time.Now().UTC()
+						return toolResult(call.ID, operation.Error, true)
+					}
+				}
+				if err != nil {
+					operation.Error = "Status lookup failed: " + err.Error()
+				}
+			}
+		}
+		operation.Status = "unknown"
+		operation.UpdatedAt = time.Now().UTC()
+		message := "Previous process stopped while this tool was running. Its side-effect status is unknown; inspect the target before deciding whether to retry."
+		if operation.Error != "" {
+			message += " " + operation.Error
+		}
+		return toolResult(call.ID, message, true)
+	}
+	return toolResult(call.ID, "Previous process stopped before a durable operation record was written. Its side-effect status is unknown; inspect the target before deciding whether to retry.", true)
 }
 
 func (s *Session) persistLocked() error {

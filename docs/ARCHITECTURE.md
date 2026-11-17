@@ -110,7 +110,7 @@ POST /cancel -> process context cancel -> cancelled session snapshot
 POST /resume -> same task/session id -> Continue persisted transcript
 ```
 
-The service binds to loopback by default and stores task records and event logs under `var/server/`. It is a single-process prototype without authentication; do not expose it on a network. A saved session is required for resume.
+The service binds to loopback by default and stores task records and event logs under `var/server/`. It is a single-process prototype without authentication; do not expose it on a network. A saved session is required for resume. Tasks targeting the same canonical workspace are queued behind an OS-backed workspace lock; separate worktrees remain eligible to run concurrently. CLI processes also hold a per-session OS lock for their lifetime, so the same session cannot be resumed by two Sigma processes at once. Locks are released by the operating system when a process exits.
 
 The HTTP API accepts a task with `POST /tasks`, reports state through `GET /tasks/{id}`, and streams lifecycle/model/tool events through `GET /tasks/{id}/events`. `POST /tasks/{id}/messages` accepts `{"message":"...","mode":"steer"}` or `{"message":"...","mode":"follow_up"}`. Steering is inserted at the next safe Agent turn boundary; follow-up runs after the current request would otherwise settle. Messages are durably queued and deduplicated across worker restarts. Sending a message to a completed task queues continuation of its saved session. SSE reconnects replay events after `Last-Event-ID`; that resumes event delivery, while session continuation resumes Agent work. The runtime currently exposes these interfaces through HTTP and CLI without a browser chat client.
 

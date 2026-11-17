@@ -281,6 +281,11 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	} else if !agent.ValidSessionID(sessionID) {
 		return errors.New("invalid session id")
 	}
+	sessionLease, err := store.AcquireSession(sessionID)
+	if err != nil {
+		return err
+	}
+	defer sessionLease.Close()
 	sessionDir := filepath.Join(sessionsDir, sessionID)
 	workspace := workspacePath
 	var restoredSnapshot *agent.SessionSnapshot
@@ -376,6 +381,17 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if err != nil {
 		return err
 	}
+	var checkpoints *workspaceagent.WorkspaceCheckpoints
+	if manager, checkpointErr := workspaceagent.NewWorkspaceCheckpoints(workspace, sessionID); checkpointErr != nil {
+		if workspaceagent.IsGitRepository(workspace) {
+			fmt.Fprintln(os.Stderr, "sigma-agent: code checkpoints unavailable:", checkpointErr)
+		}
+	} else {
+		checkpoints = manager
+		if _, _, err := checkpoints.Create(context.Background(), "session start", 0); err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent: warning: could not create initial code checkpoint:", err)
+		}
+	}
 
 	tracePath := filepath.Join(runDir, "trace.jsonl")
 	if requestedEventFile != "" {
@@ -402,6 +418,18 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		traceMu.Lock()
 		_ = json.NewEncoder(traceFile).Encode(event)
 		traceMu.Unlock()
+		if checkpoints != nil && event.Type == "tool_execution_end" && event.Status == "completed" && isCheckpointMutationTool(event.Tool) {
+			if checkpoint, created, checkpointErr := checkpoints.Create(context.Background(), event.Tool, event.Turn); checkpointErr != nil {
+				fmt.Fprintln(os.Stderr, "sigma-agent: warning: could not save code checkpoint:", checkpointErr)
+			} else if created {
+				message := "Code checkpoint saved: " + checkpoint.ID
+				if tui != nil {
+					tui.notice(message)
+				} else if !jsonOutput {
+					fmt.Fprintln(os.Stderr, "[checkpoint]", checkpoint.ID)
+				}
+			}
+		}
 		if jsonOutput {
 			stdoutMu.Lock()
 			protocolEvent := event
@@ -667,13 +695,13 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if interactive {
 		var interactiveErr error
 		if tui != nil {
-			result, interactiveErr = interactiveTUISession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, workflowHost, tui)
+			result, interactiveErr = interactiveTUISessionWithCheckpoints(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, workflowHost, checkpoints, tui)
 		} else {
 			var scanners []*bufio.Scanner
 			if setupInput != nil {
 				scanners = append(scanners, setupInput)
 			}
-			result, interactiveErr = interactiveSession(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, workflowHost, scanners...)
+			result, interactiveErr = interactiveSessionWithCheckpoints(ctx, session, workspace, task, !newSession, startingCommit, runtimeConfig, projectGuidance, workflowHost, checkpoints, scanners...)
 		}
 		if interactiveErr != nil {
 			runErr = interactiveErr
@@ -868,6 +896,10 @@ func parseModelCommand(value string, current agent.Model) (modelconfig.Selection
 }
 
 func interactiveSession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance workspaceagent.ProjectGuidance, extensions *workflow.Host, inputScanners ...*bufio.Scanner) (agent.Result, error) {
+	return interactiveSessionWithCheckpoints(ctx, session, workspace, initialPrompt, resume, startingCommit, runtimeConfig, projectGuidance, extensions, nil, inputScanners...)
+}
+
+func interactiveSessionWithCheckpoints(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance workspaceagent.ProjectGuidance, extensions *workflow.Host, checkpoints *workspaceagent.WorkspaceCheckpoints, inputScanners ...*bufio.Scanner) (agent.Result, error) {
 	type inputEvent struct {
 		line string
 		err  error
@@ -879,7 +911,7 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 	}
 
 	var total agent.Result
-	commandNames := []string{"/help", "/model", "/diff", "/tree [entry-id]", "/skill:<name> <task>", "/abort", "/quit"}
+	commandNames := []string{"/help", "/model", "/diff", "/tree [entry-id]", "/versions", "/restore <id> [confirm]", "/skill:<name> <task>", "/abort", "/quit"}
 	for _, command := range extensions.Commands() {
 		commandNames = append(commandNames, "/"+command.Name)
 	}
@@ -1045,6 +1077,42 @@ func interactiveSession(ctx context.Context, session *agent.Session, workspace, 
 					fmt.Fprintf(os.Stderr, "Could not continue from that history entry: %v\n", err)
 				} else {
 					fmt.Fprintf(os.Stderr, "Continued from %s. Previous history remains available in /tree.\n", entryID)
+				}
+			case line == "/versions":
+				output, err := listWorkspaceCheckpoints(ctx, checkpoints)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Could not list code checkpoints:", err)
+				} else {
+					fmt.Fprintln(os.Stderr, output)
+				}
+			case strings.HasPrefix(line, "/restore"):
+				if activeDone != nil {
+					fmt.Fprintln(os.Stderr, "Wait for the current turn to finish before restoring code.")
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) != 2 && len(fields) != 3 {
+					fmt.Fprintln(os.Stderr, "Usage: /restore <checkpoint-id> [confirm]")
+					continue
+				}
+				if len(fields) == 3 {
+					if fields[2] != "confirm" {
+						fmt.Fprintln(os.Stderr, "Usage: /restore <checkpoint-id> [confirm]")
+						continue
+					}
+					output, err := restoreWorkspaceCheckpoint(ctx, checkpoints, fields[1])
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "Could not restore code checkpoint:", err)
+					} else {
+						fmt.Fprintln(os.Stderr, output)
+					}
+				} else {
+					output, err := previewWorkspaceRestore(ctx, checkpoints, fields[1])
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "Could not preview code restore:", err)
+					} else {
+						fmt.Fprintln(os.Stderr, output)
+					}
 				}
 			case line == "/model" || strings.HasPrefix(line, "/model "):
 				if activeDone != nil {

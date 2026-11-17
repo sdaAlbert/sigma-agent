@@ -939,7 +939,7 @@ func (m *tuiModel) setupCommand(line string) tea.Cmd {
 	value = strings.TrimSpace(value)
 	switch command {
 	case "/help":
-		m.appendLine("Commands: /help, /model, /settings, /trust, /thinking, /login, /logout, /resume, /session, /new, /fork, /clone, /compact, /import, /reload, /name, /export, /diff, /tree, /steer, /followup, /abort, /quit.")
+		m.appendLine("Commands: /help, /model, /settings, /trust, /thinking, /login, /logout, /resume, /session, /new, /fork, /clone, /compact, /import, /reload, /name, /export, /diff, /tree, /versions, /restore, /steer, /followup, /abort, /quit.")
 	case "/settings":
 		m.openSettingsSelector()
 		return nil
@@ -1920,6 +1920,8 @@ func (m *tuiModel) commandSuggestions(line string) []tuiOverlayItem {
 		tuiOverlayItem{label: "/export  Export the conversation as Markdown", value: "/export "},
 		tuiOverlayItem{label: "/diff  Show current workspace changes", value: "/diff"},
 		tuiOverlayItem{label: "/tree  Browse history or continue from a past point", value: "/tree"},
+		tuiOverlayItem{label: "/versions  List code checkpoints", value: "/versions"},
+		tuiOverlayItem{label: "/restore <id>  Preview code restore", value: "/restore "},
 		tuiOverlayItem{label: "/steer  Guide the active turn at its next safe point", value: "/steer "},
 		tuiOverlayItem{label: "/followup  Queue a message after the active turn", value: "/followup "},
 		tuiOverlayItem{label: "/abort  Interrupt the active turn", value: "/abort"},
@@ -2631,6 +2633,10 @@ func sessionMarkdown(session *agent.Session) string {
 }
 
 func interactiveTUISession(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance workspaceagent.ProjectGuidance, extensions *workflow.Host, bridge *tuiBridge) (agent.Result, error) {
+	return interactiveTUISessionWithCheckpoints(ctx, session, workspace, initialPrompt, resume, startingCommit, runtimeConfig, projectGuidance, extensions, nil, bridge)
+}
+
+func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Session, workspace, initialPrompt string, resume bool, startingCommit string, runtimeConfig config.Runtime, projectGuidance workspaceagent.ProjectGuidance, extensions *workflow.Host, checkpoints *workspaceagent.WorkspaceCheckpoints, bridge *tuiBridge) (agent.Result, error) {
 	bridge.send(tuiReadyMsg{sessionID: session.ID, workspace: workspace, modelID: session.Model.ModelID(), contextLimit: runtimeConfig.MaxContextTokens, messages: session.Messages()})
 	bridge.send(tuiCommandsMsg(extensions.Commands()))
 	type outcome struct {
@@ -3005,7 +3011,7 @@ func interactiveTUISession(ctx context.Context, session *agent.Session, workspac
 					"/new — start a new session", "/fork — branch from a user message", "/clone — copy the current session point",
 					"/compact [focus] — summarize older context", "/import <path> — import a Pi JSONL session", "/reload — reload session resources",
 					"/name [text|clear] — name this session", "/export [path] — export Markdown",
-					"/tree [entry-id] — browse or branch history", "/diff — show workspace changes", "/steer <text> — guide the active turn",
+					"/tree [entry-id] — browse or branch history", "/versions — list code checkpoints", "/restore <id> — preview; add confirm to apply", "/diff — show workspace changes", "/steer <text> — guide the active turn",
 					"/followup <text> — queue a follow-up", "/abort — interrupt the active turn", "/quit — save and close Sigma",
 				}
 				for _, command := range extensions.Commands() {
@@ -3028,6 +3034,39 @@ func interactiveTUISession(ctx context.Context, session *agent.Session, workspac
 					bridge.failure("Could not continue from that history entry: " + err.Error())
 				} else {
 					bridge.notice("Continued from " + entryID + "; previous history remains available in /tree")
+				}
+			case line == "/versions":
+				output, err := listWorkspaceCheckpoints(ctx, checkpoints)
+				if err != nil {
+					bridge.failure("Could not list code checkpoints: " + err.Error())
+				} else {
+					bridge.output(output)
+				}
+			case strings.HasPrefix(line, "/restore"):
+				if active != nil {
+					bridge.notice("Wait for the current turn to finish before restoring code")
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) != 2 && len(fields) != 3 {
+					bridge.failure("Usage: /restore <checkpoint-id> [confirm]")
+					continue
+				}
+				var output string
+				var err error
+				if len(fields) == 3 {
+					if fields[2] != "confirm" {
+						bridge.failure("Usage: /restore <checkpoint-id> [confirm]")
+						continue
+					}
+					output, err = restoreWorkspaceCheckpoint(ctx, checkpoints, fields[1])
+				} else {
+					output, err = previewWorkspaceRestore(ctx, checkpoints, fields[1])
+				}
+				if err != nil {
+					bridge.failure("Could not restore code checkpoint: " + err.Error())
+				} else {
+					bridge.output(output)
 				}
 			case line == "/diff":
 				if !workspaceagent.HasGitCommit(workspace) {

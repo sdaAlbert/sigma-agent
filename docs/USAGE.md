@@ -93,7 +93,7 @@ Uncommitted changes need no copying; they are already in the workspace.
 
 ## Integrated TUI
 
-Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. A session starts automatically; the same command suggestions are available from the input at startup and in chat. `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/diff`, `/model`, `/session`, `/new`, `/fork`, `/clone`, `/steer`, `/followup`, and `/abort` are handled in the TUI. `/new` saves the current session and begins another; `/session` shows details for the current session. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
+Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. A session starts automatically; the same command suggestions are available from the input at startup and in chat. `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/versions`, `/restore`, `/diff`, `/model`, `/session`, `/new`, `/fork`, `/clone`, `/steer`, `/followup`, and `/abort` are handled in the TUI. `/new` saves the current session and begins another; `/session` shows details for the current session. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
 
 TUI shortcuts: `Enter` submits or accepts the highlighted suggestion, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes file paths (`@path` in prompts), `Up`/`Down` navigate command/model suggestions or browse prompt history, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
@@ -131,6 +131,9 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | `/diff` | Show a summary of changes in the active repository, compared with its starting commit. This includes pre-existing local changes. |
 | `/tree` | In the TUI, open the session history picker and choose a point to continue from. The previous history remains available as another branch; the terminal CLI prints the tree. |
 | `/tree <entry-id>` | Continue from a specific saved conversation entry. Find the ID in `/tree`. |
+| `/versions` | List code checkpoints captured for this session. Requires a Git repository with a commit. |
+| `/restore <checkpoint-id>` | Preview changed files for a checkpoint. This also saves the current workspace as a recovery checkpoint. |
+| `/restore <checkpoint-id> confirm` | Restore the checkpoint after preview. The current workspace is checkpointed first; the branch and Git index are left unchanged. |
 | `/steer <guidance>` | Queue guidance while an Agent turn is active. Plain text during an active turn does the same. |
 | `/followup <instruction>` | Queue a new instruction to run after the active task settles. |
 | `/abort` | Cancel the active Agent turn while keeping the session open. |

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
+	"github.com/sdaAlbert/sigma-agent/internal/filelock"
 )
 
 type Task struct {
@@ -343,11 +346,80 @@ func (m *manager) events(w http.ResponseWriter, r *http.Request) {
 
 func (m *manager) worker() {
 	for id := range m.queue {
-		m.runTask(id)
+		lock, busy, err := m.tryWorkspaceLock(id)
+		if busy {
+			m.queue <- id
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if err != nil {
+			m.failQueuedTask(id, err)
+			continue
+		}
+		m.runTask(id, lock)
 	}
 }
 
-func (m *manager) runTask(id string) {
+func (m *manager) tryWorkspaceLock(id string) (*filelock.Lock, bool, error) {
+	m.mu.RLock()
+	task := m.tasks[id]
+	if task == nil || task.Status != "queued" {
+		m.mu.RUnlock()
+		return nil, false, nil
+	}
+	repo := task.Repo
+	m.mu.RUnlock()
+	path, err := workspaceLockPath(repo)
+	if err != nil {
+		return nil, false, err
+	}
+	lock, err := filelock.Acquire(path, false)
+	if errors.Is(err, filelock.ErrLocked) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return lock, false, nil
+}
+
+func workspaceLockPath(repo string) (string, error) {
+	canonical, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		canonical, err = filepath.Abs(repo)
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve task workspace for locking: %w", err)
+	}
+	canonical = filepath.Clean(canonical)
+	if runtime.GOOS == "windows" {
+		canonical = strings.ToLower(canonical)
+	}
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("locate Sigma workspace lock directory: %w", err)
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return filepath.Join(cacheDir, "sigma-agent", "workspace-locks", hex.EncodeToString(digest[:])+".lock"), nil
+}
+
+func (m *manager) failQueuedTask(id string, cause error) {
+	m.mu.Lock()
+	task := m.tasks[id]
+	if task == nil || task.Status != "queued" {
+		m.mu.Unlock()
+		return
+	}
+	task.Status, task.Error, task.UpdatedAt = "failed", cause.Error(), time.Now().UTC()
+	_ = m.saveLocked(task)
+	m.mu.Unlock()
+	m.appendEvent(id, map[string]any{"type": "task_failed", "task_id": id, "error": cause.Error(), "at": time.Now().UTC()})
+}
+
+func (m *manager) runTask(id string, workspaceLock *filelock.Lock) {
+	if workspaceLock != nil {
+		defer workspaceLock.Close()
+	}
 	m.mu.Lock()
 	task := m.tasks[id]
 	if task == nil || task.Status != "queued" {
