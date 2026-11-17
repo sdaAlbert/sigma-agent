@@ -4,6 +4,8 @@
 
 <h1 align="center">Sigma Agent</h1>
 
+[![CI](https://github.com/sdaAlbert/sigma-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sdaAlbert/sigma-agent/actions/workflows/ci.yml)
+
 <p align="center">
   <a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a>
 </p>
