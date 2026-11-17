@@ -35,7 +35,7 @@ parent from importing these packages. Dependencies point inward from `cmd` to
 | `internal/config` | Runtime configuration types, defaults, loading, and validation. / Runtime 配置结构、默认值、读取和校验。 |
 | `internal/credentials` | Local credential storage. / 本地凭据存储。 |
 | `internal/fsx` | Small filesystem primitives, with OS-specific implementations. / 小型文件系统原语，含操作系统专用实现。 |
-| `internal/mcp` | MCP stdio protocol client and child-process lifecycle. / MCP stdio 协议客户端和子进程生命周期管理。 |
+| `internal/mcp` | MCP stdio and Streamable HTTP clients, including child-process lifecycle. / MCP stdio 与 Streamable HTTP 客户端，以及子进程生命周期管理。 |
 | `internal/mcpconfig` | MCP server configuration loading and runtime tool conversion. / MCP 服务配置读取及运行时工具转换。 |
 | `internal/pkgmgr` | Package source parsing, installation, and local registry. / 包来源解析、安装和本地注册表。 |
 | `internal/server` | Loopback HTTP task service and worker lifecycle. / 本机 HTTP 任务服务和 worker 生命周期。 |

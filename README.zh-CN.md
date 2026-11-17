@@ -50,7 +50,7 @@ TUI 会自动启动会话。输入 `/login` 保存提供商 Key，输入 `/model
 
 - **面向真实 Issue 的编码流程：** 在持久化会话中浏览仓库、修改代码、运行项目命令和测试，并检查最终 diff。
 - **贴合仓库的执行环境：** Agent 可检查项目配置并准备可复用 Docker 工具链；仓库命令在有资源限制的容器中运行。
-- **支持长任务：** 会话保存运行记录并支持恢复；Runtime 跟踪文件变更和所需验证。
+- **支持长任务：** 会话保存对话、流式草稿和工具操作恢复状态，并支持恢复；每个 session 的进程租约避免两个 Sigma 进程同时续写同一段对话。基于 Git 的代码检查点支持预览和恢复。
 - **可扩展：** 支持项目 Skills、仓库记忆、MCP 工具和 JavaScript 工作流扩展。记忆检索仍属实验能力，尚无隔离实验能证明它提高了修复成功率。
 - **Go 原生 Agent Runtime：** 模型流式调用、工具生命周期、权限策略、上下文管理和工作区工具均由 Go 实现。
 
@@ -62,7 +62,7 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 | --- | --- | --- |
 | 主要目标 | 极简、可定制的 Coding Agent Harness | 面向仓库任务和后端集成的 Go 原生 Runtime |
 | 运行时 | TypeScript / Node.js | Go 可执行程序；Docker 执行仓库命令 |
-| 交互方式 | 交互式 CLI、print/JSON、RPC 和 TypeScript SDK | 集成终端 TUI、单次 CLI/JSONL |
+| 交互方式 | 交互式 CLI、print/JSON、RPC 和 TypeScript SDK | 集成终端 TUI、单次 `--task`/JSONL 和本机 `--serve` 任务 API |
 | 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | 包内 Skills、MCP 工具，以及支持斜杠命令、Agent 工具、通知、确认和只读生命周期事件的 JavaScript 工作流扩展宿主 |
 | 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 文件工具直接修改所选仓库；仓库命令/测试工具在挂载该仓库的 Docker 容器中执行 |
 | 环境准备 | 使用本机工具链，或另行配置容器/沙箱 | Agent 可检查项目配置并准备缓存的 Docker 镜像，安装选择的工具链和系统依赖 |
@@ -109,7 +109,7 @@ Go 可执行程序由 `cmd/sigma-agent` 负责组装，可复用的实现模块�
 | `internal/config` | 运行时配置结构、默认值、加载和校验。 |
 | `internal/credentials` | 模型与 GitHub 集成使用的本地凭据存储。 |
 | `internal/fsx` | 跨操作系统的小型文件系统原语，例如原子替换。 |
-| `internal/mcp` | 通用 MCP stdio 协议客户端及服务进程生命周期管理。 |
+| `internal/mcp` | MCP stdio 与 Streamable HTTP 客户端及服务进程生命周期管理。 |
 | `internal/mcpconfig` | MCP 配置加载，并将配置的服务器转换为运行时工具。 |
 | `internal/pkgmgr` | 包来源解析、包安装和本地包注册表。 |
 | `internal/server` | 后端任务服务实现。 |

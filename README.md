@@ -51,7 +51,7 @@ Runs used Skills and Memory according to their recorded configurations; they wer
 
 - **Issue-focused coding workflow:** Repository exploration, edits, project-native commands, tests, and final diff review are handled in a persistent Agent session.
 - **Repository-aware execution:** Sigma can inspect project setup and prepare a reusable Docker toolchain; repository commands run in a resource-bounded container.
-- **Reliable long-running work:** Sessions preserve transcripts and support resume; runtime policies track changes and required verification.
+- **Reliable long-running work:** Sessions preserve transcripts, partial streamed text, queued messages, and tool-operation recovery state; per-session process leases prevent concurrent resumes. Git-backed code checkpoints can be previewed and restored.
 - **Extensible agent:** Project Skills, repository memory, MCP tools, and JavaScript workflow extensions let teams add context and capabilities. Memory retrieval is experimental; its effect on issue-resolution success has not been isolated.
 - **Go-native runtime:** A streaming model loop, tool lifecycle, permission policies, context management, and workspace tools are implemented in Go.
 
@@ -63,7 +63,7 @@ Sigma takes architectural inspiration from [Pi](https://github.com/earendil-work
 | --- | --- | --- |
 | Main goal | Minimal, customizable coding-agent harness | Go-native runtime for repository tasks and backend integrations |
 | Runtime | TypeScript / Node.js | Go executable; Docker runs repository commands |
-| Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Integrated terminal TUI and one-shot CLI/JSONL |
+| Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Integrated terminal TUI, one-shot `--task`/JSONL, and loopback `--serve` task API |
 | Customization | Extensions, Skills, prompt templates, themes, and shareable packages; see the [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) for customization and interaction modes | Package Skills, MCP tools, and a JavaScript workflow host for slash commands, Agent tools, notifications, confirmations, and read-only lifecycle events |
 | Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | File tools edit the selected checkout directly; repository commands/tests run in Docker with that checkout mounted writable |
 | Environment preparation | Integrate the local toolchain or configure a container/sandbox separately | Agent can inspect repository setup files and prepare a cached Docker image with a selected toolchain and system packages |
@@ -80,7 +80,7 @@ Streaming model adapter → assistant text and tool-call events
         ↓
 Tool validation and permission policy
         ↓
-Bounded execution: parallel independent reads; ordered writes and commands
+Bounded execution: parallel safe reads and path-locked writes; serialized mixed batches and commands
         ↓
 Tool results appended to the session → next model turn
 ```
@@ -112,7 +112,7 @@ on internal modules. Internal modules must not import the CLI.
 | `internal/config` | Runtime configuration schema, defaults, loading, and validation. |
 | `internal/credentials` | Local credential storage used by model and GitHub integrations. |
 | `internal/fsx` | Small OS-specific filesystem primitives, such as atomic replacement. |
-| `internal/mcp` | Shared MCP stdio protocol client and server-process lifecycle. |
+| `internal/mcp` | MCP stdio and Streamable HTTP clients and server-process lifecycle. |
 | `internal/mcpconfig` | MCP configuration loading and conversion of configured servers into runtime tools. |
 | `internal/pkgmgr` | Package-source parsing, package installation, and local package registry. |
 | `internal/server` | Backend task-service implementation. |

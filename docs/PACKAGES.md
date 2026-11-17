@@ -210,8 +210,11 @@ contributes, and disconnects again.
 ## Tool names and safety
 
 Server tools are exposed as `mcp__<server>__<tool>`, so several servers can
-contribute tools without colliding. They run in sequence, because a remote
-tool usually reaches the network and may change remote state.
+contribute tools without colliding. MCP calls run in sequence because a remote
+tool may reach the network or change external state. Other tool calls can run
+concurrently only when every call in the batch is registered for the same safe
+execution mode; see [architecture](ARCHITECTURE.md#runtime-flow). Tool-call
+IDs match results but do not provide external idempotency guarantees.
 
 An MCP server is a program that runs with the permissions of the current
 user. Sigma Agent does not sandbox it. The same applies to an installed
@@ -221,7 +224,8 @@ configured tool policy, so a tool can be denied with `tool_permissions`.
 
 ## Current limits
 
-- Only stdio MCP servers are supported. HTTP servers and OAuth sign-in are not.
+- Local MCP servers use stdio; remote servers use Streamable HTTP. Legacy
+  HTTP+SSE transport and OAuth sign-in are not supported.
 - Workflow extensions require Node.js and run with Sigma's operating-system permissions. TypeScript sources must be compiled to JavaScript; custom TUI rendering and mutable session APIs are not exposed.
 - The package registry records the source of each package; `--uninstall`
   removes the record and leaves the installed files on disk.

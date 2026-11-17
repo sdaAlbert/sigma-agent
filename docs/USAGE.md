@@ -139,7 +139,13 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | `/abort` | Cancel the active Agent turn while keeping the session open. |
 | `/quit` | Stop the active turn if needed, save the session, and exit. |
 
-When a run exits, Sigma prints its session ID, snapshot path, run-artifact path, and active repository path. Use that session ID in `/resume <id>` at the next setup prompt. Sessions created by older versions that used a worktree continue to resume from their saved workspace. There is no `/sessions` listing command in the current CLI.
+When a run exits, Sigma prints its session ID, snapshot path, run-artifact path, and active repository path. Use that session ID in `/resume <id>` at the next setup prompt. A session has an OS-backed exclusive lease while Sigma is using it: a second process cannot resume and write the same session until the first process exits. Sessions created by older versions that used a worktree continue to resume from their saved workspace. There is no `/sessions` listing command in the current CLI.
+
+The `--serve` task service also takes an OS-backed lock for each canonical
+workspace. Tasks targeting the same directory wait in the service queue;
+different repositories or Git worktrees can run concurrently. This protects
+shared working files from overlapping tasks and does not prevent ordinary
+independent Sigma processes from using separate workspaces.
 
 ## 6. Use Agent Skills
 
