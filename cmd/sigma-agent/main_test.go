@@ -36,6 +36,21 @@ func TestResolveWorkspacePathUsesExplicitRepoAndRejectsMissingFolders(t *testing
 	}
 }
 
+func TestSessionCommandsStayOutOfDefaultInteractiveMode(t *testing.T) {
+	if shouldStartInteractive(false, false, "", "", true) {
+		t.Fatal("session command without a task unexpectedly starts the TUI")
+	}
+	if !shouldStartInteractive(false, false, "", "", false) {
+		t.Fatal("plain invocation should still default to interactive mode")
+	}
+	if shouldStartInteractive(false, false, "review changes", "", false) {
+		t.Fatal("one-shot task unexpectedly starts the TUI")
+	}
+	if shouldStartInteractive(false, false, "", "existing-session", false) {
+		t.Fatal("session resume unexpectedly starts the TUI")
+	}
+}
+
 func TestConfiguredToolPolicyAppliesOverridePrecedence(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -19,6 +19,7 @@ type Event struct {
 	Tool      string `json:"tool,omitempty"`
 	Status    string `json:"status,omitempty"`
 	Error     string `json:"error,omitempty"`
+	Args      string `json:"args,omitempty"`
 }
 
 type Command struct {
@@ -45,11 +46,12 @@ type eventHandler func(Event)
 
 // Host is the registration and dispatch surface supplied to extensions.
 type Host struct {
-	mu       sync.RWMutex
-	handler  Handler
-	commands map[string]registeredCommand
-	tools    map[string]registeredTool
-	events   map[string][]eventHandler
+	mu         sync.RWMutex
+	handler    Handler
+	commands   map[string]registeredCommand
+	tools      map[string]registeredTool
+	events     map[string][]eventHandler
+	beforeTool []func(context.Context, Event) (bool, error)
 }
 
 type registeredCommand struct {
@@ -92,6 +94,34 @@ func (h *Host) On(eventType string, callback func(Event)) error {
 	h.mu.Lock()
 	h.events[eventType] = append(h.events[eventType], callback)
 	h.mu.Unlock()
+	return nil
+}
+
+// OnBeforeTool registers a synchronous hook that may reject a tool call.
+func (h *Host) OnBeforeTool(callback func(context.Context, Event) (bool, error)) error {
+	if callback == nil {
+		return errors.New("before-tool callback is required")
+	}
+	h.mu.Lock()
+	h.beforeTool = append(h.beforeTool, callback)
+	h.mu.Unlock()
+	return nil
+}
+
+// BeforeTool runs registered hooks in order and stops at the first rejection.
+func (h *Host) BeforeTool(ctx context.Context, event Event) error {
+	h.mu.RLock()
+	callbacks := append([]func(context.Context, Event) (bool, error){}, h.beforeTool...)
+	h.mu.RUnlock()
+	for _, callback := range callbacks {
+		allowed, err := callback(ctx, event)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return fmt.Errorf("workflow extension blocked tool %q", event.Tool)
+		}
+	}
 	return nil
 }
 

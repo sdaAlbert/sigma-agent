@@ -374,8 +374,9 @@ checks the saved user configuration first, then
 `GITHUB_PERSONAL_ACCESS_TOKEN`, then `.secrets/github-pat` relative to the
 current working directory. Keep the fallback token in that local file;
 `.secrets/` is ignored by Git. The GitHub MCP server runs in Docker with the
-read-only `issues`, `repos`, and `pull_requests` toolsets unless scoped PR
-creation is explicitly enabled. Start Sigma Agent from `go-runtime` to find the
+read-only `issues`, `repos`, and `pull_requests` toolsets. The built-in GitHub
+integration does not currently create PRs, even when the token itself can write.
+Use a separately configured MCP server if you need GitHub write tools. Start Sigma Agent from `go-runtime` to find the
 project-local fallback credential. A helper can create or replace the file
 without echoing the token:
 
