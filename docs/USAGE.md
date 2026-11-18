@@ -97,7 +97,7 @@ Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a 
 
 TUI shortcuts: `Enter` submits or accepts the highlighted suggestion, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes file paths (`@path` in prompts), `Up`/`Down` navigate command/model suggestions or browse prompt history, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
-Docker commands use one reusable foreground container during an interactive session. `/quit` removes that container while keeping Docker images and `.sigma-agent/container-home` caches for the next session. Use `/settings` to change Docker network access. See [Docker command environments](DOCKER.md) for container reuse, image preparation, caches, background tasks, and shutdown behavior.
+Docker commands use one reusable foreground container during an interactive session; one-shot `--task` / `--resume` runs create a container per command, while `action=start` creates a background task container. `/quit` removes the interactive container while keeping Docker images and `.sigma-agent/container-home` caches for the next session. Use `/settings` to change Docker network access. Non-interactive runs can set `allow_container_network` in `config.json` or pass `--allow-container-network`. This controls Docker commands and image-build steps, not Sigma's host-side model requests or Docker image pulls. See [Docker command environments](DOCKER.md) for details.
 
 ## 4. Setup commands
 

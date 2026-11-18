@@ -390,12 +390,8 @@ func publishIsolatedSession(repository, sessionID, branch, title, body, base str
 	if err != nil {
 		return fmt.Errorf("check remote feature branch: %w", err)
 	}
-	if strings.TrimSpace(remoteBranch) == "" {
-		if _, err := gitOutput(workspace, "push", "--set-upstream", "origin", branch+":"+branch); err != nil {
-			return fmt.Errorf("push feature branch: %w", err)
-		}
-	} else if strings.Fields(remoteBranch)[0] != strings.TrimSpace(commit) {
-		return errors.New("remote feature branch already exists with different changes")
+	if err := pushFeatureBranch(workspace, branch, strings.TrimSpace(commit), remoteBranch); err != nil {
+		return err
 	}
 	remoteURL, err := gitOutput(repository, "remote", "get-url", "origin")
 	if err != nil {
@@ -419,10 +415,39 @@ func publishIsolatedSession(repository, sessionID, branch, title, body, base str
 	}
 	result, err := client.CallTool(context.Background(), "create_pull_request", arguments)
 	if err != nil {
+		if isExistingPullRequestError(err.Error() + " " + result) {
+			fmt.Printf("Updated %s; GitHub reports that a pull request already exists for this branch and base.\n%s\n", branch, result)
+			return nil
+		}
 		return fmt.Errorf("create draft pull request: %w", err)
 	}
 	fmt.Printf("Published %s and opened a draft pull request.\n%s\n", branch, result)
 	return nil
+}
+
+func pushFeatureBranch(workspace, branch, commit, remoteBranch string) error {
+	remoteBranch = strings.TrimSpace(remoteBranch)
+	if remoteBranch != "" {
+		remoteFields := strings.Fields(remoteBranch)
+		if len(remoteFields) == 0 {
+			return errors.New("GitHub returned an invalid remote feature branch reference")
+		}
+		remoteCommit := remoteFields[0]
+		if remoteCommit != commit {
+			if _, err := gitOutput(workspace, "merge-base", "--is-ancestor", remoteCommit, commit); err != nil {
+				return errors.New("remote feature branch has commits not present in this session; refusing a non-fast-forward update")
+			}
+		}
+	}
+	if _, err := gitOutput(workspace, "push", "--set-upstream", "origin", branch+":"+branch); err != nil {
+		return fmt.Errorf("push feature branch: %w", err)
+	}
+	return nil
+}
+
+func isExistingPullRequestError(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "pull request already exists") || strings.Contains(message, "a pull request already exists")
 }
 
 func validateFeatureBranch(repository, workspace, branch, base string) error {
