@@ -122,9 +122,6 @@ func builtinTools(root string, maxMemoryQueryBytes int, model agent.Model, toolO
 		ws.listFilesTool(), ws.searchCodeTool(), ws.readFileTool(), ws.recordChangeContractTool(),
 		ws.createFileTool(), ws.editFileTool(), ws.applyPatchTool(), ws.gitDiffTool(), ws.gitTool(),
 	}
-	if model != nil {
-		tools = append(tools, ws.delegateInvestigationTool(model, tools, toolOutputs))
-	}
 	var entries []MemoryEntry
 	if ws.memoryRepositoryID != "" {
 		entries, err = loadMemoryEntriesWithRepoID(ws.root, ws.memoryRepositoryID)
@@ -136,6 +133,9 @@ func builtinTools(root string, maxMemoryQueryBytes int, model agent.Model, toolO
 	}
 	if len(entries) > 0 {
 		tools = append(tools, ws.searchMemoryTool(vector, maxMemoryQueryBytes))
+	}
+	if model != nil {
+		tools = append(tools, ws.delegateInvestigationTool(model, tools, toolOutputs))
 	}
 	return tools, nil
 }

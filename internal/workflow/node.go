@@ -182,7 +182,21 @@ func (p *nodeHost) initialize(ctx context.Context) error {
 				}
 			case "subscribe":
 				eventType := message.Event
-				if err := p.api.On(eventType, func(event Event) {
+				if eventType == "before_tool" {
+					if err := p.api.OnBeforeTool(func(ctx context.Context, event Event) (bool, error) {
+						var result json.RawMessage
+						if err := p.request(ctx, wireMessage{Type: "event", Event: eventType, Payload: event}, &result); err != nil {
+							return false, err
+						}
+						var allowed bool
+						if err := json.Unmarshal(result, &allowed); err != nil {
+							return false, fmt.Errorf("before-tool hook returned invalid decision: %w", err)
+						}
+						return allowed, nil
+					}); err != nil {
+						fmt.Fprintln(os.Stderr, "sigma-agent: warning: skip before-tool hook:", err)
+					}
+				} else if err := p.api.On(eventType, func(event Event) {
 					_ = p.request(context.Background(), wireMessage{Type: "event", Event: eventType, Payload: event}, nil)
 				}); err != nil {
 					fmt.Fprintln(os.Stderr, "sigma-agent: warning: skip workflow event:", err)
@@ -293,6 +307,10 @@ const api = {
     if (typeof handler !== 'function') throw new Error('event handler is required');
     if (!events.has(event)) events.set(event, []); events.get(event).push(handler); send({type:'subscribe', event});
   },
+  onBeforeTool(handler) {
+    if (typeof handler !== 'function') throw new Error('before-tool handler is required');
+    if (!events.has('before_tool')) events.set('before_tool', []); events.get('before_tool').push(handler); send({type:'subscribe', event:'before_tool'});
+  },
   ui: { notify(message) { void hostCall('notify', String(message)); }, confirm(message) { return hostCall('confirm', String(message)); } },
   notify(message) { void hostCall('notify', String(message)); },
   confirm(message) { return hostCall('confirm', String(message)); },
@@ -322,8 +340,12 @@ rl.on('line', async line => {
       const result = await handler(JSON.parse(message.arguments || '{}'), api.ui);
       send({type:'result', id:message.id, ok:true, result:result === undefined ? '' : String(result)});
     } else if (message.type === 'event') {
-      for (const handler of events.get(message.event) || []) await handler(Object.freeze({...message.payload}));
-      send({type:'result', id:message.id, ok:true});
+      let allowed = true;
+      for (const handler of events.get(message.event) || []) {
+        const result = await handler(Object.freeze({...message.payload}));
+        if (message.event === 'before_tool' && result === false) allowed = false;
+      }
+      send({type:'result', id:message.id, ok:true, result:message.event === 'before_tool' ? allowed : undefined});
     }
   } catch (error) { send({type:'result', id:message.id, ok:false, error:String(error?.stack || error)}); }
 });

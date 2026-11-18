@@ -192,6 +192,9 @@ Sigma can install npm, git, and local packages that contribute Skills and MCP se
 ## 7. Other ways to run Sigma
 
 - **One task:** change into the folder with `cd C:\work\target-repository`, then run `sigma --task "Fix issue #123"`.
+- **Isolated Git task:** run `sigma --isolated --task "Fix issue #123"` from a Git repository with a commit. Sigma creates a detached Git worktree for this session, prints its path, and keeps it for resume. Resume from the same Sigma runtime directory with `sigma --repo C:\work\target-repository --resume <session-id>`. The worktree starts at the current commit, so uncommitted changes in the original folder are not copied into it. Remove the worktree only after you have saved any changes you need.
+- **Session work:** add `--list-sessions` to list saved sessions for the current repository, `--session-diff <session-id>` to print a session's patch, or `--export-patch <session-id>=<path>` to save it. These commands also work for sessions created directly in the repository.
+- **Publish an isolated session:** explicitly run `sigma --repo C:\work\target-repository --publish-session <session-id> --publish-branch fix/issue-123 --draft-pr-title "Fix issue 123" --draft-pr-body "Summary and test results"`. Sigma commits the isolated worktree, pushes that feature branch to `origin`, then opens a draft PR on GitHub. Add `--draft-pr-base main` if the origin default branch cannot be detected. Publishing is a separate command and the built-in GitHub MCP stays read-only during normal coding sessions.
 - **JSONL process integration:** Add `--json` to emit versioned lifecycle events and a final result on stdout. This mode is one-shot; resume later with `--resume <session-id>`.
 - **HTTP/SSE task service:** Start with `sigma --serve --max-concurrent 2`. Use the API examples and endpoint reference in [architecture](ARCHITECTURE.md).
 

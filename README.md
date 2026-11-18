@@ -39,6 +39,8 @@ sigma
 
 The TUI starts a session automatically. Use `/login` to save a provider key, `/model` to select a model, then enter a task. See the [user guide](docs/USAGE.md) for interaction details and [configuration](docs/CONFIGURATION.md) for provider and runtime settings.
 
+For a one-shot Git task that should not share files with your current checkout, use `sigma --isolated --task "Fix issue #123"`. Sigma creates and keeps a separate worktree for the session. Resume it later with `sigma --resume <session-id>` from the original repository.
+
 ## Results and highlights
 
 **Evaluation result:** The historical high on the public [SWE-bench Verified Mini leaderboard](https://hal.cs.princeton.edu/swebench_verified_mini) was **54%**, shared by SWE-Agent runs with o4-mini Low, Claude 3.7 Sonnet High, and Claude Opus 4.1 High (as of 2026-11-05). On Sigma’s fixed 50-task set, the mixed-model study stood at **34/50 (68%)** before DeepSeek thinking; its current cumulative result is **40/50 (80%)** after DeepSeek Flash thinking was introduced. Sigma runs used both MiniMax M3/M3.1 Flash and DeepSeek Flash. Historical runs also changed Skills and guidance, so this is not a controlled thinking-only comparison. See the [results and per-task evidence](evals/swebench-verified-mini/evaluation-results.md).

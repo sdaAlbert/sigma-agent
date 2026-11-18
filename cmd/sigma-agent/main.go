@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -42,6 +43,15 @@ func main() {
 	tui := flag.Bool("tui", false, "start the integrated terminal UI for setup and Agent interaction")
 	jsonOutput := flag.Bool("json", false, "write Agent lifecycle events and the final run result as JSONL to stdout")
 	resumeID := flag.String("resume", "", "resume a persisted session by ID; omit --task to continue it")
+	isolated := flag.Bool("isolated", false, "start a new Git session in a separate worktree")
+	listSessions := flag.Bool("list-sessions", false, "list saved sessions for the selected repository")
+	sessionDiff := flag.String("session-diff", "", "show the saved workspace diff for a session ID")
+	exportPatch := flag.String("export-patch", "", "export a saved workspace patch as SESSION_ID=PATH")
+	publishSession := flag.String("publish-session", "", "commit, push, and open a draft PR for an isolated session")
+	publishBranch := flag.String("publish-branch", "", "new feature branch to publish")
+	pullRequestTitle := flag.String("draft-pr-title", "", "draft pull request title used with --publish-session")
+	pullRequestBody := flag.String("draft-pr-body", "", "draft pull request body used with --publish-session")
+	pullRequestBase := flag.String("draft-pr-base", "", "base branch for the draft pull request")
 	githubMCP := flag.Bool("github-mcp", true, "enable read-only GitHub MCP tools when credentials are configured (default true)")
 	allowContainerNetwork := flag.Bool("allow-container-network", false, "advanced: allow container internet access at startup")
 	maxTurns := flag.Int("max-turns", 0, "override config: maximum assistant turns")
@@ -146,7 +156,12 @@ func main() {
 		}
 		return
 	}
-	interactiveMode := *tui || *interactive || (strings.TrimSpace(*task) == "" && strings.TrimSpace(*resumeID) == "")
+	sessionOperation := *listSessions || *sessionDiff != "" || *exportPatch != "" || *publishSession != ""
+	if sessionOperation && (*tui || *interactive || strings.TrimSpace(*task) != "" || strings.TrimSpace(*resumeID) != "") {
+		fmt.Fprintln(os.Stderr, "sigma-agent: session inspection and publishing commands cannot be combined with an Agent run")
+		os.Exit(2)
+	}
+	interactiveMode := shouldStartInteractive(*tui, *interactive, *task, *resumeID, sessionOperation)
 	if *jsonOutput && interactiveMode {
 		fmt.Fprintln(os.Stderr, "sigma-agent: --json requires a one-shot --task or --resume invocation; interactive mode is not supported")
 		os.Exit(2)
@@ -187,7 +202,7 @@ func main() {
 			if options.modelReasoningEffort != "" {
 				runConfig.ModelReasoningEffort = options.modelReasoningEffort
 			}
-			return run(options.workspace, options.initialPrompt, runConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge)
+			return run(options.workspace, options.initialPrompt, runConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge, *isolated)
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
@@ -199,10 +214,254 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
-	if err := run(workspacePath, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil); err != nil {
+	if *listSessions || *sessionDiff != "" || *exportPatch != "" {
+		if err := inspectSessions(workspacePath, *listSessions, *sessionDiff, *exportPatch); err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *publishSession != "" {
+		if err := publishIsolatedSession(workspacePath, *publishSession, *publishBranch, *pullRequestTitle, *pullRequestBody, *pullRequestBase); err != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(workspacePath, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil, *isolated); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
+}
+
+func shouldStartInteractive(tui, interactive bool, task, resumeID string, sessionOperation bool) bool {
+	return tui || interactive || (strings.TrimSpace(task) == "" && strings.TrimSpace(resumeID) == "" && !sessionOperation)
+}
+
+func inspectSessions(repository string, list bool, diffID, exportSpec string) error {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	store, err := agent.NewFileSessionStore(filepath.Join(workingDir, "var", "sessions"))
+	if err != nil {
+		return err
+	}
+	if list {
+		sessions, err := store.List()
+		if err != nil {
+			return err
+		}
+		for _, saved := range sessions {
+			workspace, _, _, err := savedSessionWorkspace(store.Directory, repository, saved.ID)
+			if err == nil {
+				fmt.Printf("%s\t%s\t%s\n", saved.ID, saved.UpdatedAt.Format(time.RFC3339), workspace)
+			}
+		}
+		return nil
+	}
+	if exportSpec != "" {
+		var ok bool
+		diffID, exportSpec, ok = strings.Cut(exportSpec, "=")
+		if !ok || diffID == "" || exportSpec == "" {
+			return errors.New("--export-patch expects SESSION_ID=PATH")
+		}
+	}
+	if diffID == "" {
+		return errors.New("choose --list-sessions, --session-diff SESSION_ID, or --export-patch SESSION_ID=PATH")
+	}
+	workspace, baseCommit, _, err := savedSessionWorkspace(store.Directory, repository, diffID)
+	if err != nil {
+		return err
+	}
+	patch, err := workspaceagent.WorkspaceDiff(workspace, baseCommit)
+	if err != nil {
+		return fmt.Errorf("collect session diff: %w", err)
+	}
+	if exportSpec != "" {
+		if !filepath.IsAbs(exportSpec) {
+			exportSpec = filepath.Join(repository, exportSpec)
+		}
+		if err := os.WriteFile(exportSpec, []byte(patch), 0o600); err != nil {
+			return fmt.Errorf("export session patch: %w", err)
+		}
+		fmt.Println(exportSpec)
+		return nil
+	}
+	fmt.Print(patch)
+	return nil
+}
+
+func savedSessionWorkspace(sessionsDir, repository, id string) (string, string, string, error) {
+	if !agent.ValidSessionID(id) {
+		return "", "", "", errors.New("invalid session ID")
+	}
+	metadataPath := filepath.Join(sessionsDir, id, "metadata.json")
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return "", "", "", fmt.Errorf("read session metadata: %w", err)
+	}
+	var metadata struct {
+		Repo           string `json:"repo"`
+		StartingCommit string `json:"starting_commit"`
+		WorkspaceMode  string `json:"workspace_mode"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", "", "", fmt.Errorf("decode session metadata: %w", err)
+	}
+	if filepath.Clean(metadata.Repo) != filepath.Clean(repository) {
+		return "", "", "", errors.New("session belongs to a different repository")
+	}
+	workspace := repository
+	if metadata.WorkspaceMode == "isolated" {
+		workspace = filepath.Join(sessionsDir, id, "workspace")
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		return "", "", "", fmt.Errorf("session workspace is unavailable: %w", err)
+	}
+	return workspace, metadata.StartingCommit, metadata.WorkspaceMode, nil
+}
+
+func publishIsolatedSession(repository, sessionID, branch, title, body, base string) error {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	sessionsDir := filepath.Join(workingDir, "var", "sessions")
+	workspace, _, mode, err := savedSessionWorkspace(sessionsDir, repository, sessionID)
+	if err != nil {
+		return err
+	}
+	if mode != "isolated" {
+		return errors.New("publishing is only available for an isolated session worktree")
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || strings.EqualFold(branch, "main") || strings.EqualFold(branch, "master") || strings.HasPrefix(branch, "-") {
+		return errors.New("choose a new feature branch, not main or master")
+	}
+	if checked, checkErr := gitOutput(workspace, "check-ref-format", "--branch", branch); checkErr != nil || strings.TrimSpace(checked) != branch {
+		return fmt.Errorf("invalid feature branch %q", branch)
+	}
+	title = strings.TrimSpace(title)
+	if title == "" || strings.ContainsAny(title, "\r\n\x00") {
+		return errors.New("--draft-pr-title must be a non-empty single line")
+	}
+	if strings.TrimSpace(body) == "" {
+		return errors.New("--draft-pr-body is required")
+	}
+	if base == "" {
+		defaultRef, defaultErr := gitOutput(repository, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+		if defaultErr != nil {
+			return errors.New("could not determine the base branch; pass --draft-pr-base")
+		}
+		base = strings.TrimPrefix(strings.TrimSpace(defaultRef), "origin/")
+	}
+	if err := validateFeatureBranch(repository, workspace, branch, base); err != nil {
+		return err
+	}
+	current, err := gitOutput(workspace, "branch", "--show-current")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(current) == "" {
+		if _, err := gitOutput(workspace, "checkout", "-b", branch); err != nil {
+			return fmt.Errorf("create feature branch: %w", err)
+		}
+	} else if strings.TrimSpace(current) != branch {
+		return fmt.Errorf("session is already on branch %q", strings.TrimSpace(current))
+	}
+	if _, err := gitOutput(workspace, "add", "--all"); err != nil {
+		return fmt.Errorf("stage isolated session changes: %w", err)
+	}
+	status, err := gitOutput(workspace, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		if _, err := gitOutput(workspace, "commit", "-m", title); err != nil {
+			return fmt.Errorf("commit isolated session changes: %w", err)
+		}
+	}
+	commit, err := gitOutput(workspace, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	remoteBranch, err := gitOutput(repository, "ls-remote", "--heads", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return fmt.Errorf("check remote feature branch: %w", err)
+	}
+	if strings.TrimSpace(remoteBranch) == "" {
+		if _, err := gitOutput(workspace, "push", "--set-upstream", "origin", branch+":"+branch); err != nil {
+			return fmt.Errorf("push feature branch: %w", err)
+		}
+	} else if strings.Fields(remoteBranch)[0] != strings.TrimSpace(commit) {
+		return errors.New("remote feature branch already exists with different changes")
+	}
+	remoteURL, err := gitOutput(repository, "remote", "get-url", "origin")
+	if err != nil {
+		return err
+	}
+	owner, repositoryName, err := githubRepositoryFromRemote(strings.TrimSpace(remoteURL))
+	if err != nil {
+		return err
+	}
+	client, err := agent.StartGitHubMCPForDraftPR(context.Background(), agent.GitHubPullRequestScope{Owner: owner, Repository: repositoryName, HeadBranch: branch, BaseBranch: base})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	arguments, err := json.Marshal(map[string]any{
+		"owner": owner, "repo": repositoryName, "head": branch, "base": base,
+		"title": title, "body": body, "draft": true,
+	})
+	if err != nil {
+		return err
+	}
+	result, err := client.CallTool(context.Background(), "create_pull_request", arguments)
+	if err != nil {
+		return fmt.Errorf("create draft pull request: %w", err)
+	}
+	fmt.Printf("Published %s and opened a draft pull request.\n%s\n", branch, result)
+	return nil
+}
+
+func validateFeatureBranch(repository, workspace, branch, base string) error {
+	if branch == base {
+		return errors.New("feature branch and PR base branch must differ")
+	}
+	if _, err := gitOutput(repository, "remote", "get-url", "origin"); err != nil {
+		return errors.New("publishing requires a GitHub origin remote")
+	}
+	for _, protected := range []string{"main", "master", "develop", "trunk"} {
+		if strings.EqualFold(branch, protected) {
+			return fmt.Errorf("refusing to publish protected branch %q", branch)
+		}
+	}
+	if _, err := gitOutput(repository, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		current, branchErr := gitOutput(workspace, "branch", "--show-current")
+		if branchErr != nil || strings.TrimSpace(current) != branch {
+			return fmt.Errorf("local branch %q already exists", branch)
+		}
+	}
+	return nil
+}
+
+func githubRepositoryFromRemote(remote string) (string, string, error) {
+	path := ""
+	if strings.HasPrefix(remote, "git@github.com:") {
+		path = strings.TrimPrefix(remote, "git@github.com:")
+	} else {
+		parsed, err := url.Parse(remote)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
+			return "", "", errors.New("draft PR publishing currently requires an origin remote hosted on github.com")
+		}
+		path = strings.TrimPrefix(parsed.Path, "/")
+	}
+	parts := strings.Split(strings.TrimSuffix(path, ".git"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", errors.New("origin remote must identify a GitHub owner and repository")
+	}
+	return parts[0], parts[1], nil
 }
 
 func resolveWorkspacePath(repoArg string) (string, error) {
@@ -228,7 +487,7 @@ func resolveWorkspacePath(repoArg string) (string, error) {
 	return workspacePath, nil
 }
 
-func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge) error {
+func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge, isolationOptions ...bool) error {
 	workspacePath, err := filepath.Abs(workspaceArg)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
@@ -240,6 +499,7 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		return errors.New("workspace path must be a directory")
 	}
 	gitDiffAvailable := workspaceagent.HasGitCommit(workspacePath)
+	isolated := len(isolationOptions) > 0 && isolationOptions[0]
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -307,6 +567,19 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 			}
 			startingCommit = strings.TrimSpace(commit)
 		}
+		if isolated {
+			if !gitDiffAvailable {
+				return errors.New("--isolated requires a Git repository with at least one commit")
+			}
+			workspaceMode = "isolated"
+			workspace = filepath.Join(sessionDir, "workspace")
+			if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+				return err
+			}
+			if _, err := gitOutput(workspacePath, "worktree", "add", "--detach", workspace, startingCommit); err != nil {
+				return fmt.Errorf("create isolated session worktree: %w", err)
+			}
+		}
 		if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 			return err
 		}
@@ -368,6 +641,14 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 			if gitErr != nil || filepath.Clean(strings.TrimSpace(worktreeRoot)) != filepath.Clean(workspace) {
 				return errors.New("session workspace is not the original Git worktree")
 			}
+		}
+	}
+	if workspaceMode == "isolated" {
+		message := "This task is using its own Git worktree at " + workspace
+		if tui != nil {
+			tui.notice(message)
+		} else if !jsonOutput {
+			fmt.Fprintln(os.Stderr, "[workspace]", message)
 		}
 	}
 	memorySourceHash := ""
@@ -661,7 +942,17 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if tui != nil {
 		approveTool = tui.ApproveTool
 	}
-	session.BeforeTool = configuredToolPolicy(runtimeConfig, approveTool, authorizationAudit, interactive)
+	toolPolicy := configuredToolPolicy(runtimeConfig, approveTool, authorizationAudit, interactive)
+	session.BeforeTool = func(ctx context.Context, tool agent.Tool, arguments json.RawMessage) error {
+		if err := toolPolicy(ctx, tool, arguments); err != nil {
+			return err
+		}
+		request := agent.ClassifyToolAuthorization(tool.Definition.Name, arguments, runtimeConfig.AllowContainerNetwork)
+		return workflowHost.BeforeTool(ctx, workflow.Event{
+			Type: "before_tool", SessionID: session.ID, Tool: request.Tool,
+			Args: string(request.Args),
+		})
+	}
 	session.SerializeToolCalls = hasAskPermissions(runtimeConfig)
 	session.Limits = agent.Limits{MaxTurns: runtimeConfig.MaxTurns, MaxToolCalls: runtimeConfig.MaxToolCalls, MaxRepeatedFailedCommands: runtimeConfig.MaxRepeatedFailedCommands, MaxToolResultBytes: runtimeConfig.MaxToolResultBytes, ToolTimeout: time.Duration(runtimeConfig.ToolTimeoutMS) * time.Millisecond}
 	session.Context = agent.WindowContextManager{

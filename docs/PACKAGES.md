@@ -109,6 +109,11 @@ command completion. Command names must be lowercase letters, digits, and
 hyphens; Sigma's built-in command names are reserved. `ui.confirm` is currently
 available in TUI mode; `notify` also works in the text interface.
 
+Use `sigma.onBeforeTool(handler)` to inspect every proposed tool call before
+Sigma executes it. The handler receives the tool name and JSON arguments. Return
+`false` to block the call, or return any other value to allow it. The hook runs
+after Sigma's own configured permission checks, so it cannot override a denial.
+
 Extensions can also register Agent tools with a JSON Schema and a handler that
 returns text:
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sdaAlbert/sigma-agent/internal/mcp"
 )
@@ -22,7 +23,30 @@ func StartGitHubMCP(ctx context.Context) (*GitHubMCP, error) {
 	if token == "" {
 		return nil, errors.New("no GitHub token is configured; use /login github or set GITHUB_PERSONAL_ACCESS_TOKEN")
 	}
-	return startGitHubMCP(ctx, token)
+	return startGitHubMCP(ctx, token, nil)
+}
+
+type GitHubPullRequestScope struct {
+	Owner      string
+	Repository string
+	HeadBranch string
+	BaseBranch string
+}
+
+// StartGitHubMCPForDraftPR exposes only PR creation for one repository and
+// feature branch. Callers must first receive explicit user authorization.
+func StartGitHubMCPForDraftPR(ctx context.Context, scope GitHubPullRequestScope) (*GitHubMCP, error) {
+	if scope.Owner == "" || scope.Repository == "" || scope.HeadBranch == "" || scope.BaseBranch == "" {
+		return nil, errors.New("draft PR creation requires an owner, repository, head branch, and base branch")
+	}
+	token, err := GitHubMCPToken()
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
+		return nil, errors.New("no GitHub token is configured; use /login github or set GITHUB_PERSONAL_ACCESS_TOKEN")
+	}
+	return startGitHubMCP(ctx, token, &scope)
 }
 
 // GitHubMCPConfigured reports whether a non-empty GitHub token is available
@@ -33,14 +57,22 @@ func GitHubMCPConfigured() bool {
 }
 
 // GitHubMCP owns the Docker-backed stdio connection to GitHub's read-only MCP server.
-type GitHubMCP struct{ *mcp.Client }
+type GitHubMCP struct {
+	*mcp.Client
+	pullRequestScope *GitHubPullRequestScope
+}
 
-func startGitHubMCP(ctx context.Context, token string) (*GitHubMCP, error) {
+func startGitHubMCP(ctx context.Context, token string, scope *GitHubPullRequestScope) (*GitHubMCP, error) {
 	environment := map[string]string{"GITHUB_PERSONAL_ACCESS_TOKEN": token}
 	dockerArgs := []string{"run", "--rm", "-i", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN"}
-	environment["GITHUB_READ_ONLY"] = "1"
-	environment["GITHUB_TOOLSETS"] = "issues,repos,pull_requests"
-	dockerArgs = append(dockerArgs, "-e", "GITHUB_READ_ONLY", "-e", "GITHUB_TOOLSETS")
+	if scope == nil {
+		environment["GITHUB_READ_ONLY"] = "1"
+		environment["GITHUB_TOOLSETS"] = "issues,repos,pull_requests"
+		dockerArgs = append(dockerArgs, "-e", "GITHUB_READ_ONLY", "-e", "GITHUB_TOOLSETS")
+	} else {
+		environment["GITHUB_TOOLS"] = "create_pull_request"
+		dockerArgs = append(dockerArgs, "-e", "GITHUB_TOOLS")
+	}
 	dockerArgs = append(dockerArgs, githubMCPImage)
 	client, err := mcp.Start(ctx, mcp.Config{
 		Name:    "github",
@@ -51,7 +83,7 @@ func startGitHubMCP(ctx context.Context, token string) (*GitHubMCP, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &GitHubMCP{Client: client}, nil
+	return &GitHubMCP{Client: client, pullRequestScope: scope}, nil
 }
 
 // replaceEnv backs the GITHUB_READ_ONLY / GITHUB_TOOLSETS scoping that keeps
@@ -79,7 +111,45 @@ func (c *GitHubMCP) callTool(ctx context.Context, name string, arguments json.Ra
 	if c.Client == nil {
 		return "", errors.New("GitHub MCP server is not connected")
 	}
+	if c.pullRequestScope == nil {
+		if name == "create_pull_request" {
+			return "", errors.New("pull request creation is disabled for this GitHub connection")
+		}
+		return c.Client.CallTool(ctx, name, arguments)
+	}
+	if name != "create_pull_request" {
+		return "", errors.New("this GitHub connection only permits scoped draft pull request creation")
+	}
+	if err := validateGitHubDraftPRArguments(*c.pullRequestScope, arguments); err != nil {
+		return "", err
+	}
 	return c.Client.CallTool(ctx, name, arguments)
+}
+
+func validateGitHubDraftPRArguments(scope GitHubPullRequestScope, arguments json.RawMessage) error {
+	var target struct {
+		Owner string `json:"owner"`
+		Repo  string `json:"repo"`
+		Head  string `json:"head"`
+		Base  string `json:"base"`
+		Draft bool   `json:"draft"`
+	}
+	if err := json.Unmarshal(arguments, &target); err != nil {
+		return fmt.Errorf("decode pull request scope: %w", err)
+	}
+	if !strings.EqualFold(target.Owner, scope.Owner) || !strings.EqualFold(target.Repo, scope.Repository) {
+		return errors.New("pull request creation is restricted to the configured repository")
+	}
+	if target.Head != scope.HeadBranch && target.Head != scope.Owner+":"+scope.HeadBranch {
+		return errors.New("pull request head must match the configured feature branch")
+	}
+	if target.Base != scope.BaseBranch || target.Base == target.Head {
+		return errors.New("pull request base must match the configured base branch and differ from its head")
+	}
+	if !target.Draft {
+		return errors.New("this GitHub connection only permits draft pull requests")
+	}
+	return nil
 }
 
 // Close shuts the GitHub MCP server down.
