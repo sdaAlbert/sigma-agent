@@ -88,11 +88,11 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 
 ## Docker 命令隔离与环境准备
 
-Sigma 的 `run_command` 会在 Docker 中执行项目命令，而不是直接在宿主机运行。命令容器以可写方式挂载所选仓库到 `/workspace`，移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。容器默认不能访问外网；需要下载依赖时，可用 `/network on` 为当前会话启用网络。依赖包缓存会在多次命令间保留。
+Sigma 的 `run_command` 会在 Docker 中执行项目命令，而不是直接在宿主机运行。命令容器以可写方式挂载所选工作区到 `/workspace`，移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。Docker 命令和环境镜像构建步骤默认不能访问外网。在 TUI 中通过 `/settings` 开启；非交互运行可在 `config.json` 设置 `allow_container_network`，或传入 `--allow-container-network`。该设置不阻止主机上的 Sigma 联系模型，也不阻止 Docker 从镜像仓库拉取缺失镜像。包缓存保存在所选工作区中，可供后续命令复用。
 
 运行命令前，Agent 可以检查仓库 Dockerfile、devcontainer、CI workflow、README 和依赖清单，再调用 `prepare_environment` 指定基础镜像与准备命令。Sigma 会构建并缓存派生镜像，供后续命令和恢复的 session 复用。Docker 构建上下文只有自动生成的 Dockerfile，不包含仓库源码；需要下载系统包或项目依赖时，应有意识地开启网络。
 
-这属于**命令执行隔离**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行。所选仓库会以读写方式挂入 Docker，因此 Agent 的文件修改和命令都会直接作用于该仓库。这个容器不是面向恶意多租户任务的强化安全边界。
+这属于**命令执行隔离**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行。默认情况下，所选仓库会以读写方式挂入 Docker；使用 `--isolated` 时，挂入的是单独的 Git worktree。Agent 的文件修改和命令都会作用于当前选中的工作区。这个容器不是面向恶意多租户任务的强化安全边界。
 
 镜像复用、网络行为、资源限制和清理方式见[Docker 文档](docs/DOCKER.md)与[配置说明](docs/CONFIGURATION.md)。
 

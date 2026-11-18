@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -49,6 +50,129 @@ func TestSessionCommandsStayOutOfDefaultInteractiveMode(t *testing.T) {
 	if shouldStartInteractive(false, false, "", "existing-session", false) {
 		t.Fatal("session resume unexpectedly starts the TUI")
 	}
+}
+
+func TestPushFeatureBranchAllowsFastForwardUpdate(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repo")
+	remote := filepath.Join(root, "origin.git")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, root, "init", "--bare", remote)
+	runGitCommandTest(t, repository, "init")
+	runGitCommandTest(t, repository, "config", "user.name", "Sigma Test")
+	runGitCommandTest(t, repository, "config", "user.email", "sigma-test@example.invalid")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, repository, "add", "README.md")
+	runGitCommandTest(t, repository, "commit", "-m", "base")
+	runGitCommandTest(t, repository, "branch", "-M", "feature/docs")
+	runGitCommandTest(t, repository, "remote", "add", "origin", remote)
+	runGitCommandTest(t, repository, "push", "--set-upstream", "origin", "feature/docs")
+	base, err := gitOutput(repository, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteRef, err := gitOutput(repository, "ls-remote", "--heads", "origin", "refs/heads/feature/docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Fields(remoteRef)[0] != strings.TrimSpace(base) {
+		t.Fatalf("initial remote ref = %q, want base commit %q", remoteRef, strings.TrimSpace(base))
+	}
+	if err := os.WriteFile(filepath.Join(repository, "DOCKER.md"), []byte("clarified\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, repository, "add", "DOCKER.md")
+	runGitCommandTest(t, repository, "commit", "-m", "clarify Docker docs")
+	head, err := gitOutput(repository, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pushFeatureBranch(repository, "feature/docs", strings.TrimSpace(head), remoteRef); err != nil {
+		t.Fatalf("push fast-forward update: %v", err)
+	}
+	remoteRef, err = gitOutput(repository, "ls-remote", "--heads", "origin", "refs/heads/feature/docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Fields(remoteRef)[0] != strings.TrimSpace(head) {
+		t.Fatalf("updated remote ref = %q, want new commit %q", remoteRef, strings.TrimSpace(head))
+	}
+	if err := pushFeatureBranch(repository, "feature/docs", strings.TrimSpace(head), remoteRef); err != nil {
+		t.Fatalf("repeat push of current commit: %v", err)
+	}
+}
+
+func TestPushFeatureBranchRejectsNonFastForward(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repo")
+	remote := filepath.Join(root, "origin.git")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, root, "init", "--bare", remote)
+	runGitCommandTest(t, repository, "init")
+	runGitCommandTest(t, repository, "config", "user.name", "Sigma Test")
+	runGitCommandTest(t, repository, "config", "user.email", "sigma-test@example.invalid")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, repository, "add", "README.md")
+	runGitCommandTest(t, repository, "commit", "-m", "base")
+	runGitCommandTest(t, repository, "branch", "-M", "feature/docs")
+	runGitCommandTest(t, repository, "remote", "add", "origin", remote)
+	runGitCommandTest(t, repository, "push", "--set-upstream", "origin", "feature/docs")
+
+	other := filepath.Join(root, "other")
+	runGitCommandTest(t, root, "clone", "--branch", "feature/docs", remote, other)
+	runGitCommandTest(t, other, "config", "user.name", "Other")
+	runGitCommandTest(t, other, "config", "user.email", "other@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, other, "add", "remote.txt")
+	runGitCommandTest(t, other, "commit", "-m", "remote-only change")
+	runGitCommandTest(t, other, "push", "origin", "feature/docs")
+	remoteRef, err := gitOutput(repository, "ls-remote", "--heads", "origin", "refs/heads/feature/docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repository, "local.txt"), []byte("local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommandTest(t, repository, "add", "local.txt")
+	runGitCommandTest(t, repository, "commit", "-m", "local-only change")
+	head, err := gitOutput(repository, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pushFeatureBranch(repository, "feature/docs", strings.TrimSpace(head), remoteRef); err == nil || !strings.Contains(err.Error(), "non-fast-forward") {
+		t.Fatalf("push error = %v, want non-fast-forward refusal", err)
+	}
+}
+
+func TestRecognizesDuplicatePullRequestResponse(t *testing.T) {
+	if !isExistingPullRequestError("MCP tool returned isError=true: A pull request already exists for sdaAlbert:sigma-agent") {
+		t.Fatal("duplicate pull request response was not recognized")
+	}
+	if isExistingPullRequestError("GitHub is unavailable") {
+		t.Fatal("unrelated GitHub error was treated as an existing PR")
+	}
+}
+
+func runGitCommandTest(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestConfiguredToolPolicyAppliesOverridePrecedence(t *testing.T) {
