@@ -36,6 +36,7 @@ func main() {
 	indexMemory := flag.Bool("index-memory", false, "synchronize repository memory into Qdrant")
 	repoArg := flag.String("repo", "", "workspace folder to work in (defaults to the current directory)")
 	configPath := flag.String("config", "config.json", "JSON file with tunable runtime limits")
+	commandMode := flag.String("command-execution-mode", "", "override config: run commands on the host or in Docker (host|docker)")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address when --serve is enabled")
 	maxConcurrent := flag.Int("max-concurrent", 2, "maximum concurrent agent tasks when --serve is enabled")
 	task := flag.String("task", "", "coding task text for the agent (not a file path), or an additional instruction when resuming")
@@ -70,6 +71,12 @@ func main() {
 	listMCPServers := flag.Bool("list-mcp", false, "connect to the configured MCP servers, list their tools, and exit")
 	localScope := flag.Bool("local", false, "install or remove the package in the project scope instead of the user scope")
 	flag.Parse()
+	contextSettingsExplicit := false
+	flag.Visit(func(parsed *flag.Flag) {
+		if parsed.Name == "context-tokens" || parsed.Name == "context-compaction-tokens" {
+			contextSettingsExplicit = true
+		}
+	})
 	if *showVersion {
 		fmt.Printf("sigma-agent v%s\n", buildinfo.Version)
 		return
@@ -89,6 +96,9 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(2)
+	}
+	if strings.TrimSpace(*commandMode) != "" {
+		runtimeConfig.CommandExecutionMode = strings.TrimSpace(*commandMode)
 	}
 	requestedModel := modelconfig.Selection{}
 	modelExplicit := false
@@ -150,7 +160,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *serve {
-		if err := server.ListenAndServe(*addr, *maxConcurrent, *configPath); err != nil {
+		if err := server.ListenAndServeWithCommandMode(*addr, *maxConcurrent, *configPath, strings.TrimSpace(*commandMode)); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
 		}
@@ -188,17 +198,29 @@ func main() {
 		}
 		setup := interactiveSetupOptions{
 			workspace: workspacePath, sessionID: *sessionID, resumeID: *resumeID,
-			allowNetwork:            runtimeConfig.AllowContainerNetwork,
-			deepSeekThinking:        runtimeConfig.DeepSeekThinkingEnabled,
-			modelReasoningEffort:    runtimeConfig.ModelReasoningEffort,
-			projectInstructionsFile: runtimeConfig.ProjectInstructionsFile,
-			githubMCP:               *githubMCP, model: selection, modelExplicit: modelExplicit,
+			allowNetwork:               runtimeConfig.AllowContainerNetwork,
+			deepSeekThinking:           runtimeConfig.DeepSeekThinkingEnabled,
+			modelReasoningEffort:       runtimeConfig.ModelReasoningEffort,
+			maxContextTokens:           runtimeConfig.MaxContextTokens,
+			modelOutputTokens:          runtimeConfig.ModelOutputTokens,
+			contextCompactionTokens:    runtimeConfig.ContextCompactionThresholdTokens,
+			contextKeepRecentTokens:    runtimeConfig.ContextKeepRecentTokens,
+			summaryTokens:              runtimeConfig.SummaryTokens,
+			configuredCompactionTokens: runtimeConfig.ContextCompactionThresholdTokens,
+			configuredKeepRecentTokens: runtimeConfig.ContextKeepRecentTokens,
+			configuredSummaryTokens:    runtimeConfig.SummaryTokens,
+			contextSettingsExplicit:    contextSettingsExplicit,
+			projectInstructionsFile:    runtimeConfig.ProjectInstructionsFile,
+			githubMCP:                  *githubMCP, model: selection, modelExplicit: modelExplicit,
 			initialPrompt: *task,
 		}
 		if err := startTUI(setup, func(options interactiveSetupOptions, bridge *tuiBridge) error {
 			runConfig := runtimeConfig
 			runConfig.AllowContainerNetwork = options.allowNetwork
 			runConfig.DeepSeekThinkingEnabled = options.deepSeekThinking
+			runConfig.ContextCompactionThresholdTokens = options.contextCompactionTokens
+			runConfig.ContextKeepRecentTokens = options.contextKeepRecentTokens
+			runConfig.SummaryTokens = options.summaryTokens
 			if options.modelReasoningEffort != "" {
 				runConfig.ModelReasoningEffort = options.modelReasoningEffort
 			}
@@ -390,12 +412,8 @@ func publishIsolatedSession(repository, sessionID, branch, title, body, base str
 	if err != nil {
 		return fmt.Errorf("check remote feature branch: %w", err)
 	}
-	if strings.TrimSpace(remoteBranch) == "" {
-		if _, err := gitOutput(workspace, "push", "--set-upstream", "origin", branch+":"+branch); err != nil {
-			return fmt.Errorf("push feature branch: %w", err)
-		}
-	} else if strings.Fields(remoteBranch)[0] != strings.TrimSpace(commit) {
-		return errors.New("remote feature branch already exists with different changes")
+	if err := pushFeatureBranch(workspace, branch, strings.TrimSpace(commit), remoteBranch); err != nil {
+		return err
 	}
 	remoteURL, err := gitOutput(repository, "remote", "get-url", "origin")
 	if err != nil {
@@ -419,10 +437,39 @@ func publishIsolatedSession(repository, sessionID, branch, title, body, base str
 	}
 	result, err := client.CallTool(context.Background(), "create_pull_request", arguments)
 	if err != nil {
+		if isExistingPullRequestError(err.Error() + " " + result) {
+			fmt.Printf("Updated %s; GitHub reports that a pull request already exists for this branch and base.\n%s\n", branch, result)
+			return nil
+		}
 		return fmt.Errorf("create draft pull request: %w", err)
 	}
 	fmt.Printf("Published %s and opened a draft pull request.\n%s\n", branch, result)
 	return nil
+}
+
+func pushFeatureBranch(workspace, branch, commit, remoteBranch string) error {
+	remoteBranch = strings.TrimSpace(remoteBranch)
+	if remoteBranch != "" {
+		remoteFields := strings.Fields(remoteBranch)
+		if len(remoteFields) == 0 {
+			return errors.New("GitHub returned an invalid remote feature branch reference")
+		}
+		remoteCommit := remoteFields[0]
+		if remoteCommit != commit {
+			if _, err := gitOutput(workspace, "merge-base", "--is-ancestor", remoteCommit, commit); err != nil {
+				return errors.New("remote feature branch has commits not present in this session; refusing a non-fast-forward update")
+			}
+		}
+	}
+	if _, err := gitOutput(workspace, "push", "--set-upstream", "origin", branch+":"+branch); err != nil {
+		return fmt.Errorf("push feature branch: %w", err)
+	}
+	return nil
+}
+
+func isExistingPullRequestError(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "pull request already exists") || strings.Contains(message, "a pull request already exists")
 }
 
 func validateFeatureBranch(repository, workspace, branch, base string) error {
@@ -780,16 +827,23 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	var commandTools []agent.Tool
 	var closeCommandSession func() error
 	if interactive {
-		commandTools, closeCommandSession, err = workspaceagent.CommandExecutionToolsWithSessionContainer(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, startingCommit)
+		commandTools, closeCommandSession, err = workspaceagent.CommandExecutionToolsForMode(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.CommandExecutionMode, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, true, startingCommit)
 		if closeCommandSession != nil {
 			defer func() {
 				if closeErr := closeCommandSession(); closeErr != nil {
-					fmt.Fprintf(os.Stderr, "sigma-agent: Docker session cleanup failed: %v\n", closeErr)
+					fmt.Fprintf(os.Stderr, "sigma-agent: command session cleanup failed: %v\n", closeErr)
 				}
 			}()
 		}
 	} else {
-		commandTools, err = workspaceagent.CommandExecutionToolsWithEnvironmentPreparationAndFilesystemScope(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, startingCommit)
+		commandTools, closeCommandSession, err = workspaceagent.CommandExecutionToolsForMode(workspace, runtimeConfig.CommandExecutionImage, backgroundTasks, runtimeConfig.CommandExecutionMode, runtimeConfig.AllowContainerNetwork, runtimeConfig.CommandFilesystemScope, false, startingCommit)
+		if closeCommandSession != nil {
+			defer func() {
+				if closeErr := closeCommandSession(); closeErr != nil {
+					fmt.Fprintf(os.Stderr, "sigma-agent: command session cleanup failed: %v\n", closeErr)
+				}
+			}()
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("configure command execution tool: %w", err)
@@ -865,8 +919,12 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if !runtimeConfig.SkillsEnabled {
 		projectGuidance.Skills = nil
 	}
-	if len(projectGuidance.Skills) > 0 {
-		tools = append(tools, projectGuidance.SkillTool(), projectGuidance.SkillResourceTool())
+	if runtimeConfig.SkillsEnabled {
+		tools = append(tools,
+			projectGuidance.SkillSearchTool(),
+			projectGuidance.SkillTool(),
+			projectGuidance.SkillCreationTool(),
+		)
 	}
 	if runtimeConfig.WebSearchEnabled {
 		searchProvider, ok := model.(interface {
@@ -899,6 +957,7 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if err != nil {
 		return err
 	}
+	registry.ActivateRelevantTools(task)
 	var session *agent.Session
 	useMemorySearch := false
 	for _, registeredTool := range tools {
@@ -910,19 +969,23 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if !useMemorySearch {
 		projectGuidance.Memory = ""
 	}
-	systemPrompt := projectGuidance.SystemPrompt(codingSystemPrompt)
-	if useMemorySearch {
-		systemPrompt = projectGuidance.SystemPromptWithMemorySearch(codingSystemPrompt)
+	var requiredSkills []string
+	if runtimeConfig.SkillsEnabled {
+		requiredSkills = projectGuidance.MatchingSkillNames(task)
 	}
-	if interactive {
-		systemPrompt = strings.Replace(systemPrompt,
-			"Use prepare_environment with the project's or ecosystem's appropriate base image and a minimal setup_command for missing system packages or libraries; Sigma builds and persists a derived image for subsequent commands and session resumes.",
-			"Reuse the configured or already prepared Docker image and the session's existing container. Do not create a virtual environment or cache as routine startup work; reuse project environments when available. Call prepare_environment only when a required system tool or library is missing, and keep setup minimal so identical Docker layers can be reused.", 1)
+	systemPrompt := projectGuidance.SystemPromptWithRequiredSkills(codingSystemPrompt, requiredSkills)
+	if runtimeConfig.SkillsEnabled && len(projectGuidance.Skills) == 0 {
+		systemPrompt += "\n\nNo Agent Skills are currently installed. If the user explicitly asks to create or summarize reusable guidance as a project Skill, use create_skill; do not create one speculatively."
+	}
+	if runtimeConfig.CommandExecutionMode == "host" {
+		systemPrompt += "\n\nCOMMAND EXECUTION MODE — HOST: run_command executes in the host shell, not Docker. It inherits the current user's environment, filesystem permissions, and network access, and can access files outside the selected workspace. On Windows use PowerShell syntax; on macOS/Linux use Bash syntax (or sh if Bash is unavailable). Use run_command with rg --files / rg -n for repository listing and code search when available; its tool description gives the detected host fallback. Keep search paths workspace-relative. Use only task-relevant host paths and programs. Docker image selection, prepare_environment, and background action=start are unavailable in this mode."
+	} else {
+		systemPrompt += "\n\nCOMMAND EXECUTION MODE — DOCKER: run_command executes Linux shell commands in Docker. The selected workspace is mounted writable at /workspace; other host directories are not mounted. Container network access is controlled by allow_container_network. Before testing an unfamiliar repository, inspect its Dockerfile/devcontainer, CI workflows, README, and dependency manifests. Use prepare_environment with the project's appropriate base image and a minimal setup_command only when a required system tool or library is missing. Prepared images and package caches persist. In an interactive session, reuse the existing command container; do not change images unless a required tool is missing."
 	}
 	if workspaceMode == "direct" {
 		systemPrompt += "\n\nYou are working directly in the user's selected folder. File changes take effect there immediately. Preserve unrelated existing files and changes. If this folder has Git with a commit, review the diff before finishing; otherwise explain that Git diff is unavailable. Never revert user changes unless the user asks."
 	}
-	systemPrompt += "\n\nCONTEXT COMPACTION: You may call compact_context by itself when earlier conversation or tool output has become long and a concise handoff can preserve the active task. It makes an additional model request and is lossy, so use it selectively; the recent turns and full session record are retained."
+	systemPrompt += "\n\nCONTEXT MANAGEMENT: Sigma automatically checkpoints older session history when the configured context threshold is crossed, keeps a recent raw message suffix, and preserves a deterministic evidence index. The full original transcript remains available; use search with scope=session_history when an earlier fact, exact wording, decision rationale, tool output, or cross-turn relationship is missing or uncertain. Results are lexical excerpts with source message indices and tool-call IDs; verify them before relying on a conclusion. You may also call compact_context by itself for a focused handoff."
 	if newSession {
 		session = &agent.Session{ID: sessionID, System: systemPrompt, Store: store}
 	} else {
@@ -935,7 +998,7 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	session.Model = model
 	session.Tools = registry
 	if runtimeConfig.SkillsEnabled {
-		session.RequiredSkills = projectGuidance.MatchingSkillNames(task)
+		session.RequiredSkills = requiredSkills
 	}
 	session.ToolOutputs = toolOutputStore
 	var approveTool func(context.Context, agent.AuthorizationRequest) (bool, error)
@@ -947,7 +1010,7 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		if err := toolPolicy(ctx, tool, arguments); err != nil {
 			return err
 		}
-		request := agent.ClassifyToolAuthorization(tool.Definition.Name, arguments, runtimeConfig.AllowContainerNetwork)
+		request := agent.ClassifyToolAuthorization(tool.Definition.Name, arguments, runtimeConfig.AllowContainerNetwork || runtimeConfig.CommandExecutionMode == "host")
 		return workflowHost.BeforeTool(ctx, workflow.Event{
 			Type: "before_tool", SessionID: session.ID, Tool: request.Tool,
 			Args: string(request.Args),
@@ -955,10 +1018,14 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	}
 	session.SerializeToolCalls = hasAskPermissions(runtimeConfig)
 	session.Limits = agent.Limits{MaxTurns: runtimeConfig.MaxTurns, MaxToolCalls: runtimeConfig.MaxToolCalls, MaxRepeatedFailedCommands: runtimeConfig.MaxRepeatedFailedCommands, MaxToolResultBytes: runtimeConfig.MaxToolResultBytes, ToolTimeout: time.Duration(runtimeConfig.ToolTimeoutMS) * time.Millisecond}
+	toolDefinitionsForBudget := agent.WithSessionSearchTool(registry.Definitions(), registry.SearchScopes())
+	toolDefinitionTokens := agent.EstimateToolDefinitionTokens(toolDefinitionsForBudget)
 	session.Context = agent.WindowContextManager{
 		MaxTokens:                 runtimeConfig.MaxContextTokens,
 		CompactionThresholdTokens: runtimeConfig.EffectiveContextCompactionThresholdTokens(),
 		SummaryTokens:             runtimeConfig.SummaryTokens,
+		KeepRecentTokens:          runtimeConfig.ContextKeepRecentTokens,
+		ToolTokens:                toolDefinitionTokens,
 	}
 	session.OnEvent = eventSink
 	workflowHost.Dispatch(workflow.Event{Type: "session_start", SessionID: session.ID})
@@ -1065,6 +1132,7 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		"final_diff_collected":  diffErr == nil,
 		"workspace_mode":        workspaceMode,
 		"github_write_enabled":  false, "allow_container_network": runtimeConfig.AllowContainerNetwork,
+		"command_execution_mode":          runtimeConfig.CommandExecutionMode,
 		"command_filesystem_scope":        runtimeConfig.CommandFilesystemScope,
 		"default_tool_permission":         runtimeConfig.DefaultToolPermission,
 		"risk_permissions":                runtimeConfig.RiskPermissions,
@@ -1089,7 +1157,9 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		"context_compaction_input_tokens":     result.ContextCompactionInputTokens,
 		"context_compaction_output_tokens":    result.ContextCompactionOutputTokens,
 		"max_context_tokens":                  runtimeConfig.MaxContextTokens,
+		"estimated_tool_definition_tokens":    toolDefinitionTokens,
 		"context_compaction_threshold_tokens": runtimeConfig.EffectiveContextCompactionThresholdTokens(),
+		"context_keep_recent_tokens":          runtimeConfig.ContextKeepRecentTokens,
 		"summary_tokens":                      runtimeConfig.SummaryTokens,
 		"max_turns":                           runtimeConfig.MaxTurns,
 		"max_tool_calls":                      runtimeConfig.MaxToolCalls,
@@ -1202,7 +1272,7 @@ func interactiveSessionWithCheckpoints(ctx context.Context, session *agent.Sessi
 	}
 
 	var total agent.Result
-	commandNames := []string{"/help", "/model", "/diff", "/tree [entry-id]", "/versions", "/restore <id> [confirm]", "/skill:<name> <task>", "/abort", "/quit"}
+	commandNames := []string{"/help", "/model", "/context", "/memory [forget <memory-id-prefix>]", "/diff", "/tree [entry-id]", "/versions", "/restore <id> [confirm]", "/skill:<name> <task>", "/abort", "/quit"}
 	for _, command := range extensions.Commands() {
 		commandNames = append(commandNames, "/"+command.Name)
 	}
@@ -1337,6 +1407,10 @@ func interactiveSessionWithCheckpoints(ctx context.Context, session *agent.Sessi
 				}
 			case line == "/help":
 				fmt.Fprintf(os.Stderr, "Commands: %s. Enter text to start a task; while a turn is active, plain text or /steer <text> queues guidance.\n", strings.Join(commandNames, ", "))
+			case line == "/context":
+				fmt.Fprintln(os.Stderr, renderContextReport(workspace, runtimeConfig, projectGuidance, session))
+			case line == "/memory" || strings.HasPrefix(line, "/memory "):
+				fmt.Fprintln(os.Stderr, renderMemoryCommand(workspace, runtimeConfig, strings.TrimSpace(strings.TrimPrefix(line, "/memory"))))
 			case strings.HasPrefix(line, "/skill:"):
 				invocation := strings.TrimPrefix(line, "/skill:")
 				name, task, ok := strings.Cut(invocation, " ")
@@ -1523,7 +1597,7 @@ func truncateText(text string, maxRunes int) string {
 
 func configuredToolPolicy(runtimeConfig config.Runtime, approve func(context.Context, agent.AuthorizationRequest) (bool, error), audit func(agent.Event) error, interactive bool) agent.ToolPolicy {
 	return func(ctx context.Context, tool agent.Tool, input json.RawMessage) error {
-		request := agent.ClassifyToolAuthorization(tool.Definition.Name, input, runtimeConfig.AllowContainerNetwork)
+		request := agent.ClassifyToolAuthorization(tool.Definition.Name, input, runtimeConfig.AllowContainerNetwork || runtimeConfig.CommandExecutionMode == "host")
 		request.ID = toolAuthorizationID(agent.ToolCallID(ctx), tool.Definition.Name)
 		permission := runtimeConfig.DefaultToolPermission
 		if classPermission, ok := runtimeConfig.RiskPermissions[request.RiskClass]; ok {

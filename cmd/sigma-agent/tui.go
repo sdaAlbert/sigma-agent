@@ -38,6 +38,11 @@ type tuiBridge struct {
 	runners            sync.WaitGroup
 	mu                 sync.Mutex
 	pendingSessionNext *tuiNewSessionMsg
+	pendingContext     *tuiContextSettings
+}
+
+type tuiContextSettings struct {
+	threshold, keepRecent, summary int
 }
 
 func (b *tuiBridge) send(msg tea.Msg) {
@@ -64,6 +69,20 @@ func (b *tuiBridge) takeSessionRequest() *tuiNewSessionMsg {
 	next := b.pendingSessionNext
 	b.pendingSessionNext = nil
 	return next
+}
+
+func (b *tuiBridge) requestContextSettings(settings tuiContextSettings) {
+	b.mu.Lock()
+	b.pendingContext = &settings
+	b.mu.Unlock()
+}
+
+func (b *tuiBridge) takeContextSettings() *tuiContextSettings {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	settings := b.pendingContext
+	b.pendingContext = nil
+	return settings
 }
 
 func (b *tuiBridge) Notify(message string) { b.notice(message) }
@@ -127,6 +146,10 @@ type tuiThinkingSettingMsg struct {
 	effort   string
 	deepSeek bool
 }
+type tuiPackageInstallMsg struct {
+	output string
+	err    error
+}
 type tuiModelsLoadedMsg struct {
 	provider string
 	models   []modelconfig.ModelInfo
@@ -169,9 +192,12 @@ type tuiCompletion struct {
 }
 
 type persistedTUISettings struct {
-	DeepSeekThinking bool   `json:"deepseek_thinking"`
-	DockerNetwork    bool   `json:"docker_network"`
-	ReasoningEffort  string `json:"reasoning_effort,omitempty"`
+	DeepSeekThinking           bool   `json:"deepseek_thinking"`
+	DockerNetwork              bool   `json:"docker_network"`
+	ReasoningEffort            string `json:"reasoning_effort,omitempty"`
+	ContextCompactionThreshold *int   `json:"context_compaction_threshold_tokens,omitempty"`
+	ContextKeepRecentTokens    *int   `json:"context_keep_recent_tokens,omitempty"`
+	ContextSummaryTokens       *int   `json:"summary_tokens,omitempty"`
 }
 
 type tuiRunner func(interactiveSetupOptions, *tuiBridge) error
@@ -248,6 +274,15 @@ func startTUI(setup interactiveSetupOptions, runner tuiRunner) error {
 		if saved.ReasoningEffort != "" {
 			setup.modelReasoningEffort = saved.ReasoningEffort
 		}
+		if !setup.contextSettingsExplicit && saved.ContextCompactionThreshold != nil {
+			setup.contextCompactionTokens = *saved.ContextCompactionThreshold
+		}
+		if !setup.contextSettingsExplicit && saved.ContextKeepRecentTokens != nil {
+			setup.contextKeepRecentTokens = *saved.ContextKeepRecentTokens
+		}
+		if !setup.contextSettingsExplicit && saved.ContextSummaryTokens != nil {
+			setup.summaryTokens = *saved.ContextSummaryTokens
+		}
 	}
 	input := textarea.New()
 	input.Placeholder = "Ask Sigma or enter a /command"
@@ -293,6 +328,156 @@ func startTUI(setup interactiveSetupOptions, runner tuiRunner) error {
 	cancelApp()
 	bridge.runners.Wait()
 	return err
+}
+
+func renderContextReport(workspace string, runtimeConfig config.Runtime, guidance workspaceagent.ProjectGuidance, session *agent.Session) string {
+	var lines []string
+	lines = append(lines, "Project instructions")
+	projectInstructions := filepath.Join(workspace, "AGENTS.md")
+	if info, err := os.Stat(projectInstructions); err == nil && info.Mode().IsRegular() {
+		lines = append(lines, fmt.Sprintf("  loaded · %s · %d bytes", projectInstructions, info.Size()))
+	}
+	if guidance.ExternalInstructionsPath != "" {
+		if info, err := os.Stat(guidance.ExternalInstructionsPath); err == nil {
+			lines = append(lines, fmt.Sprintf("  loaded · configured profile · %s · %d bytes", guidance.ExternalInstructionsPath, info.Size()))
+		}
+	}
+	if len(lines) == 1 || strings.TrimSpace(guidance.Instructions) == "" {
+		lines = append(lines, "  none")
+	}
+
+	lines = append(lines, "", "Current session")
+	messages := session.Messages()
+	summary, evidence := session.ContextCheckpoint()
+	lines = append(lines, fmt.Sprintf("  saved conversation · %d messages", len(messages)))
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role != "user" {
+			continue
+		}
+		for _, block := range messages[index].Content {
+			if block.Type != "text" || strings.TrimSpace(block.Text) == "" {
+				continue
+			}
+			request := []rune(safeTerminalText(strings.TrimSpace(block.Text)))
+			if len(request) > 1200 {
+				request = append(request[:1200], []rune("… [truncated]")...)
+			}
+			lines = append(lines, "  latest user request", "    "+string(request))
+			break
+		}
+		break
+	}
+	if summary == "" {
+		lines = append(lines, "  task checkpoint · not created yet")
+	} else {
+		lines = append(lines, "  task checkpoint · older conversation summarized; original messages remain searchable")
+		lines = append(lines, "", safeTerminalText(summary))
+		if evidence != "" {
+			lines = append(lines, "  deterministic evidence index · available through session history search")
+		}
+	}
+
+	lines = append(lines, "", "Long-term project memory")
+	if !runtimeConfig.MemoryEnabled {
+		lines = append(lines, "  disabled for this run")
+	} else {
+		memoryPath := runtimeConfig.MemoryFile
+		if memoryPath == "" {
+			memoryPath = filepath.Join(workspace, ".sigma-agent", "MEMORY.md")
+		}
+		info, statErr := os.Stat(memoryPath)
+		if statErr != nil {
+			lines = append(lines, "  no memory file · "+memoryPath)
+		} else {
+			entries, loadErr := workspaceagent.LoadMemoryEntries(workspace)
+			if loadErr != nil {
+				lines = append(lines, fmt.Sprintf("  %s · %d bytes · could not parse entries: %v", memoryPath, info.Size(), loadErr))
+			} else {
+				scope := "current repository"
+				if runtimeConfig.MemoryRepositoryID != "" {
+					scope = "shared scope " + runtimeConfig.MemoryRepositoryID
+				}
+				lines = append(lines, fmt.Sprintf("  %s · %d entries · %d/16384 bytes · %s", memoryPath, len(entries), info.Size(), scope))
+				if len(entries) > 0 {
+					lines = append(lines, "  retrieval · on demand through search (scope=memory)")
+				} else {
+					lines = append(lines, "  retrieval · unavailable until entries are added")
+				}
+			}
+		}
+		if runtimeConfig.MemoryAutoWrite {
+			lines = append(lines, "  automatic capture · enabled after verified successful non-interactive runs")
+		} else {
+			lines = append(lines, "  automatic capture · disabled")
+		}
+	}
+	if len(guidance.Skills) > 0 {
+		names := make([]string, 0, len(guidance.Skills))
+		for _, skill := range guidance.Skills {
+			names = append(names, skill.Name)
+		}
+		sort.Strings(names)
+		lines = append(lines, "", "Available Skills", "  "+strings.Join(names, ", "))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderMemoryCommand(workspace string, runtimeConfig config.Runtime, arguments string) string {
+	if !runtimeConfig.MemoryEnabled {
+		return "Long-term memory is disabled for this run."
+	}
+	fields := strings.Fields(arguments)
+	memoryFile, repoID := runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID
+	if len(fields) > 0 {
+		if len(fields) != 2 || fields[0] != "forget" {
+			return "Usage: /memory [forget <memory-id-prefix>]"
+		}
+		removed, err := workspaceagent.ForgetProjectMemoryEntry(workspace, memoryFile, repoID, fields[1])
+		if err != nil {
+			return "Could not forget memory entry: " + safeTerminalText(err.Error())
+		}
+		if memoryFile != "" {
+			if _, err := workspaceagent.CopyProjectMemoryFromFile(memoryFile, workspace, repoID); err != nil {
+				return "Memory entry was removed from the shared source, but the active workspace copy could not be refreshed: " + safeTerminalText(err.Error())
+			}
+		}
+		var indexErr error
+		if workspaceagent.MemoryVectorConfigured() {
+			if memoryFile != "" {
+				_, indexErr = workspaceagent.IndexProjectMemoryFile(memoryFile, repoID)
+			} else {
+				_, indexErr = workspaceagent.IndexRepositoryMemory(workspace)
+			}
+		}
+		message := fmt.Sprintf("Forgot memory %s (%s · %s).", removed.ContentHash[:10], removed.Kind, removed.Source)
+		if indexErr != nil {
+			message += " The Markdown source is updated; vector cleanup will retry on the next successful --index-memory run."
+		}
+		return message
+	}
+	entries, err := workspaceagent.ListProjectMemoryEntries(workspace, memoryFile, repoID)
+	if err != nil {
+		return "Could not read project memory: " + safeTerminalText(err.Error())
+	}
+	path := memoryFile
+	if path == "" {
+		path = filepath.Join(workspace, ".sigma-agent", "MEMORY.md")
+	}
+	info, _ := os.Stat(path)
+	bytes := int64(0)
+	if info != nil {
+		bytes = info.Size()
+	}
+	lines := []string{fmt.Sprintf("Long-term project memory · %d entries · %d/16384 bytes", len(entries), bytes), path}
+	for _, entry := range entries {
+		freshness := "reviewed"
+		if reviewed, parseErr := time.Parse("2006-01-02", entry.UpdatedAt); parseErr == nil && time.Since(reviewed) > 180*24*time.Hour {
+			freshness = "revalidation required"
+		}
+		lines = append(lines, fmt.Sprintf("%s · [%s · %s · %s · %s] %s", entry.ContentHash[:10], entry.Kind, entry.UpdatedAt, freshness, entry.Source, entry.Text))
+	}
+	lines = append(lines, "Use /memory forget <memory-id-prefix> to remove one listed fact.")
+	return safeTerminalText(strings.Join(lines, "\n"))
 }
 
 func inspectTUIStartupInfo(repo, externalInstructionsFile string) tuiStartupInfo {
@@ -658,6 +843,14 @@ func (m *tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiThinkingSettingMsg:
 		m.setup.modelReasoningEffort = msg.effort
 		m.setup.deepSeekThinking = msg.deepSeek
+	case tuiPackageInstallMsg:
+		m.status = ""
+		if msg.err != nil {
+			m.appendError("Could not install package: " + msg.err.Error())
+		} else {
+			m.appendLine(msg.output)
+			m.appendLine("Package resources will be loaded when the next Sigma session starts or reloads.")
+		}
 	case tuiModelsLoadedMsg:
 		if msg.provider == m.catalogProvider {
 			m.catalogLoading = false
@@ -939,7 +1132,23 @@ func (m *tuiModel) setupCommand(line string) tea.Cmd {
 	value = strings.TrimSpace(value)
 	switch command {
 	case "/help":
-		m.appendLine("Commands: /help, /model, /settings, /trust, /thinking, /login, /logout, /resume, /session, /new, /fork, /clone, /compact, /import, /reload, /name, /export, /diff, /tree, /versions, /restore, /steer, /followup, /abort, /quit.")
+		m.appendLine("Commands: /help, /model, /settings, /trust, /thinking, /login, /logout, /install [--local] <source>, /resume, /session, /new, /fork, /clone, /compact, /import, /reload, /name, /export, /diff, /tree, /versions, /restore, /steer, /followup, /abort, /quit.")
+	case "/install":
+		source, local, err := parseTUIInstallArgs(value)
+		if err != nil {
+			m.appendError(err.Error())
+			break
+		}
+		workspace := m.setup.workspace
+		installCtx := context.Background()
+		if m.bridge != nil && m.bridge.appContext != nil {
+			installCtx = m.bridge.appContext
+		}
+		m.status = "Installing package…"
+		return func() tea.Msg {
+			output, installErr := installPackageForTUI(installCtx, workspace, source, local)
+			return tuiPackageInstallMsg{output: output, err: installErr}
+		}
 	case "/settings":
 		m.openSettingsSelector()
 		return nil
@@ -1171,11 +1380,16 @@ func onOff(value bool) string {
 
 func (m *tuiModel) persistedSettings() persistedTUISettings {
 	return persistedTUISettings{
-		DeepSeekThinking: m.setup.deepSeekThinking,
-		DockerNetwork:    m.setup.allowNetwork,
-		ReasoningEffort:  m.setup.modelReasoningEffort,
+		DeepSeekThinking:           m.setup.deepSeekThinking,
+		DockerNetwork:              m.setup.allowNetwork,
+		ReasoningEffort:            m.setup.modelReasoningEffort,
+		ContextCompactionThreshold: intSetting(m.setup.contextCompactionTokens),
+		ContextKeepRecentTokens:    intSetting(m.setup.contextKeepRecentTokens),
+		ContextSummaryTokens:       intSetting(m.setup.summaryTokens),
 	}
 }
+
+func intSetting(value int) *int { return &value }
 
 func tuiSettingsPath() (string, error) {
 	directory, err := os.UserConfigDir()
@@ -1261,8 +1475,63 @@ func (m *tuiModel) openSettingsSelector() {
 		{label: "DeepSeek thinking · " + thinkingLabel + " (toggle)", value: thinkingValue},
 		{label: "Reasoning effort · " + effort, value: "effort:menu"},
 		{label: "Docker network · " + networkLabel + " (toggle)", value: networkValue},
+		{label: "Context compression · " + m.compressionSettingsLabel(), value: "context:menu"},
 	}
-	m.openOverlay("settings", "Settings · applies to the next session", items)
+	m.openOverlay("settings", "Settings · applies before the next user request", items)
+}
+
+func (m *tuiModel) effectiveCompressionThreshold() int {
+	return (config.Runtime{
+		MaxContextTokens:                 m.setup.maxContextTokens,
+		ModelOutputTokens:                m.setup.modelOutputTokens,
+		ContextCompactionThresholdTokens: m.setup.contextCompactionTokens,
+	}).EffectiveContextCompactionThresholdTokens()
+}
+
+func (m *tuiModel) compressionSettingsLabel() string {
+	threshold := m.effectiveCompressionThreshold()
+	thresholdMode := "custom"
+	if m.setup.contextCompactionTokens == 0 {
+		thresholdMode = "auto"
+	}
+	recent := m.setup.contextKeepRecentTokens
+	if recent <= 0 {
+		recent = 20000
+	}
+	summary := m.setup.summaryTokens
+	if summary <= 0 {
+		summary = 800
+	}
+	return fmt.Sprintf("threshold %s/%d · recent %d · checkpoint %d", thresholdMode, threshold, recent, summary)
+}
+
+func (m *tuiModel) openCompressionSettings() {
+	threshold := m.effectiveCompressionThreshold()
+	recent := m.setup.contextKeepRecentTokens
+	if recent <= 0 {
+		recent = 20000
+	}
+	summary := m.setup.summaryTokens
+	if summary <= 0 {
+		summary = 800
+	}
+	thresholdMode := "custom"
+	if m.setup.contextCompactionTokens == 0 {
+		thresholdMode = "auto"
+	}
+	items := []tuiOverlayItem{
+		{label: fmt.Sprintf("Threshold · %d tokens (%s); select for auto", threshold, thresholdMode), value: "context:threshold:auto"},
+		{label: "Threshold − 4,096", value: "context:threshold:lower"},
+		{label: "Threshold + 4,096", value: "context:threshold:higher"},
+		{label: fmt.Sprintf("Recent raw-history cap · %d tokens", recent), value: "context:recent:current"},
+		{label: "Recent history − 4,096", value: "context:recent:lower"},
+		{label: "Recent history + 4,096", value: "context:recent:higher"},
+		{label: fmt.Sprintf("Checkpoint budget · %d tokens", summary), value: "context:summary:current"},
+		{label: "Checkpoint budget − 200", value: "context:summary:lower"},
+		{label: "Checkpoint budget + 200", value: "context:summary:higher"},
+		{label: "Reset compression values to config.json", value: "context:reset"},
+	}
+	m.openOverlay("compression", "Context compression · applied before the next user request", items)
 }
 
 func validTUIThinkingEffort(effort string) bool {
@@ -1491,6 +1760,10 @@ func (m *tuiModel) selectOverlayItem() tea.Cmd {
 			m.closeOverlay()
 			m.openThinkingSelector()
 			return nil
+		case "context:menu":
+			m.closeOverlay()
+			m.openCompressionSettings()
+			return nil
 		}
 		m.closeOverlay()
 		if err := saveTUISettings(m.persistedSettings()); err != nil {
@@ -1498,6 +1771,68 @@ func (m *tuiModel) selectOverlayItem() tea.Cmd {
 		} else {
 			m.status = fmt.Sprintf("Saved settings: DeepSeek thinking %s · Docker network %s", onOff(m.setup.deepSeekThinking), onOff(m.setup.allowNetwork))
 		}
+		return nil
+	case "compression":
+		threshold := m.effectiveCompressionThreshold()
+		recent := m.setup.contextKeepRecentTokens
+		if recent <= 0 {
+			recent = 20000
+		}
+		summary := m.setup.summaryTokens
+		if summary <= 0 {
+			summary = 800
+		}
+		changed := true
+		switch item.value {
+		case "context:threshold:auto":
+			m.setup.contextCompactionTokens = 0
+		case "context:threshold:lower":
+			minimum := max(1024, summary+1)
+			m.setup.contextCompactionTokens = max(minimum, threshold-4096)
+		case "context:threshold:higher":
+			maximum := m.setup.maxContextTokens
+			if maximum <= 0 {
+				maximum = 64000
+			}
+			m.setup.contextCompactionTokens = min(maximum, threshold+4096)
+		case "context:recent:lower":
+			m.setup.contextKeepRecentTokens = max(4096, recent-4096)
+		case "context:recent:higher":
+			m.setup.contextKeepRecentTokens = min(1000000, recent+4096)
+		case "context:summary:lower":
+			m.setup.summaryTokens = max(200, summary-200)
+		case "context:summary:higher":
+			m.setup.summaryTokens = min(min(8192, threshold-1), summary+200)
+		case "context:recent:current", "context:summary:current":
+			m.status = "Compression settings · " + m.compressionSettingsLabel()
+			m.closeOverlay()
+			m.openCompressionSettings()
+			return nil
+		case "context:reset":
+			m.setup.contextCompactionTokens = m.setup.configuredCompactionTokens
+			m.setup.contextKeepRecentTokens = m.setup.configuredKeepRecentTokens
+			m.setup.summaryTokens = m.setup.configuredSummaryTokens
+		default:
+			changed = false
+		}
+		if changed {
+			if m.phase == "chat" && m.bridge != nil {
+				m.bridge.requestContextSettings(tuiContextSettings{
+					threshold:  m.setup.contextCompactionTokens,
+					keepRecent: m.setup.contextKeepRecentTokens,
+					summary:    m.setup.summaryTokens,
+				})
+			}
+			if err := saveTUISettings(m.persistedSettings()); err != nil {
+				m.status = "Could not persist compression settings (they will apply to the next user request): " + err.Error()
+			} else {
+				m.status = "Saved compression settings · applies before next user request · " + m.compressionSettingsLabel()
+			}
+			m.closeOverlay()
+			m.openCompressionSettings()
+			return nil
+		}
+		m.closeOverlay()
 		return nil
 	case "tree":
 		m.closeOverlay()
@@ -1915,6 +2250,7 @@ func (m *tuiModel) commandSuggestions(line string) []tuiOverlayItem {
 		tuiOverlayItem{label: "/clone  Copy this session at its current history point", value: "/clone"},
 		tuiOverlayItem{label: "/compact  Summarize older conversation context", value: "/compact"},
 		tuiOverlayItem{label: "/import  Replace this session with a Pi JSONL session", value: "/import "},
+		tuiOverlayItem{label: "/install  Install an npm, Git, or local package; add --local for this project", value: "/install "},
 		tuiOverlayItem{label: "/reload  Reload extensions, Skills, and project context", value: "/reload"},
 		tuiOverlayItem{label: "/name  Set or clear the saved session name", value: "/name "},
 		tuiOverlayItem{label: "/export  Export the conversation as Markdown", value: "/export "},
@@ -2648,6 +2984,22 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 	exitWhenDone := false
 	pendingPrompt := ""
 	startRun := func(prompt string, continuation bool) {
+		if settings := bridge.takeContextSettings(); settings != nil {
+			toolTokens := 0
+			if current, ok := session.Context.(agent.WindowContextManager); ok {
+				toolTokens = current.ToolTokens
+			}
+			runtimeConfig.ContextCompactionThresholdTokens = settings.threshold
+			runtimeConfig.ContextKeepRecentTokens = settings.keepRecent
+			runtimeConfig.SummaryTokens = settings.summary
+			session.SetContextWindow(agent.WindowContextManager{
+				MaxTokens:                 runtimeConfig.MaxContextTokens,
+				CompactionThresholdTokens: runtimeConfig.EffectiveContextCompactionThresholdTokens(),
+				SummaryTokens:             runtimeConfig.SummaryTokens,
+				KeepRecentTokens:          runtimeConfig.ContextKeepRecentTokens,
+				ToolTokens:                toolTokens,
+			})
+		}
 		bridge.send(tuiTurnStartMsg{})
 		active = make(chan outcome, 1)
 		go func(done chan outcome) {
@@ -2778,6 +3130,26 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 				bridge.requestSession(tuiNewSessionMsg{resumeID: session.ID, workspace: workspace, reload: true})
 				return total, nil
 			}
+			if command == "/install" {
+				if active != nil {
+					bridge.notice("Wait for the current turn to finish before installing a package")
+					continue
+				}
+				source, local, parseErr := parseTUIInstallArgs(arguments)
+				if parseErr != nil {
+					bridge.failure(parseErr.Error())
+					continue
+				}
+				bridge.notice("Installing package…")
+				output, installErr := installPackageForTUI(ctx, workspace, source, local)
+				if installErr != nil {
+					bridge.failure("Could not install package: " + installErr.Error())
+					continue
+				}
+				bridge.output(output + "\nReloading Skills, MCP servers, and extensions…")
+				bridge.requestSession(tuiNewSessionMsg{resumeID: session.ID, workspace: workspace, reload: true})
+				return total, nil
+			}
 			if command == "/import" {
 				if active != nil {
 					bridge.notice("Wait for the current turn to finish before importing a session")
@@ -2862,7 +3234,13 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 				}
 				runtimeConfig.DeepSeekThinkingEnabled = deepSeekEnabled
 				bridge.send(tuiThinkingSettingMsg{effort: runtimeConfig.ModelReasoningEffort, deepSeek: deepSeekEnabled})
-				if err := saveTUISettings(persistedTUISettings{DeepSeekThinking: deepSeekEnabled, DockerNetwork: runtimeConfig.AllowContainerNetwork, ReasoningEffort: runtimeConfig.ModelReasoningEffort}); err != nil {
+				if err := saveTUISettings(persistedTUISettings{
+					DeepSeekThinking: deepSeekEnabled, DockerNetwork: runtimeConfig.AllowContainerNetwork,
+					ReasoningEffort:            runtimeConfig.ModelReasoningEffort,
+					ContextCompactionThreshold: intSetting(runtimeConfig.ContextCompactionThresholdTokens),
+					ContextKeepRecentTokens:    intSetting(runtimeConfig.ContextKeepRecentTokens),
+					ContextSummaryTokens:       intSetting(runtimeConfig.SummaryTokens),
+				}); err != nil {
 					bridge.failure("Could not save thinking setting: " + err.Error())
 				} else {
 					bridge.notice("Thinking level set to " + arguments)
@@ -3006,7 +3384,10 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 			case line == "/help":
 				commands := []string{
 					"/help — list commands and descriptions", "/model — choose provider and model", "/settings — change saved settings", "/trust — allow or pause project integrations",
+					"/context — inspect project instructions, session checkpoint, and long-term memory",
+					"/memory [forget <entry-number>] — list or selectively remove long-term project facts",
 					"/thinking — set reasoning level", "/login — save credentials", "/logout — remove credentials",
+					"/install [--local] <source> — install an npm, Git, or local package",
 					"/resume <id> — resume a saved session", "/session — show current session details", "/hotkeys — show shortcuts",
 					"/new — start a new session", "/fork — branch from a user message", "/clone — copy the current session point",
 					"/compact [focus] — summarize older context", "/import <path> — import a Pi JSONL session", "/reload — reload session resources",
@@ -3022,6 +3403,10 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 					commands = append(commands, label)
 				}
 				bridge.output("Commands: " + strings.Join(commands, ", ") + "\nUse the mouse wheel to scroll history; hold Shift while dragging to select and copy text.")
+			case line == "/context":
+				bridge.output(renderContextReport(workspace, runtimeConfig, projectGuidance, session))
+			case line == "/memory" || strings.HasPrefix(line, "/memory "):
+				bridge.output(renderMemoryCommand(workspace, runtimeConfig, strings.TrimSpace(strings.TrimPrefix(line, "/memory"))))
 			case line == "/tree" || strings.HasPrefix(line, "/tree "):
 				if active != nil {
 					bridge.notice("Wait for the current turn to finish before changing session history")

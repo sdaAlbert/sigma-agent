@@ -61,6 +61,7 @@ func CommandPluginTools(workspace string, plugins []CommandPlugin) []Tool {
 		plugin := plugin
 		tools = append(tools, Tool{
 			Definition:        ToolDefinition{Name: plugin.Name, Description: plugin.Description, InputSchema: append(json.RawMessage(nil), plugin.InputSchema...)},
+			OnDemand:          true,
 			ExecutionMode:     "serialized",
 			ModifiesWorkspace: plugin.ModifiesWorkspace,
 			Validate: func(raw json.RawMessage) error {

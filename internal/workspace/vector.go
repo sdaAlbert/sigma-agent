@@ -88,6 +88,10 @@ func newVectorConfig() *vectorConfig {
 	return &vectorConfig{qdrantURL: qdrant, embedURL: embedURL, model: model, apiKey: key, provider: provider, client: &http.Client{Timeout: 2 * time.Minute}}
 }
 
+// MemoryVectorConfigured reports whether embedding settings are present for
+// derived memory indexing. Local BM25 memory does not require this service.
+func MemoryVectorConfigured() bool { return newVectorConfig() != nil }
+
 func (v *vectorConfig) embeddings(ctx context.Context, texts []string) ([][]float32, error) {
 	payload := map[string]any{"model": v.model, "input": texts}
 	if v.provider == "huggingface" {

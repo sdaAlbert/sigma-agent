@@ -31,8 +31,8 @@ func TestLoadAppliesValuesOverDefaults(t *testing.T) {
 
 func TestDefaultContextCompactionThresholdLeavesMargin(t *testing.T) {
 	defaults := Defaults()
-	if got := defaults.EffectiveContextCompactionThresholdTokens(); got != 30000 {
-		t.Fatalf("default compaction threshold = %d, want 30000", got)
+	if got := defaults.EffectiveContextCompactionThresholdTokens(); got != 45568 {
+		t.Fatalf("default compaction threshold = %d, want 45568", got)
 	}
 	smallWindow := Runtime{MaxContextTokens: 16000}
 	if got := smallWindow.EffectiveContextCompactionThresholdTokens(); got != 16000 {

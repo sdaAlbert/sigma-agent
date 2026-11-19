@@ -37,7 +37,7 @@ func ClassifyToolAuthorization(name string, input json.RawMessage, networkEnable
 	}
 
 	switch name {
-	case "list_files", "search_code", "read_file", "git_diff", "search_memory", "read_tool_output", "read_skill", "compact_context":
+	case "workspace_search", "read_file", "read_tool_output", "read_skill", "search", "search_memory", "search_session_history", "search_skills", "compact_context":
 		request.RiskClass = RiskReadOnly
 		request.Reason = "Reads workspace/session data without modifying the repository."
 	case "git":
@@ -59,7 +59,7 @@ func ClassifyToolAuthorization(name string, input json.RawMessage, networkEnable
 			request.RiskClass = RiskWorkspaceWrite
 			request.Reason = "Changes repository or Git metadata in the selected workspace."
 		}
-	case "create_file", "edit_file", "apply_patch", "record_change_contract":
+	case "create_file", "edit_file", "create_skill", "record_change_contract":
 		request.RiskClass = RiskWorkspaceWrite
 		request.Reason = "Writes repository files or task-local change state."
 	case "prepare_environment":

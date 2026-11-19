@@ -33,7 +33,7 @@ go build -o sigma.exe ./cmd/sigma-agent
 .\sigma.exe
 ```
 
-The installed command starts the integrated setup screen in the current directory and can be run from any folder. Sigma needs Docker Desktop and an API key for one supported model provider; Git is optional. Go 1.26+ is needed to build from source, not for each launch. Sigma works on the folder where you run it; change folders with `cd`. Rerun the build command from the checkout to update `sigma.exe`. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
+The installed command starts the integrated setup screen in the current directory and can be run from any folder. Sigma needs an API key for one supported model provider. Host command execution is the default and does not require Docker; set `command_execution_mode` to `docker` or pass `--command-execution-mode docker` to run project shell commands in containers. Git is optional. Go 1.26+ is needed to build from source, not for each launch. Sigma works on the folder where you run it; change folders with `cd`. Rerun the build command from the checkout to update `sigma.exe`. Press `Enter` to submit a task or setup command; use `Shift+Enter` to insert a line break.
 
 ## 2. Configure the model
 
@@ -87,17 +87,19 @@ Fix issue #123. Inspect the relevant code and repository instructions, implement
 ```
 
 All new tasks use the current folder as their workspace. Sigma's file
-tools edit it directly, and Docker mounts the same folder at `/workspace`
-for commands and tests. Local model API calls run from the Sigma process.
+tools edit it directly, and host-mode commands run from that directory with
+the current user's permissions. Optional Docker mode mounts the same folder
+at `/workspace` for commands and tests. Local model API calls run from the
+Sigma process.
 Uncommitted changes need no copying; they are already in the workspace.
 
 ## Integrated TUI
 
-Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. A session starts automatically; the same command suggestions are available from the input at startup and in chat. `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/versions`, `/restore`, `/diff`, `/model`, `/session`, `/new`, `/fork`, `/clone`, `/steer`, `/followup`, and `/abort` are handled in the TUI. `/new` saves the current session and begins another; `/session` shows details for the current session. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
+Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a full-screen TUI and restores the previous terminal screen on exit. A session starts automatically; the same command suggestions are available from the input at startup and in chat. `Enter` sends and `Shift+Enter` inserts a line break; `/tree`, `/versions`, `/restore`, `/diff`, `/model`, `/session`, `/context`, `/memory`, `/new`, `/fork`, `/clone`, `/steer`, `/followup`, and `/abort` are handled in the TUI. `/new` saves the current session and begins another; `/session` shows session details; `/context` separates loaded project instructions, the current task checkpoint, and long-term project memory; `/memory` lists dated facts with stable content IDs and `/memory forget <id-prefix>` removes exactly one selected fact from its configured source. If vector memory is configured, the command refreshes that index after deletion. Enter `/login` and press `Enter` to open the credential picker, choose GitHub or a model provider, then paste/type the credential and press `Enter` to save. Credential input is masked; press `Esc` to cancel.
 
 TUI shortcuts: `Enter` submits or accepts the highlighted suggestion, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes file paths (`@path` in prompts), `Up`/`Down` navigate command/model suggestions or browse prompt history, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
-Docker commands use one reusable foreground container during an interactive session. `/quit` removes that container while keeping Docker images and `.sigma-agent/container-home` caches for the next session. Use `/settings` to change Docker network access. See [Docker command environments](DOCKER.md) for container reuse, image preparation, caches, background tasks, and shutdown behavior.
+In Docker mode, interactive sessions reuse one foreground container; one-shot `--task` / `--resume` runs create one container per command. Background `action=start` also requires Docker mode. `/quit` removes the interactive container while keeping Docker images and `.sigma-agent/container-home` caches for the next session. Use `/settings` to change Docker network access. Non-interactive runs can set `allow_container_network` in `config.json` or pass `--allow-container-network`. These settings do not restrict host mode, Sigma's model requests, or Docker image pulls. See [Docker command environments](DOCKER.md) for details.
 
 ## 4. Setup commands
 
@@ -112,7 +114,7 @@ Docker commands use one reusable foreground container during an interactive sess
 | `/logout github` | Remove the saved GitHub token. |
 | `/session <id>` | Set an explicit ID for a new session. |
 | `/resume <id>` | Resume a saved session. Use the same repository as the original session. |
-| `/settings` | Change saved runtime settings, including Docker network access. |
+| `/settings` | Change saved runtime settings, including Docker network access and context-compression settings applied before the next user request. |
 | `/help` | Show setup commands. |
 | `/quit` | Save and close Sigma. |
 
@@ -127,6 +129,9 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | `/help` | Show interactive-session commands. |
 | `/model` | Show or change the model between turns; `/model save` saves the default. |
 | `/session` | Show the current session ID. |
+| `/context` | Show loaded project instructions, the current session checkpoint, and long-term memory source, scope, entry count, capacity, and automatic-write setting. |
+| `/memory` | List long-term project facts with stable content IDs, category, source, date, and revalidation status. |
+| `/memory forget <id-prefix>` | Remove one selected fact from the active Markdown memory source and synchronize configured vector memory. Use at least the first 8 characters of its displayed ID. |
 | `/new` | Save the current session and return to setup to start a fresh one. |
 | `/diff` | Show a summary of changes in the active repository, compared with its starting commit. This includes pre-existing local changes. |
 | `/tree` | In the TUI, open the session history picker and choose a point to continue from. The previous history remains available as another branch; the terminal CLI prints the tree. |
@@ -183,9 +188,11 @@ user-invocable: true
 
 `name` and `description` are required. `license` and `compatibility` are optional. `disable-model-invocation: true` hides the Skill from automatic matching; `user-invocable: false` prevents explicit `/skill:` invocation. Other frontmatter is tolerated, but Pi's `allowed-tools` permission behavior is not implemented. Sigma's normal tool permission policy remains authoritative.
 
-Sigma provides only each available Skill's name and description to the model initially. When relevant, the model calls `read_skill` to load `SKILL.md`. It can then call `read_skill_resource` with the exact Skill name and a relative path, such as `references/test-matrix.md`, to load a small text reference or template. The resource reader is restricted to that Skill directory, rejects symlinks and path traversal, and supports text formats such as Markdown, JSON, YAML, TOML, CSV, XML, HTML, and SVG. Files are capped at 32 KiB.
+Sigma does not put the full Skill catalog into every prompt. It tells the model to use `search` with `scope=skills` and task or technology keywords; the router returns up to ten ranked name/description matches using local lexical search. The model calls `read_skill` with the exact name to load a `SKILL.md`, or supplies a Skill-relative `path` to load one referenced text file. Both operations use the same tool entry. Resource reads stay inside the Skill directory, reject symlinks and path traversal, support text formats such as Markdown, JSON, YAML, TOML, CSV, XML, HTML, and SVG, and cap files at 32 KiB. Search is lexical metadata retrieval, not semantic embedding search; if results are weak, try different task/framework terms.
 
-Sigma does not execute Skill scripts when loading a Skill. A loaded Skill may describe scripts, but reading it does not launch them; commands still have to go through the normal Agent tools and Docker/tool-permission controls. Standalone root Markdown Skills have no isolated companion directory, so `read_skill_resource` is available only to Skills loaded from a directory. Set `skills_enabled` to `false` to disable project and user Skill discovery.
+When the user explicitly asks Sigma to preserve reusable workflow guidance as a Skill, it can call `create_skill` to create a project Skill at `.agents/skills/<name>/SKILL.md`. It validates the name, description, format, and current 12 KiB file limit; it refuses to overwrite an existing Skill. The new Skill is discoverable after `/reload` or a session restart. General file tools remain unable to edit Skill directories.
+
+Sigma does not execute Skill scripts when loading a Skill. A loaded Skill may describe scripts, but reading it does not launch them; commands still have to go through the normal Agent tools and tool-permission controls (and Docker controls when Docker mode is selected). Standalone root Markdown Skills have no isolated companion directory, so `read_skill` cannot load companion resources for them. Skill search, reading, and creation tools are registered whenever `skills_enabled` is true; with an empty catalog, search returns no matches and reads reject unknown names. A newly created Skill becomes discoverable after `/reload` or a session restart. Set `skills_enabled` to `false` to disable project and user Skill discovery.
 
 Sigma can install npm, git, and local packages that contribute Skills and MCP servers. See [packages and MCP servers](PACKAGES.md).
 

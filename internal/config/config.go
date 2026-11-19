@@ -19,6 +19,7 @@ type Runtime struct {
 	MaxRepeatedFailedCommands        int               `json:"max_repeated_failed_commands"`
 	MaxContextTokens                 int               `json:"max_context_tokens"`
 	ContextCompactionThresholdTokens int               `json:"context_compaction_threshold_tokens"`
+	ContextKeepRecentTokens          int               `json:"context_keep_recent_tokens"`
 	SummaryTokens                    int               `json:"summary_tokens"`
 	MaxToolResultBytes               int               `json:"max_tool_result_bytes"`
 	MaxRetrievalQueryBytes           int               `json:"max_retrieval_query_bytes"`
@@ -28,6 +29,7 @@ type Runtime struct {
 	ToolTimeoutMS                    int               `json:"tool_timeout_ms"`
 	ModelTimeoutMS                   int               `json:"model_timeout_ms"`
 	MaxRetries                       int               `json:"max_retries"`
+	CommandExecutionMode             string            `json:"command_execution_mode"`
 	CommandExecutionImage            string            `json:"command_execution_image"`
 	CommandFilesystemScope           string            `json:"command_filesystem_scope"`
 	AllowContainerNetwork            bool              `json:"allow_container_network"`
@@ -63,10 +65,12 @@ func Defaults() Runtime {
 	return Runtime{
 		MaxTurns: 128, MaxToolCalls: 256, MaxContextTokens: 64000,
 		ContextCompactionThresholdTokens: 0,
+		ContextKeepRecentTokens:          20000,
 		SummaryTokens:                    800, MaxToolResultBytes: 50 * 1024,
 		MaxRetrievalQueryBytes: 8 * 1024,
 		ModelOutputTokens:      16384, ModelReasoningEffort: "max", ToolTimeoutMS: 600000,
 		ModelTimeoutMS: 120000, MaxRetries: 2,
+		CommandExecutionMode:   "host",
 		CommandExecutionImage:  "debian:trixie-slim",
 		CommandFilesystemScope: "unrestricted",
 		AllowContainerNetwork:  false,
@@ -132,6 +136,9 @@ func (c Runtime) Validate() error {
 	if c.ContextCompactionThresholdTokens < 0 || c.ContextCompactionThresholdTokens > c.MaxContextTokens {
 		return errors.New("context_compaction_threshold_tokens must be 0 or no greater than max_context_tokens")
 	}
+	if c.ContextKeepRecentTokens < 0 || c.ContextKeepRecentTokens > 1000000 {
+		return errors.New("context_keep_recent_tokens must be between 0 and 1000000")
+	}
 	if c.SummaryTokens >= c.EffectiveContextCompactionThresholdTokens() {
 		return errors.New("summary_tokens must be less than context_compaction_threshold_tokens")
 	}
@@ -180,6 +187,9 @@ func (c Runtime) Validate() error {
 	}
 	if len(c.MemoryRepositoryID) > 128 || (c.MemoryRepositoryID != "" && !memoryRepositoryIDPattern.MatchString(c.MemoryRepositoryID)) {
 		return errors.New("memory_repository_id must be 1–128 letters, digits, '.', '_', ':', '/', or '-' and start with a letter or digit")
+	}
+	if c.CommandExecutionMode != "host" && c.CommandExecutionMode != "docker" {
+		return errors.New("command_execution_mode must be 'host' or 'docker'")
 	}
 	if c.CommandExecutionImage == "" || strings.TrimSpace(c.CommandExecutionImage) != c.CommandExecutionImage || strings.ContainsAny(c.CommandExecutionImage, " \t\r\n") || strings.HasPrefix(c.CommandExecutionImage, "-") {
 		return errors.New("command_execution_image must be a non-empty Docker image reference without whitespace")
@@ -248,10 +258,20 @@ func (c Runtime) EffectiveContextCompactionThresholdTokens() int {
 	if c.ContextCompactionThresholdTokens > 0 {
 		return c.ContextCompactionThresholdTokens
 	}
-	if c.MaxContextTokens > 0 && c.MaxContextTokens < 30000 {
-		return c.MaxContextTokens
+	maxTokens := c.MaxContextTokens
+	if maxTokens <= 0 {
+		maxTokens = 64000
 	}
-	return 30000
+	outputTokens := c.ModelOutputTokens
+	if outputTokens <= 0 {
+		outputTokens = 16384
+	}
+	// Keep room for the configured completion plus transport/tokenizer variance.
+	threshold := maxTokens - outputTokens - 2048
+	if threshold < 512 {
+		return maxTokens
+	}
+	return threshold
 }
 
 func validToolPermission(permission string) bool {

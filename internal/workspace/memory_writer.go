@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
+	"github.com/sdaAlbert/sigma-agent/internal/filelock"
 	"github.com/sdaAlbert/sigma-agent/internal/fsx"
 )
 
@@ -22,6 +24,8 @@ const (
 	maxMemoryEvidenceBytes  = 20 * 1024
 	maxMemoryEvidenceText   = 12 * 1024
 )
+
+var errMemoryCapacityReached = errors.New("project memory capacity reached")
 
 var (
 	memorySecretAssignment = regexp.MustCompile(`(?i)(api[_ -]?key|access[_ -]?token|password|secret|authorization)\s*[:=]\s*[^\s,;]+`)
@@ -171,16 +175,26 @@ Keep durable test commands/outcomes, architecture or API constraints, compatibil
 	} else {
 		added, err = appendGeneratedMemory(repo, runID, drafts)
 	}
-	if err != nil {
+	capacityReached := errors.Is(err, errMemoryCapacityReached)
+	if err != nil && !capacityReached {
 		report.Warning = "memory capture could not be saved: " + err.Error()
 		return report
 	}
 	report.Added = added
 	if added == 0 {
+		if capacityReached {
+			report.Status = "capacity_reached"
+			report.Warning = "memory file is full; review or remove older entries before adding new facts"
+			return report
+		}
 		report.Status = "duplicates"
 		return report
 	}
 	report.Status = "saved"
+	if capacityReached {
+		report.Status = "saved_capacity_reached"
+		report.Warning = "memory file is full; some proposed facts were not added. Review or remove older entries before adding more"
+	}
 	var indexed int
 	if memoryFile != "" {
 		indexed, err = IndexProjectMemoryFile(memoryFile, memoryRepoID)
@@ -223,7 +237,7 @@ func memoryCaptureEvidence(task, patch string, messages []agent.Message) ([]stri
 					}
 				}
 				toolNames[block.ID] = evidence
-				if block.Name == "create_file" || block.Name == "edit_file" || block.Name == "apply_patch" || block.Name == "read_file" {
+				if block.Name == "create_file" || block.Name == "edit_file" || block.Name == "read_file" {
 					var input struct {
 						Path string `json:"path"`
 					}
@@ -418,6 +432,11 @@ func appendGeneratedMemoryAt(path, repoID, runID string, drafts []generatedMemor
 		return 0, err
 	}
 	directory := filepath.Dir(path)
+	lock, err := filelock.Acquire(path+".lock", true)
+	if err != nil {
+		return 0, fmt.Errorf("lock project memory for update: %w", err)
+	}
+	defer lock.Close()
 	var current []byte
 	info, err := os.Lstat(path)
 	if err == nil {
@@ -449,6 +468,7 @@ func appendGeneratedMemoryAt(path, repoID, runID string, drafts []generatedMemor
 		content += "\n"
 	}
 	added := 0
+	capacityReached := false
 	date := time.Now().UTC().Format("2006-01-02")
 	for _, draft := range drafts {
 		key := draft.Kind + "\n" + strings.ToLower(strings.Join(strings.Fields(draft.Fact), " "))
@@ -457,6 +477,7 @@ func appendGeneratedMemoryAt(path, repoID, runID string, drafts []generatedMemor
 		}
 		line := fmt.Sprintf("- %s | kind: %s | source: %s (run %s) | %s\n", date, draft.Kind, draft.Source, runID, draft.Fact)
 		if len(content)+len(line) > maxMemoryBytes {
+			capacityReached = true
 			break
 		}
 		content += line
@@ -464,6 +485,9 @@ func appendGeneratedMemoryAt(path, repoID, runID string, drafts []generatedMemor
 		added++
 	}
 	if added == 0 {
+		if capacityReached {
+			return 0, errMemoryCapacityReached
+		}
 		return 0, nil
 	}
 	if _, err := parseMemoryEntries(repoID, []byte(content)); err != nil {
@@ -472,7 +496,85 @@ func appendGeneratedMemoryAt(path, repoID, runID string, drafts []generatedMemor
 	if err := writeAtomicMemory(path, directory, []byte(content)); err != nil {
 		return 0, err
 	}
+	if capacityReached {
+		return added, errMemoryCapacityReached
+	}
 	return added, nil
+}
+
+// ForgetProjectMemoryEntry removes one entry selected by a stable content-hash
+// prefix. The selection is resolved while holding the cross-process file lock.
+func ForgetProjectMemoryEntry(root, memoryFile, repoID, selector string) (MemoryEntry, error) {
+	selector = strings.ToLower(strings.TrimSpace(selector))
+	if len(selector) < 8 || len(selector) > 64 {
+		return MemoryEntry{}, errors.New("memory ID must be an 8- to 64-character content-hash prefix")
+	}
+	if _, err := hex.DecodeString(selector); err != nil {
+		return MemoryEntry{}, errors.New("memory ID must contain only hexadecimal characters")
+	}
+	path := strings.TrimSpace(memoryFile)
+	localMemory := path == ""
+	if localMemory {
+		path = filepath.Join(root, ".sigma-agent", "MEMORY.md")
+	} else if !filepath.IsAbs(path) {
+		return MemoryEntry{}, errors.New("configured project memory path must be absolute")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	path = absPath
+	if !localMemory && strings.TrimSpace(repoID) == "" {
+		return MemoryEntry{}, errors.New("a stable repository ID is required for external memory")
+	}
+	lock, err := filelock.Acquire(path+".lock", true)
+	if err != nil {
+		return MemoryEntry{}, fmt.Errorf("lock project memory for update: %w", err)
+	}
+	defer lock.Close()
+	info, err := os.Lstat(path)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maxMemoryBytes {
+		return MemoryEntry{}, fmt.Errorf("project memory must be a regular file no larger than %d bytes", maxMemoryBytes)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	if strings.TrimSpace(repoID) == "" {
+		repoID, err = repositoryID(root)
+		if err != nil {
+			return MemoryEntry{}, err
+		}
+	}
+	entries, err := parseMemoryEntries(repoID, content)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	var removed MemoryEntry
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.ContentHash, selector) {
+			if removed.ID != "" {
+				return MemoryEntry{}, errors.New("memory ID prefix is ambiguous; run /memory and use more characters")
+			}
+			removed = entry
+		}
+	}
+	if removed.ID == "" {
+		return MemoryEntry{}, errors.New("memory ID was not found; run /memory to refresh the list")
+	}
+	lines := strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n")
+	if removed.Line < 1 || removed.Line > len(lines) {
+		return MemoryEntry{}, errors.New("memory entry location changed; list entries again and retry")
+	}
+	lines = append(lines[:removed.Line-1], lines[removed.Line:]...)
+	updated := []byte(strings.Join(lines, "\n"))
+	if err := writeAtomicMemory(path, filepath.Dir(path), updated); err != nil {
+		return MemoryEntry{}, err
+	}
+	return removed, nil
 }
 
 func ensureMemoryDirectory(directory string) error {

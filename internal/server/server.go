@@ -34,16 +34,21 @@ type Task struct {
 }
 
 type manager struct {
-	mu         sync.RWMutex
-	root       string
-	storeDir   string
-	configPath string
-	queue      chan string
-	tasks      map[string]*Task
-	running    map[string]context.CancelFunc
+	mu          sync.RWMutex
+	root        string
+	storeDir    string
+	configPath  string
+	commandMode string
+	queue       chan string
+	tasks       map[string]*Task
+	running     map[string]context.CancelFunc
 }
 
 func ListenAndServe(addr string, maxConcurrent int, configPath string) error {
+	return ListenAndServeWithCommandMode(addr, maxConcurrent, configPath, "")
+}
+
+func ListenAndServeWithCommandMode(addr string, maxConcurrent int, configPath, commandMode string) error {
 	if maxConcurrent < 1 || maxConcurrent > 32 {
 		return errors.New("max-concurrent must be between 1 and 32")
 	}
@@ -59,7 +64,7 @@ func ListenAndServe(addr string, maxConcurrent int, configPath string) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
-	m := &manager{root: root, storeDir: stateDir, configPath: configPath, queue: make(chan string, 1024), tasks: map[string]*Task{}, running: map[string]context.CancelFunc{}}
+	m := &manager{root: root, storeDir: stateDir, configPath: configPath, commandMode: commandMode, queue: make(chan string, 1024), tasks: map[string]*Task{}, running: map[string]context.CancelFunc{}}
 	if err := m.restore(); err != nil {
 		return err
 	}
@@ -438,6 +443,9 @@ func (m *manager) runTask(id string, workspaceLock *filelock.Lock) {
 	executable, err := os.Executable()
 	if err == nil {
 		args := []string{"--config", m.configPath, "--repo", copy.Repo, "--session-id", id, "--event-file", m.eventPath(id), "--message-file", m.messagePath(id)}
+		if m.commandMode != "" {
+			args = append(args, "--command-execution-mode", m.commandMode)
+		}
 		if resume {
 			args = append(args, "--resume", id)
 		} else {

@@ -92,6 +92,30 @@ func (w workspace) gitTool() agent.Tool {
 	})
 }
 
+// readOnlyGitTool gives delegated children the same Git inspection surface
+// without exposing init, stage, or commit actions.
+func (w workspace) readOnlyGitTool() agent.Tool {
+	full := w.gitTool()
+	gitHandler := full.Handle
+	full.Definition.Description = "Inspect local Git status, diff, recent history, the last commit summary, or branch names. Mutating Git actions are unavailable in child tasks."
+	full.Definition.InputSchema = json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["status","diff","log","show","branches"]}},"required":["action"],"additionalProperties":false}`)
+	full.Handle = func(ctx context.Context, raw json.RawMessage) (string, error) {
+		var args struct {
+			Action string `json:"action"`
+		}
+		if err := decodeArgs(raw, &args); err != nil {
+			return "", err
+		}
+		switch args.Action {
+		case "status", "diff", "log", "show", "branches":
+			return gitHandler(ctx, raw)
+		default:
+			return "", fmt.Errorf("Git action %q is unavailable in a read-only child task", args.Action)
+		}
+	}
+	return full
+}
+
 func (w workspace) requireGitWorkspaceRoot(ctx context.Context) error {
 	commandCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

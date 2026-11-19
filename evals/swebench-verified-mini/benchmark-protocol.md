@@ -357,7 +357,7 @@ missing, inspect the image and its provided wheelhouse once; do not repeatedly
 scan caches or try network installs in a no-egress container. Keep setup and a
 test in the same command when setup is ephemeral. Put scratch scripts in `/tmp`
 and create/run/remove them in one invocation, or remove any workspace scratch
-files before collecting the patch. Check `git status` and `git_diff` for harness
+files before collecting the patch. Check `git status` and `git` with `action=diff` for harness
 files before scoring.
 
 Repository-native tests must be called with `purpose=test` so Sigma can track

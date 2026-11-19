@@ -72,13 +72,17 @@ func registryPath(scope packageScope) string {
 // installPackage installs a package into one scope and records it in the
 // scope registry.
 func installPackage(ctx context.Context, scope packageScope, source string) (*pkgmgr.Package, error) {
+	return installPackageWithLog(ctx, scope, source, func(message string) { fmt.Fprintln(os.Stderr, "sigma-agent:", message) })
+}
+
+func installPackageWithLog(ctx context.Context, scope packageScope, source string, log func(string)) (*pkgmgr.Package, error) {
 	parsed, err := pkgmgr.ParseSource(source)
 	if err != nil {
 		return nil, err
 	}
 	installer := &pkgmgr.Installer{
 		Root: pkgmgr.PackagesRoot(scope.Dir),
-		Log:  func(message string) { fmt.Fprintln(os.Stderr, "sigma-agent:", message) },
+		Log:  log,
 	}
 	installed, err := installer.Install(ctx, parsed)
 	if err != nil {
@@ -89,6 +93,60 @@ func installPackage(ctx context.Context, scope packageScope, source string) (*pk
 		return nil, err
 	}
 	return installed, nil
+}
+
+func parseTUIInstallArgs(raw string) (source string, local bool, err error) {
+	value := strings.TrimSpace(raw)
+	if strings.HasPrefix(value, "--local ") {
+		local = true
+		value = strings.TrimSpace(strings.TrimPrefix(value, "--local "))
+	} else if strings.HasSuffix(value, " --local") {
+		local = true
+		value = strings.TrimSpace(strings.TrimSuffix(value, " --local"))
+	}
+	value = strings.Trim(value, "\"'")
+	if value == "" {
+		return "", false, fmt.Errorf("usage: /install [--local] <npm:package | git:repository | local-path> [--local]")
+	}
+	return value, local, nil
+}
+
+func installPackageForTUI(ctx context.Context, repo, source string, local bool) (string, error) {
+	scopes, err := packageScopes(repo)
+	if err != nil {
+		return "", err
+	}
+	scope := scopes[0]
+	if local {
+		if len(scopes) < 2 {
+			return "", fmt.Errorf("project scope requires an active repository")
+		}
+		scope = scopes[len(scopes)-1]
+	}
+	if !strings.HasPrefix(source, "npm:") && !strings.HasPrefix(source, "git:") && !strings.HasPrefix(source, "git@") && !strings.Contains(source, "://") && !filepath.IsAbs(source) {
+		source = filepath.Join(repo, source)
+	}
+	installed, err := installPackageWithLog(ctx, scope, source, nil)
+	if err != nil {
+		return "", err
+	}
+	var output strings.Builder
+	fmt.Fprintf(&output, "Installed %s%s into the %s scope (%s).", installed.Name, versionSuffix(installed.Version), scope.Name, installed.Root)
+	for _, resourceType := range pkgmgr.ResourceTypes {
+		paths, pathErr := installed.ResourcePaths(resourceType)
+		if pathErr != nil || len(paths) == 0 {
+			continue
+		}
+		fmt.Fprintf(&output, "\n  %s: %d", resourceType, len(paths))
+		for _, path := range paths {
+			relative, relErr := filepath.Rel(installed.Root, path)
+			if relErr != nil {
+				relative = path
+			}
+			fmt.Fprintf(&output, "\n    %s", filepath.ToSlash(relative))
+		}
+	}
+	return output.String(), nil
 }
 
 // removePackage drops a package from a scope registry. The installed files

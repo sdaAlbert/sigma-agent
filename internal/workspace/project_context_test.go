@@ -11,7 +11,7 @@ import (
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 )
 
-func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T) {
+func TestProjectGuidanceSearchesSkillMetadataAndReadsBodyOnDemand(t *testing.T) {
 	useIsolatedUserSkillDirectory(t)
 	root := t.TempDir()
 	skillDir := filepath.Join(root, ".agents", "skills", "go-issue-workflow")
@@ -28,8 +28,8 @@ func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T)
 	if strings.Contains(guidance.SystemPrompt("base"), "Inspect the failing path") {
 		t.Fatal("skill body was disclosed before the skill was selected")
 	}
-	if !strings.Contains(guidance.SystemPrompt("base"), "go-issue-workflow") || !strings.Contains(guidance.SystemPrompt("base"), "Use when fixing a Go issue.") {
-		t.Fatal("system prompt does not expose the skill name and description")
+	if strings.Contains(guidance.SystemPrompt("base"), "go-issue-workflow") || !strings.Contains(guidance.SystemPrompt("base"), "search_skills") {
+		t.Fatal("system prompt should expose Skill discovery without inlining the catalog")
 	}
 	projectPrompt := guidance.SystemPrompt("base")
 	if !strings.Contains(projectPrompt, "record_change_contract") || !strings.Contains(projectPrompt, "optional and never required before writing") {
@@ -46,6 +46,11 @@ func TestProjectGuidanceDisclosesSkillMetadataAndReadsBodyOnDemand(t *testing.T)
 	}
 	if _, err := tool.Handle(context.Background(), json.RawMessage(`{"name":"../scripts/helper"}`)); err == nil {
 		t.Fatal("unknown skill name should be rejected")
+	}
+	searchTool := guidance.SkillSearchTool()
+	searchResult, err := searchTool.Handle(context.Background(), json.RawMessage(`{"query":"Go issue"}`))
+	if err != nil || !strings.Contains(searchResult, "go-issue-workflow") || !strings.Contains(searchResult, "Use when fixing a Go issue.") {
+		t.Fatalf("Skill metadata search did not return the matching workflow: %s, %v", searchResult, err)
 	}
 }
 
@@ -123,12 +128,9 @@ func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	findTool(t, tools, "search_memory")
-	for _, name := range []string{"edit_file", "apply_patch"} {
+	for _, name := range []string{"edit_file"} {
 		tool := findTool(t, tools, name)
 		input := `{"path":".sigma-agent/MEMORY.md","old_text":"x","new_text":"y"}`
-		if name == "apply_patch" {
-			input = `{"path":".sigma-agent/MEMORY.md","content":"changed"}`
-		}
 		if _, err := tool.Handle(context.Background(), json.RawMessage(input)); err == nil {
 			t.Fatalf("%s should not modify project memory", name)
 		}
@@ -209,7 +211,7 @@ func TestWritingToolsRejectProjectGuidance(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{".agents/skills/go-issue-workflow/SKILL.md", ".sigma-agent/MEMORY.md"} {
-		for _, name := range []string{"edit_file", "apply_patch"} {
+		for _, name := range []string{"edit_file"} {
 			tool := findTool(t, tools, name)
 			args := map[string]any{"path": path, "old_text": "package", "new_text": "changed", "content": "changed"}
 			raw, _ := json.Marshal(args)

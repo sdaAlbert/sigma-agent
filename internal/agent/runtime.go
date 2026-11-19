@@ -24,6 +24,7 @@ type ToolHandler func(context.Context, json.RawMessage) (string, error)
 type toolTurnContextKey struct{}
 type toolCallIDContextKey struct{}
 type toolIdempotencyKeyContextKey struct{}
+type sessionRunContextKey struct{}
 
 // ToolCallID returns the model-supplied ID for the tool call currently being
 // authorized or executed.
@@ -39,11 +40,32 @@ func ToolIdempotencyKey(ctx context.Context) string {
 	return key
 }
 
+// SessionRunContext returns the parent agent-run context inside a tool handler.
+// Long-running child tasks can outlive their individual tool-call timeout while
+// still being cancelled when the parent run ends.
+func SessionRunContext(ctx context.Context) context.Context {
+	if sessionContext, ok := ctx.Value(sessionRunContextKey{}).(context.Context); ok {
+		return sessionContext
+	}
+	return ctx
+}
+
 type ToolRecoveryResult struct {
 	Status string // "completed", "failed", "not_found", or "unknown".
 	Output string
 	Error  string
 }
+
+type ToolReplayPolicy string
+
+const (
+	// ToolReplayNever is the zero-value policy. Interrupted calls stay unknown
+	// until a person or a tool-specific recovery adapter resolves them.
+	ToolReplayNever ToolReplayPolicy = "never_replay"
+	// ToolReplaySafe permits automatic recovery-time re-execution. Use only for
+	// side-effect-free operations or handlers whose target honors the stable key.
+	ToolReplaySafe ToolReplayPolicy = "safe_to_replay"
+)
 
 const (
 	ToolRecoveryCompleted = "completed"
@@ -74,8 +96,11 @@ func ToolTurn(ctx context.Context) (int, bool) {
 
 type Tool struct {
 	Definition        ToolDefinition
-	ExecutionMode     string // "parallel" for independent reads; "parallel_write" for path-locked mutations; otherwise serialized.
-	ModifiesWorkspace bool   // Successful calls force the normal test-and-diff review gate.
+	OnDemand          bool             // Hidden from model requests until search(scope=tools) activates it.
+	InternalOnly      bool             // Executed through an internal router, never exposed as a model tool.
+	ExecutionMode     string           // "parallel" for independent reads; "parallel_write" for path-locked mutations; otherwise serialized.
+	ModifiesWorkspace bool             // Successful calls force the normal test-and-diff review gate.
+	ReplayPolicy      ToolReplayPolicy // Defaults to never_replay; safe_to_replay is an explicit adapter guarantee.
 	Validate          func(json.RawMessage) error
 	Handle            ToolHandler
 	Recover           ToolRecoveryHandler
@@ -84,22 +109,27 @@ type Tool struct {
 
 // ToolOperation records the intent and outcome of one side-effect-capable call.
 type ToolOperation struct {
-	ToolCallID      string          `json:"tool_call_id"`
-	Turn            int             `json:"turn"`
-	Tool            string          `json:"tool"`
-	IdempotencyKey  string          `json:"idempotency_key"`
-	CompensationKey string          `json:"compensation_key,omitempty"`
-	Status          string          `json:"status"`
-	Args            json.RawMessage `json:"args,omitempty"`
-	Output          string          `json:"output,omitempty"`
-	Error           string          `json:"error,omitempty"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	ToolCallID      string           `json:"tool_call_id"`
+	Turn            int              `json:"turn"`
+	Tool            string           `json:"tool"`
+	IdempotencyKey  string           `json:"idempotency_key"`
+	CompensationKey string           `json:"compensation_key,omitempty"`
+	ReplayPolicy    ToolReplayPolicy `json:"replay_policy,omitempty"`
+	Status          string           `json:"status"`
+	Args            json.RawMessage  `json:"args,omitempty"`
+	Output          string           `json:"output,omitempty"`
+	Error           string           `json:"error,omitempty"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
-type ToolRegistry struct{ byName map[string]Tool }
+type ToolRegistry struct {
+	byName map[string]Tool
+	active map[string]bool
+	mu     sync.RWMutex
+}
 
 func NewToolRegistry(tools []Tool) (*ToolRegistry, error) {
-	registry := &ToolRegistry{byName: make(map[string]Tool, len(tools))}
+	registry := &ToolRegistry{byName: make(map[string]Tool, len(tools)), active: make(map[string]bool, len(tools))}
 	for _, tool := range tools {
 		if tool.Definition.Name == "" || tool.Handle == nil {
 			return nil, errors.New("every tool needs a name and handler")
@@ -107,7 +137,24 @@ func NewToolRegistry(tools []Tool) (*ToolRegistry, error) {
 		if _, exists := registry.byName[tool.Definition.Name]; exists {
 			return nil, fmt.Errorf("duplicate tool %q", tool.Definition.Name)
 		}
+		switch tool.Definition.Name {
+		case sessionSearchToolName, sessionHistorySearchToolName, toolSearchToolName:
+			return nil, fmt.Errorf("tool name %q is reserved for the session search router", tool.Definition.Name)
+		case "read_tool_output":
+			if !tool.InternalOnly {
+				return nil, errors.New("read_tool_output is reserved for the internal read-file artifact route")
+			}
+		}
+		if tool.ReplayPolicy == "" {
+			tool.ReplayPolicy = ToolReplayNever
+		}
+		if tool.ReplayPolicy != ToolReplayNever && tool.ReplayPolicy != ToolReplaySafe {
+			return nil, fmt.Errorf("tool %q has unsupported replay policy %q", tool.Definition.Name, tool.ReplayPolicy)
+		}
 		registry.byName[tool.Definition.Name] = tool
+		if !tool.OnDemand {
+			registry.active[tool.Definition.Name] = true
+		}
 	}
 	return registry, nil
 }
@@ -116,9 +163,13 @@ func (r *ToolRegistry) Definitions() []ToolDefinition {
 	if r == nil {
 		return nil
 	}
-	names := make([]string, 0, len(r.byName))
-	for name := range r.byName {
-		names = append(names, name)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.active))
+	for name, active := range r.active {
+		if active && !r.byName[name].InternalOnly {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	definitions := make([]ToolDefinition, 0, len(names))
@@ -126,6 +177,199 @@ func (r *ToolRegistry) Definitions() []ToolDefinition {
 		definitions = append(definitions, r.byName[name].Definition)
 	}
 	return definitions
+}
+
+// SearchScopes reports the indexes available through the single model-facing
+// search tool. Internal search handlers stay in the registry but have no
+// standalone model schema.
+func (r *ToolRegistry) SearchScopes() []string {
+	scopes := []string{"session_history"}
+	if r == nil {
+		return scopes
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if hasOnDemandTools(r.byName) {
+		scopes = append(scopes, "tools")
+	}
+	for name, tool := range r.byName {
+		if !tool.InternalOnly {
+			continue
+		}
+		switch name {
+		case "search_memory":
+			scopes = append(scopes, "memory")
+		case "search_skills":
+			scopes = append(scopes, "skills")
+		}
+	}
+	sort.Strings(scopes)
+	return scopes
+}
+
+const toolSearchToolName = "tool_search"
+
+func hasOnDemandTools(tools map[string]Tool) bool {
+	for _, tool := range tools {
+		if tool.OnDemand {
+			return true
+		}
+	}
+	return false
+}
+
+// ActivateRelevantTools exposes likely relevant catalog entries before the
+// first model request, so routine tasks do not pay an extra discovery turn.
+func (r *ToolRegistry) ActivateRelevantTools(query string) []string {
+	if r == nil {
+		return nil
+	}
+	return r.activateSearch(query, 4)
+}
+
+func (r *ToolRegistry) ActiveToolNames() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.active))
+	for name, active := range r.active {
+		tool, exists := r.byName[name]
+		if active && exists && tool.OnDemand {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (r *ToolRegistry) RestoreActiveToolNames(names []string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range names {
+		if tool, ok := r.byName[name]; ok && tool.OnDemand {
+			r.active[name] = true
+		}
+	}
+}
+
+func (r *ToolRegistry) isActive(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.active[name]
+}
+
+func (r *ToolRegistry) activateSearch(query string, limit int) []string {
+	queryTerms := toolSearchTerms(query)
+	if len(queryTerms) == 0 {
+		return nil
+	}
+	type match struct {
+		name  string
+		score int
+	}
+	var matches []match
+	r.mu.RLock()
+	for name, tool := range r.byName {
+		if !tool.OnDemand {
+			continue
+		}
+		text := strings.ToLower(name + " " + tool.Definition.Description)
+		terms := make(map[string]bool)
+		for _, term := range toolSearchTerms(text) {
+			terms[term] = true
+		}
+		score := 0
+		for _, term := range queryTerms {
+			if terms[term] {
+				score++
+			}
+		}
+		if score > 0 {
+			matches = append(matches, match{name: name, score: score})
+		}
+	}
+	r.mu.RUnlock()
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].name < matches[j].name
+	})
+	if limit <= 0 || limit > 8 {
+		limit = 4
+	}
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	r.mu.Lock()
+	activated := make([]string, 0, len(matches))
+	for _, candidate := range matches {
+		r.active[candidate.name] = true
+		activated = append(activated, candidate.name)
+	}
+	r.mu.Unlock()
+	return activated
+}
+
+func toolSearchTerms(value string) []string {
+	value = strings.ToLower(value)
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r >= 0x4e00 && r <= 0x9fff)
+	})
+	stop := map[string]bool{"the": true, "and": true, "for": true, "with": true, "from": true, "that": true, "this": true, "tool": true, "tools": true, "please": true, "use": true, "into": true, "我": true, "要": true, "帮": true, "请": true, "用": true, "的": true, "一下": true, "这个": true}
+	seen := make(map[string]bool)
+	terms := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len([]rune(field)) < 2 || stop[field] || seen[field] {
+			continue
+		}
+		seen[field] = true
+		terms = append(terms, field)
+	}
+	for phrase, aliases := range map[string][]string{
+		"文件": {"file", "read", "write"}, "代码": {"code", "search", "workspace"}, "搜索": {"search", "find"},
+		"查找": {"search", "find"}, "读取": {"read", "file"}, "写入": {"write", "file"}, "修改": {"edit", "patch", "file"},
+		"测试": {"test", "run", "command"}, "命令": {"command", "run", "shell"}, "运行": {"run", "command"},
+		"网页": {"web", "search"}, "网络": {"web", "api"}, "浏览器": {"browser", "web"}, "接口": {"api", "mcp"},
+		"技能": {"skill"}, "创建": {"create"},
+		"仓库": {"repository", "git", "github"}, "提交": {"git", "commit"}, "分支": {"git", "branch"},
+	} {
+		if strings.Contains(value, phrase) {
+			for _, alias := range aliases {
+				if !seen[alias] {
+					seen[alias] = true
+					terms = append(terms, alias)
+				}
+			}
+		}
+	}
+	return terms
+}
+
+func (r *ToolRegistry) searchTool() Tool {
+	return Tool{ReplayPolicy: ToolReplaySafe, Definition: ToolDefinition{
+		Name:        toolSearchToolName,
+		Description: "Search the available tool catalog and activate relevant tools. Tools activated by this call become available in the next model turn. Use when the current tool list lacks a capability.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Capability, service, or task to search for"},"limit":{"type":"integer","minimum":1,"maximum":8}},"required":["query"],"additionalProperties":false}`),
+	}, Handle: func(_ context.Context, raw json.RawMessage) (string, error) {
+		var input struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return "", err
+		}
+		activated := r.activateSearch(input.Query, input.Limit)
+		if len(activated) == 0 {
+			return "No matching tools found. Rephrase the capability or continue with the currently available tools.", nil
+		}
+		return "Available tools for the next model turn (matching tools are active): " + strings.Join(activated, ", "), nil
+	}}
 }
 
 type ContentBlock struct {
@@ -169,36 +413,39 @@ type Model interface {
 }
 
 type Event struct {
-	At                       time.Time       `json:"at"`
-	Type                     string          `json:"type"`
-	Session                  string          `json:"session_id,omitempty"`
-	Turn                     int             `json:"turn,omitempty"`
-	Tool                     string          `json:"tool,omitempty"`
-	ToolCallID               string          `json:"tool_call_id,omitempty"`
-	Duration                 int64           `json:"duration_ms,omitempty"`
-	Bytes                    int             `json:"bytes,omitempty"`
-	MessagesDropped          int             `json:"messages_dropped,omitempty"`
-	EstimatedTokensBefore    int             `json:"estimated_tokens_before,omitempty"`
-	EstimatedTokensAfter     int             `json:"estimated_tokens_after,omitempty"`
-	InputTokens              int             `json:"input_tokens,omitempty"`
-	OutputTokens             int             `json:"output_tokens,omitempty"`
-	CacheReadInputTokens     int             `json:"cache_read_input_tokens,omitempty"`
-	CacheMissInputTokens     int             `json:"cache_miss_input_tokens,omitempty"`
-	CacheCreationInputTokens int             `json:"cache_creation_input_tokens,omitempty"`
-	SummaryTokens            int             `json:"summary_tokens,omitempty"`
-	CompactionSummary        string          `json:"compaction_summary,omitempty"`
-	Error                    string          `json:"error,omitempty"`
-	Text                     string          `json:"text,omitempty"`
-	Args                     json.RawMessage `json:"args,omitempty"`
-	ResultSummary            string          `json:"result_summary,omitempty"`
-	ResultOutput             string          `json:"result_output,omitempty"`
-	Status                   string          `json:"status,omitempty"`
-	AuthorizationID          string          `json:"authorization_id,omitempty"`
-	RiskClass                string          `json:"risk_class,omitempty"`
-	Decision                 string          `json:"decision,omitempty"`
-	ApprovedBy               string          `json:"approved_by,omitempty"`
-	Target                   string          `json:"target,omitempty"`
-	RiskReason               string          `json:"risk_reason,omitempty"`
+	At                               time.Time       `json:"at"`
+	Type                             string          `json:"type"`
+	Session                          string          `json:"session_id,omitempty"`
+	Turn                             int             `json:"turn,omitempty"`
+	Tool                             string          `json:"tool,omitempty"`
+	ToolCallID                       string          `json:"tool_call_id,omitempty"`
+	Duration                         int64           `json:"duration_ms,omitempty"`
+	Bytes                            int             `json:"bytes,omitempty"`
+	MessagesDropped                  int             `json:"messages_dropped,omitempty"`
+	EstimatedTokensBefore            int             `json:"estimated_tokens_before,omitempty"`
+	EstimatedTokensAfter             int             `json:"estimated_tokens_after,omitempty"`
+	InputTokens                      int             `json:"input_tokens,omitempty"`
+	OutputTokens                     int             `json:"output_tokens,omitempty"`
+	CacheReadInputTokens             int             `json:"cache_read_input_tokens,omitempty"`
+	CacheMissInputTokens             int             `json:"cache_miss_input_tokens,omitempty"`
+	CacheCreationInputTokens         int             `json:"cache_creation_input_tokens,omitempty"`
+	SummaryTokens                    int             `json:"summary_tokens,omitempty"`
+	ContextCompactionThresholdTokens int             `json:"context_compaction_threshold_tokens,omitempty"`
+	ContextKeepRecentTokens          int             `json:"context_keep_recent_tokens,omitempty"`
+	ContextSummaryTokens             int             `json:"context_summary_tokens,omitempty"`
+	CompactionSummary                string          `json:"compaction_summary,omitempty"`
+	Error                            string          `json:"error,omitempty"`
+	Text                             string          `json:"text,omitempty"`
+	Args                             json.RawMessage `json:"args,omitempty"`
+	ResultSummary                    string          `json:"result_summary,omitempty"`
+	ResultOutput                     string          `json:"result_output,omitempty"`
+	Status                           string          `json:"status,omitempty"`
+	AuthorizationID                  string          `json:"authorization_id,omitempty"`
+	RiskClass                        string          `json:"risk_class,omitempty"`
+	Decision                         string          `json:"decision,omitempty"`
+	ApprovedBy                       string          `json:"approved_by,omitempty"`
+	Target                           string          `json:"target,omitempty"`
+	RiskReason                       string          `json:"risk_reason,omitempty"`
 }
 
 type EventSink func(Event)
@@ -251,6 +498,7 @@ type Session struct {
 	mu                 sync.Mutex
 	messages           []Message
 	compactionSummary  string
+	compactionEvidence string
 	compactionBoundary int
 	entries            []SessionEntry
 	head               string
@@ -270,6 +518,16 @@ func (s *Session) Messages() []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneMessages(s.messages)
+}
+
+// SetContextWindow applies new request-window settings between user turns.
+// Callers must not change the window while Prompt or Continue is running.
+func (s *Session) SetContextWindow(window WindowContextManager) {
+	s.Context = window
+	s.emit(Event{
+		Type: "context_settings_changed", ContextCompactionThresholdTokens: window.CompactionThresholdTokens,
+		ContextKeepRecentTokens: window.KeepRecentTokens, ContextSummaryTokens: window.SummaryTokens,
+	})
 }
 
 // Steer injects a message at the next safe turn boundary. It does not interrupt a provider stream.
@@ -334,6 +592,16 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	if s.Model == nil || s.Tools == nil {
 		return Result{}, errors.New("session requires a model and tool registry")
 	}
+	if !continuation {
+		var initialTask strings.Builder
+		for _, block := range prompt.Content {
+			if block.Type == "text" {
+				initialTask.WriteString(block.Text)
+				initialTask.WriteByte('\n')
+			}
+		}
+		s.Tools.ActivateRelevantTools(initialTask.String())
+	}
 	limits := s.Limits
 	if limits.MaxTurns <= 0 {
 		limits = DefaultLimits()
@@ -374,7 +642,10 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		}
 	}
 	if continuation && len(s.messages) > 0 && s.messages[len(s.messages)-1].Role == "assistant" {
-		if len(s.steering) > 0 {
+		if len(s.pendingTools) > 0 {
+			// A tool-result message must close the saved assistant tool call before
+			// queued user instructions can be appended to the transcript.
+		} else if len(s.steering) > 0 {
 			if _, err := s.consumeQueueLocked(&s.steering); err != nil {
 				s.mu.Unlock()
 				cancel()
@@ -389,7 +660,8 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		}
 	}
 	if continuation {
-		if len(s.messages) == 0 || s.messages[len(s.messages)-1].Role == "assistant" {
+		pendingToolExchange := len(s.pendingTools) > 0 && len(s.messages) > 0 && s.messages[len(s.messages)-1].Role == "assistant"
+		if !pendingToolExchange && (len(s.messages) == 0 || s.messages[len(s.messages)-1].Role == "assistant") {
 			s.mu.Unlock()
 			cancel()
 			return Result{}, errors.New("cannot continue: transcript must end with a user or tool result message")
@@ -423,6 +695,13 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	}()
 
 	s.emit(Event{Type: "agent_start"})
+	if continuation {
+		replayed, err := s.recoverPendingTools(ctx, limits)
+		result.ToolCalls += replayed
+		if err != nil {
+			return result, err
+		}
+	}
 	if _, err := s.consumeSteering(); err != nil {
 		return result, err
 	}
@@ -434,6 +713,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 	const maxSkillBootstrapRetries = 2
 	const maxEmptyStopReasonRetries = 2
 	for turn := 1; turn <= limits.MaxTurns; turn++ {
+		s.updateToolTokenBudget()
 		if err := ctx.Err(); err != nil {
 			s.emit(Event{Type: "agent_aborted", Turn: turn, Error: err.Error()})
 			return result, err
@@ -441,6 +721,23 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		result.Turns = turn
 		s.emit(Event{Type: "turn_start", Turn: turn})
 		s.emit(Event{Type: "model_request", Turn: turn})
+		if window, ok := s.Context.(WindowContextManager); ok {
+			compaction, estimatedBefore, compactErr := s.compactAutomatically(ctx, turn, window)
+			if compactErr != nil {
+				s.emit(Event{Type: "context_compaction_model_failed", Turn: turn, Tool: "automatic_context_compaction", Error: compactErr.Error()})
+			} else if compaction != nil {
+				result.ContextCompactions++
+				result.InputTokens += compaction.InputTokens
+				result.OutputTokens += compaction.OutputTokens
+				result.CacheReadInputTokens += compaction.CacheReadInputTokens
+				result.CacheMissInputTokens += compaction.CacheMissInputTokens
+				result.CacheCreationInputTokens += compaction.CacheCreationInputTokens
+				result.ContextCompactionInputTokens += compaction.InputTokens
+				result.ContextCompactionOutputTokens += compaction.OutputTokens
+				visibleSystem, visibleMessages := s.modelContext(s.System)
+				s.emit(Event{Type: "context_compacted_model", Turn: turn, Tool: "automatic_context_compaction", MessagesDropped: compaction.MessagesCompacted, EstimatedTokensBefore: estimatedBefore, EstimatedTokensAfter: estimateTextTokens(visibleSystem) + estimateMessageTokens(visibleMessages), InputTokens: compaction.InputTokens, OutputTokens: compaction.OutputTokens, CacheReadInputTokens: compaction.CacheReadInputTokens, CacheMissInputTokens: compaction.CacheMissInputTokens, CacheCreationInputTokens: compaction.CacheCreationInputTokens, SummaryTokens: compaction.SummaryTokens, CompactionSummary: truncateToolOutput(compaction.Summary, 2048)})
+			}
+		}
 		systemPrompt := s.System
 		systemPrompt, requestMessages := s.modelContext(systemPrompt)
 		if s.Context != nil {
@@ -456,6 +753,9 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		}
 		toolDefinitions := s.Tools.Definitions()
 		toolDefinitions = requiredSkillBootstrapTools(toolDefinitions, s.pendingRequiredSkills())
+		// Keep the transcript-recovery tool in a stable position in every request
+		// so compaction does not change the tool schema prefix seen by providers.
+		toolDefinitions = WithSessionSearchTool(toolDefinitions, s.Tools.SearchScopes())
 		var partialText string
 		var lastDraftCheckpoint time.Time
 		var draftCheckpointErr error
@@ -607,7 +907,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			if len(toolResults) > 0 {
 				var appendErr error
 				if compaction != nil {
-					appendErr = s.appendToolResultsAndCompact(toolResults, compaction.Summary)
+					appendErr = s.appendToolResultsAndCompact(toolResults, compaction.Summary, compaction.Evidence)
 				} else {
 					appendErr = s.appendToolResults(toolResults)
 				}
@@ -696,6 +996,60 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		return result, err
 	}
 	return result, nil
+}
+
+func (s *Session) updateToolTokenBudget() {
+	if s == nil || s.Context == nil || s.Tools == nil {
+		return
+	}
+	tokens := EstimateToolDefinitionTokens(WithSessionSearchTool(s.Tools.Definitions(), s.Tools.SearchScopes()))
+	switch context := s.Context.(type) {
+	case WindowContextManager:
+		context.ToolTokens = tokens
+		s.Context = context
+	case *WindowContextManager:
+		if context != nil {
+			context.ToolTokens = tokens
+		}
+	}
+}
+
+func (s *Session) resolveToolCall(name string, input json.RawMessage) (Tool, bool) {
+	switch name {
+	case sessionSearchToolName:
+		tool := s.sessionSearchTool()
+		tool.Definition.Name = sessionSearchPolicyToolName(input)
+		return tool, true
+	case sessionHistorySearchToolName:
+		return s.sessionHistorySearchTool(), true
+	case toolSearchToolName:
+		if s.Tools != nil {
+			return s.Tools.searchTool(), true
+		}
+	}
+	if s.Tools == nil {
+		return Tool{}, false
+	}
+	tool, ok := s.Tools.byName[name]
+	if ok && name == "read_file" && hasToolOutputArtifact(input) && s.ToolOutputs != nil {
+		inlineLimit := s.Limits.MaxToolResultBytes
+		if inlineLimit <= 0 {
+			inlineLimit = DefaultLimits().MaxToolResultBytes
+		}
+		tool.Handle = ReadToolOutputTool(s.ToolOutputs, inlineLimit).Handle
+	}
+	return tool, ok
+}
+
+func isSearchRouterCall(name string) bool {
+	return name == sessionSearchToolName || name == sessionHistorySearchToolName || name == toolSearchToolName
+}
+
+func hasToolOutputArtifact(input json.RawMessage) bool {
+	var args struct {
+		ArtifactID string `json:"artifact_id"`
+	}
+	return json.Unmarshal(input, &args) == nil && strings.TrimSpace(args.ArtifactID) != ""
 }
 
 func currentVerificationStatus(lastWriteOrder, lastTestOrder, lastDiffOrder int, lastTestPassed bool) string {
@@ -849,8 +1203,14 @@ func toolCallChangedWorkspaceOrEnvironment(call, result ContentBlock, registry *
 		return false
 	}
 	switch call.Name {
-	case "create_file", "edit_file", "apply_patch", "prepare_environment":
+	case "create_file", "edit_file", "prepare_environment":
 		return true
+	case "create_skill":
+		var input struct {
+			Scope string `json:"scope"`
+		}
+		_ = json.Unmarshal(call.Input, &input)
+		return input.Scope != "user"
 	}
 	if tool, ok := registry.byName[call.Name]; ok && tool.ModifiesWorkspace {
 		return true
@@ -875,11 +1235,11 @@ func toolIdempotencyKey(sessionID string, turn int, call ContentBlock) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (s *Session) beginToolOperation(turn int, call ContentBlock, key string) error {
+func (s *Session) beginToolOperation(turn int, call ContentBlock, key string, replayPolicy ToolReplayPolicy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous := cloneToolOperations(s.toolOperations)
-	operation := ToolOperation{ToolCallID: call.ID, Turn: turn, Tool: call.Name, IdempotencyKey: key, Status: "running", Args: append(json.RawMessage(nil), call.Input...), UpdatedAt: time.Now().UTC()}
+	operation := ToolOperation{ToolCallID: call.ID, Turn: turn, Tool: call.Name, IdempotencyKey: key, ReplayPolicy: replayPolicy, Status: "running", Args: append(json.RawMessage(nil), call.Input...), UpdatedAt: time.Now().UTC()}
 	index := s.toolOperationIndexLocked(call.ID, turn)
 	if index >= 0 {
 		s.toolOperations[index] = operation
@@ -919,6 +1279,145 @@ func (s *Session) toolOperationIndexLocked(callID string, turn int) int {
 		}
 	}
 	return -1
+}
+
+func (s *Session) existingToolOperation(callID string) (ToolOperation, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.toolOperations) - 1; i >= 0; i-- {
+		if s.toolOperations[i].ToolCallID == callID {
+			operation := s.toolOperations[i]
+			operation.Args = append(json.RawMessage(nil), operation.Args...)
+			return operation, true
+		}
+	}
+	return ToolOperation{}, false
+}
+
+func (s *Session) updateToolOperation(callID string, turn int, status, output, operationError string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.toolOperationIndexLocked(callID, turn)
+	if index < 0 {
+		return errors.New("tool operation intent is missing")
+	}
+	previous := s.toolOperations[index]
+	s.toolOperations[index].Status = status
+	s.toolOperations[index].Output = output
+	s.toolOperations[index].Error = operationError
+	s.toolOperations[index].UpdatedAt = time.Now().UTC()
+	if err := s.persistLocked(); err != nil {
+		s.toolOperations[index] = previous
+		return err
+	}
+	return nil
+}
+
+// recoverPendingTools closes the saved assistant tool exchange before a resumed
+// model request. Completed results are reused; interrupted calls are only replayed
+// when both the persisted intent and current tool registration explicitly allow it.
+func (s *Session) recoverPendingTools(ctx context.Context, limits Limits) (int, error) {
+	s.mu.Lock()
+	calls := append([]ContentBlock(nil), s.pendingTools...)
+	s.mu.Unlock()
+	if len(calls) == 0 {
+		return 0, nil
+	}
+
+	results := make([]ContentBlock, 0, len(calls))
+	replayed := 0
+	for _, call := range calls {
+		operation, exists := s.existingToolOperation(call.ID)
+		if !exists {
+			results = append(results, toolResult(call.ID, "Previous process stopped before a durable operation record was written. Its side-effect status is unknown; inspect the target before deciding whether to retry.", true))
+			continue
+		}
+		switch operation.Status {
+		case "completed":
+			results = append(results, toolResult(call.ID, operation.Output, false))
+			continue
+		case "failed":
+			results = append(results, toolResult(call.ID, operation.Output, true))
+			continue
+		}
+
+		tool, registered := s.resolveToolCall(operation.Tool, operation.Args)
+		if !registered {
+			results = append(results, toolResult(call.ID, "Tool is no longer registered; previous execution outcome is unknown. Inspect the target before retrying.", true))
+			continue
+		}
+		canReplay := operation.ReplayPolicy == ToolReplaySafe && tool.ReplayPolicy == ToolReplaySafe
+
+		if tool.Recover != nil {
+			recoveryCtx, cancel := context.WithTimeout(ctx, limits.ToolTimeout)
+			recoveryCtx = context.WithValue(recoveryCtx, toolTurnContextKey{}, operation.Turn)
+			recoveryCtx = context.WithValue(recoveryCtx, toolCallIDContextKey{}, operation.ToolCallID)
+			recoveryCtx = context.WithValue(recoveryCtx, toolIdempotencyKeyContextKey{}, operation.IdempotencyKey)
+			s.emit(Event{Type: "tool_recovery_start", Turn: operation.Turn, Tool: operation.Tool, ToolCallID: operation.ToolCallID, Status: "running"})
+			var recoveryErr error
+			if s.BeforeTool != nil {
+				recoveryErr = s.BeforeTool(recoveryCtx, tool, operation.Args)
+			}
+			var recovered ToolRecoveryResult
+			if recoveryErr == nil {
+				recovered, recoveryErr = tool.Recover(recoveryCtx, operation.Args, operation.IdempotencyKey)
+			}
+			cancel()
+			recoveryEvent := Event{Type: "tool_recovery_end", Turn: operation.Turn, Tool: operation.Tool, ToolCallID: operation.ToolCallID, Status: "unknown"}
+			if recoveryErr != nil {
+				recoveryEvent.Error = recoveryErr.Error()
+			} else {
+				recoveryEvent.Status = recovered.Status
+			}
+			s.emit(recoveryEvent)
+			if recoveryErr == nil {
+				switch recovered.Status {
+				case ToolRecoveryCompleted:
+					if err := s.updateToolOperation(call.ID, operation.Turn, "completed", recovered.Output, ""); err != nil {
+						return replayed, fmt.Errorf("persist recovered tool result: %w", err)
+					}
+					results = append(results, toolResult(call.ID, recovered.Output, false))
+					continue
+				case ToolRecoveryFailed:
+					if err := s.updateToolOperation(call.ID, operation.Turn, "failed", recovered.Error, recovered.Error); err != nil {
+						return replayed, fmt.Errorf("persist recovered tool failure: %w", err)
+					}
+					results = append(results, toolResult(call.ID, recovered.Error, true))
+					continue
+				case ToolRecoveryNotFound:
+					if err := s.updateToolOperation(call.ID, operation.Turn, "not_found", "", "External system reports no operation for this idempotency key."); err != nil {
+						return replayed, fmt.Errorf("persist missing external operation state: %w", err)
+					}
+				case ToolRecoveryUnknown:
+					// Fall through to safe replay or the default unknown outcome.
+				}
+			} else {
+				operation.Error = "Status lookup failed: " + recoveryErr.Error()
+			}
+		}
+
+		if !canReplay {
+			message := "Previous process stopped while this tool was running. Its side-effect status is unknown; inspect the target before deciding whether to retry."
+			if operation.Error != "" {
+				message += " " + operation.Error
+			}
+			if err := s.updateToolOperation(call.ID, operation.Turn, "unknown", "", message); err != nil {
+				return replayed, fmt.Errorf("persist unknown tool outcome: %w", err)
+			}
+			results = append(results, toolResult(call.ID, message, true))
+			continue
+		}
+
+		if err := s.updateToolOperation(call.ID, operation.Turn, "safe_to_replay", "", ""); err != nil {
+			return replayed, fmt.Errorf("persist safe-to-replay state: %w", err)
+		}
+		results = append(results, s.executeTool(ctx, operation.Turn, call, limits.ToolTimeout, limits.MaxToolResultBytes))
+		replayed++
+	}
+	if err := s.appendToolResults(results); err != nil {
+		return replayed, err
+	}
+	return replayed, nil
 }
 
 // CompensateToolOperation explicitly invokes a tool's configured compensator.
@@ -1011,7 +1510,7 @@ func (s *Session) CompensateToolOperation(ctx context.Context, callID string) er
 }
 
 func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
-	tool, exists := s.Tools.byName[call.Name]
+	tool, exists := s.resolveToolCall(call.Name, call.Input)
 	started := time.Now()
 	s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
 	if err := ctx.Err(); err != nil {
@@ -1020,6 +1519,16 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 	}
 	if !exists {
 		message := "unknown tool"
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		return toolResult(call.ID, message, true)
+	}
+	if !isSearchRouterCall(call.Name) && s.Tools != nil && !s.Tools.isActive(call.Name) {
+		message := "tool is available in the catalog but not active; use search with scope=tools to find and activate it first"
+		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		return toolResult(call.ID, message, true)
+	}
+	if tool.InternalOnly && call.Name != "read_tool_output" {
+		message := "this operation is available only through the matching search/read route"
 		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
@@ -1039,14 +1548,26 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 			return toolResult(call.ID, "invalid tool arguments: "+err.Error(), true)
 		}
 	}
+	if call.Name == "read_file" && hasToolOutputArtifact(call.Input) {
+		if s.ToolOutputs == nil {
+			message := "tool output artifact storage is unavailable"
+			s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+			return toolResult(call.ID, message, true)
+		}
+	}
 	key := toolIdempotencyKey(s.ID, turn, call)
-	if err := s.beginToolOperation(turn, call, key); err != nil {
+	previousOperation, hadPreviousOperation := s.existingToolOperation(call.ID)
+	if hadPreviousOperation && previousOperation.Turn == turn && previousOperation.IdempotencyKey != "" {
+		key = previousOperation.IdempotencyKey
+	}
+	if err := s.beginToolOperation(turn, call, key, tool.ReplayPolicy); err != nil {
 		message := "could not persist tool operation intent: " + err.Error()
 		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	toolCtx = context.WithValue(toolCtx, sessionRunContextKey{}, ctx)
 	toolCtx = context.WithValue(toolCtx, toolTurnContextKey{}, turn)
 	toolCtx = context.WithValue(toolCtx, toolCallIDContextKey{}, call.ID)
 	toolCtx = context.WithValue(toolCtx, toolIdempotencyKeyContextKey{}, key)
@@ -1069,8 +1590,9 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 	if callErr == nil && call.Name == "read_skill" {
 		var args struct {
 			Name string `json:"name"`
+			Path string `json:"path"`
 		}
-		if json.Unmarshal(call.Input, &args) == nil {
+		if json.Unmarshal(call.Input, &args) == nil && strings.TrimSpace(args.Path) == "" {
 			s.markSkillLoaded(args.Name)
 		}
 	}
@@ -1085,7 +1607,7 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 	}
 	outputBytes := len(output)
 	if len(output) > maxResultBytes || strings.Count(output, "\n") >= 2000 {
-		if s.ToolOutputs != nil && call.Name != "read_tool_output" {
+		if s.ToolOutputs != nil && call.Name != "read_tool_output" && !hasToolOutputArtifact(call.Input) {
 			artifact, saveErr := s.ToolOutputs.Save(output)
 			if saveErr == nil {
 				output = externalizedToolOutput(artifact, output, maxResultBytes)
@@ -1102,6 +1624,10 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 		if handlerInvoked {
 			// Handler errors may happen after an external side effect, so only
 			// the adapter's recovery hook can resolve whether it took effect.
+			operationStatus = "unknown"
+		} else if hadPreviousOperation && (previousOperation.Status == "running" || previousOperation.Status == "unknown" || previousOperation.Status == "not_found" || previousOperation.Status == "safe_to_replay") {
+			// A denied or cancelled recovery attempt says nothing about whether the
+			// previous process completed its side effect.
 			operationStatus = "unknown"
 		}
 	}
@@ -1128,6 +1654,9 @@ func requiredSkillBootstrapTools(definitions []ToolDefinition, pendingSkills []s
 
 func skillBootstrapCallAllowed(name string, input json.RawMessage, pendingSkills []string) bool {
 	if len(pendingSkills) == 0 {
+		return true
+	}
+	if name == sessionSearchToolName || name == toolSearchToolName {
 		return true
 	}
 	if name != "read_skill" {

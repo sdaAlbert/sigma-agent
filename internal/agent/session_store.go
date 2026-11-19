@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +34,7 @@ type SessionSnapshot struct {
 	System             string          `json:"system_prompt"`
 	Messages           []Message       `json:"messages"`
 	CompactionSummary  string          `json:"compaction_summary,omitempty"`
+	CompactionEvidence string          `json:"compaction_evidence,omitempty"`
 	CompactionBoundary int             `json:"compaction_boundary,omitempty"`
 	Steering           []Message       `json:"steering_queue,omitempty"`
 	FollowUps          []Message       `json:"follow_up_queue,omitempty"`
@@ -42,6 +42,7 @@ type SessionSnapshot struct {
 	ModelDraft         string          `json:"model_draft,omitempty"`
 	ModelDraftTurn     int             `json:"model_draft_turn,omitempty"`
 	ToolOperations     []ToolOperation `json:"tool_operations,omitempty"`
+	ActiveTools        []string        `json:"active_tools,omitempty"`
 	Entries            []SessionEntry  `json:"entries,omitempty"`
 	Head               string          `json:"head,omitempty"`
 	ModelID            string          `json:"model_id,omitempty"`
@@ -198,17 +199,18 @@ func (s *FileSessionStore) Save(snapshot SessionSnapshot) error {
 	return nil
 }
 
-// RestoreSession reconnects runtime dependencies to a persisted conversation. An
-// interrupted in-flight tool is converted into an explicit error result: the code
-// intentionally avoids replaying an operation that may already have changed state.
+// RestoreSession reconnects runtime dependencies to a persisted conversation.
+// Pending tool calls remain queued until Continue can apply the registered
+// recovery policy, authorization and tool timeout.
 func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, store SessionStore) (*Session, error) {
 	if (snapshot.Version != sessionSchemaVersion && snapshot.Version != previousSessionSchemaVersion && snapshot.Version != legacySessionSchemaVersion) || !ValidSessionID(snapshot.ID) {
 		return nil, errors.New("invalid session snapshot")
 	}
+	tools.RestoreActiveToolNames(snapshot.ActiveTools)
 	session := &Session{
 		ID: snapshot.ID, Name: snapshot.Name, System: snapshot.System, Model: model, Tools: tools, Store: store,
 		messages: cloneMessages(snapshot.Messages), steering: cloneMessages(snapshot.Steering),
-		compactionSummary: snapshot.CompactionSummary, compactionBoundary: snapshot.CompactionBoundary,
+		compactionSummary: snapshot.CompactionSummary, compactionEvidence: snapshot.CompactionEvidence, compactionBoundary: snapshot.CompactionBoundary,
 		followUps: cloneMessages(snapshot.FollowUps), pendingTools: append([]ContentBlock(nil), snapshot.PendingTools...),
 		modelDraft: snapshot.ModelDraft, modelDraftTurn: snapshot.ModelDraftTurn,
 		toolOperations: cloneToolOperations(snapshot.ToolOperations),
@@ -230,6 +232,7 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 	}
 	if session.compactionSummary == "" || session.compactionBoundary < 0 || session.compactionBoundary > len(session.messages) {
 		session.compactionSummary = ""
+		session.compactionEvidence = ""
 		session.compactionBoundary = 0
 	}
 	needsSave := snapshot.Version != sessionSchemaVersion
@@ -239,16 +242,6 @@ func RestoreSession(snapshot SessionSnapshot, model Model, tools *ToolRegistry, 
 		session.modelDraftTurn = 0
 		session.appendMessagesLocked([]Message{{Role: "assistant", Content: []ContentBlock{{Type: "text", Text: draft}}}})
 		session.appendMessagesLocked([]Message{userMessage("The previous model stream stopped before its response completed. Continue from the saved draft above, preserving its content and avoiding repetition. Provider-level token-position resume is unavailable for this checkpoint.")})
-		needsSave = true
-	}
-	if len(session.pendingTools) > 0 {
-		results := make([]ContentBlock, 0, len(session.pendingTools))
-		for _, call := range session.pendingTools {
-			result := session.recoverPendingTool(call, tools)
-			results = append(results, result)
-		}
-		session.appendMessagesLocked([]Message{{Role: "user", Content: results}})
-		session.pendingTools = nil
 		needsSave = true
 	}
 	if needsSave {
@@ -263,10 +256,11 @@ func (s *Session) snapshotLocked() SessionSnapshot {
 	return SessionSnapshot{
 		Version: sessionSchemaVersion, ID: s.ID, Name: s.Name, System: s.System,
 		Messages: cloneMessages(s.messages), Steering: cloneMessages(s.steering),
-		CompactionSummary: s.compactionSummary, CompactionBoundary: s.compactionBoundary,
+		CompactionSummary: s.compactionSummary, CompactionEvidence: s.compactionEvidence, CompactionBoundary: s.compactionBoundary,
 		FollowUps: cloneMessages(s.followUps), PendingTools: append([]ContentBlock(nil), s.pendingTools...),
 		ModelDraft: s.modelDraft, ModelDraftTurn: s.modelDraftTurn,
 		ToolOperations: cloneToolOperations(s.toolOperations),
+		ActiveTools:    s.Tools.ActiveToolNames(),
 		Entries:        cloneSessionEntries(s.entries), Head: s.head, ModelID: s.modelID,
 		UpdatedAt: time.Now().UTC(),
 	}
@@ -340,62 +334,6 @@ func cloneToolOperations(operations []ToolOperation) []ToolOperation {
 	return cloned
 }
 
-func (s *Session) recoverPendingTool(call ContentBlock, tools *ToolRegistry) ContentBlock {
-	operationIndex := -1
-	for i := len(s.toolOperations) - 1; i >= 0; i-- {
-		if s.toolOperations[i].ToolCallID == call.ID {
-			operationIndex = i
-			break
-		}
-	}
-	if operationIndex >= 0 {
-		operation := &s.toolOperations[operationIndex]
-		switch operation.Status {
-		case "completed":
-			return toolResult(call.ID, operation.Output, false)
-		case "failed":
-			return toolResult(call.ID, operation.Output, true)
-		}
-		if tools != nil {
-			tool, exists := tools.byName[operation.Tool]
-			if exists && tool.Recover != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				ctx = context.WithValue(ctx, toolCallIDContextKey{}, operation.ToolCallID)
-				ctx = context.WithValue(ctx, toolIdempotencyKeyContextKey{}, operation.IdempotencyKey)
-				recovered, err := tool.Recover(ctx, operation.Args, operation.IdempotencyKey)
-				if err == nil {
-					switch recovered.Status {
-					case "completed":
-						operation.Status, operation.Output, operation.Error = "completed", recovered.Output, ""
-						operation.UpdatedAt = time.Now().UTC()
-						return toolResult(call.ID, recovered.Output, false)
-					case "failed":
-						operation.Status, operation.Output, operation.Error = "failed", recovered.Error, recovered.Error
-						operation.UpdatedAt = time.Now().UTC()
-						return toolResult(call.ID, recovered.Error, true)
-					case "not_found":
-						operation.Status, operation.Error = "not_found", "External system reports no operation for this idempotency key. Retry only after reviewing the target state."
-						operation.UpdatedAt = time.Now().UTC()
-						return toolResult(call.ID, operation.Error, true)
-					}
-				}
-				if err != nil {
-					operation.Error = "Status lookup failed: " + err.Error()
-				}
-			}
-		}
-		operation.Status = "unknown"
-		operation.UpdatedAt = time.Now().UTC()
-		message := "Previous process stopped while this tool was running. Its side-effect status is unknown; inspect the target before deciding whether to retry."
-		if operation.Error != "" {
-			message += " " + operation.Error
-		}
-		return toolResult(call.ID, message, true)
-	}
-	return toolResult(call.ID, "Previous process stopped before a durable operation record was written. Its side-effect status is unknown; inspect the target before deciding whether to retry.", true)
-}
-
 func (s *Session) persistLocked() error {
 	if s.Store == nil {
 		return nil
@@ -461,11 +399,11 @@ func (s *Session) BranchFrom(entryID string) error {
 	}
 	previousMessages, previousHead := s.messages, s.head
 	previousSteering, previousFollowUps := s.steering, s.followUps
-	previousCompactionSummary, previousCompactionBoundary := s.compactionSummary, s.compactionBoundary
+	previousCompactionSummary, previousCompactionEvidence, previousCompactionBoundary := s.compactionSummary, s.compactionEvidence, s.compactionBoundary
 	previousModelID := s.modelID
 	s.messages, s.head = messages, entryID
 	s.steering, s.followUps = nil, nil
-	s.compactionSummary, s.compactionBoundary = "", 0
+	s.compactionSummary, s.compactionEvidence, s.compactionBoundary = "", "", 0
 	for current := entryID; current != ""; {
 		entry := s.entryByID(current)
 		if entry.Type == "model_change" {
@@ -477,7 +415,7 @@ func (s *Session) BranchFrom(entryID string) error {
 	if err := s.persistLocked(); err != nil {
 		s.messages, s.head = previousMessages, previousHead
 		s.steering, s.followUps = previousSteering, previousFollowUps
-		s.compactionSummary, s.compactionBoundary = previousCompactionSummary, previousCompactionBoundary
+		s.compactionSummary, s.compactionEvidence, s.compactionBoundary = previousCompactionSummary, previousCompactionEvidence, previousCompactionBoundary
 		s.modelID = previousModelID
 		return fmt.Errorf("persist session branch: %w", err)
 	}
@@ -561,6 +499,7 @@ func (s *Session) CloneAt(newID, entryID string) error {
 	snapshot.PendingTools = nil
 	if entryID != s.head {
 		snapshot.CompactionSummary = ""
+		snapshot.CompactionEvidence = ""
 		snapshot.CompactionBoundary = 0
 	}
 	for current := entryID; current != ""; {

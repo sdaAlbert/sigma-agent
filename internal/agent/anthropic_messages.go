@@ -277,7 +277,7 @@ func (m *AnthropicMessagesModel) Stream(ctx context.Context, system string, mess
 			message := strings.TrimSpace(string(responseBody))
 			quotaError := response.StatusCode == http.StatusPaymentRequired || isQuotaExhaustion(message)
 			if isPromptTooLong(response.StatusCode, message) && promptCompactions < maxPromptCompactions {
-				compacted, compactErr := compactRejectedPrompt(requestSystem, requestMessages)
+				compacted, compactErr := compactRejectedPrompt(requestSystem, requestMessages, tools)
 				if compactErr == nil && compacted.EstimatedAfter < estimateTextTokens(requestSystem)+estimateMessageTokens(requestMessages) {
 					requestSystem, requestMessages = compacted.System, compacted.Messages
 					promptCompactions++
@@ -337,8 +337,9 @@ func isPromptTooLong(status int, message string) bool {
 	return false
 }
 
-func compactRejectedPrompt(system string, messages []Message) (PreparedContext, error) {
-	currentTokens := estimateTextTokens(system) + estimateMessageTokens(messages)
+func compactRejectedPrompt(system string, messages []Message, tools []ToolDefinition) (PreparedContext, error) {
+	toolTokens := EstimateToolDefinitionTokens(tools)
+	currentTokens := estimateTextTokens(system) + estimateMessageTokens(messages) + toolTokens
 	if currentTokens <= 1 {
 		return PreparedContext{}, errors.New("request has no compactable conversation context")
 	}
@@ -350,7 +351,10 @@ func compactRejectedPrompt(system string, messages []Message) (PreparedContext, 
 	if summaryTokens > 800 {
 		summaryTokens = 800
 	}
-	return (WindowContextManager{MaxTokens: targetTokens, SummaryTokens: summaryTokens}).Prepare(system, messages)
+	return (WindowContextManager{
+		MaxTokens: targetTokens, SummaryTokens: summaryTokens,
+		ToolTokens: toolTokens,
+	}).Prepare(system, messages)
 }
 
 func isQuotaExhaustion(message string) bool {

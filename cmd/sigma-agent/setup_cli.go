@@ -11,17 +11,26 @@ import (
 )
 
 type interactiveSetupOptions struct {
-	workspace               string
-	sessionID               string
-	resumeID                string
-	allowNetwork            bool
-	deepSeekThinking        bool
-	modelReasoningEffort    string
-	projectInstructionsFile string
-	githubMCP               bool
-	initialPrompt           string
-	model                   modelconfig.Selection
-	modelExplicit           bool
+	workspace                  string
+	sessionID                  string
+	resumeID                   string
+	allowNetwork               bool
+	deepSeekThinking           bool
+	modelReasoningEffort       string
+	maxContextTokens           int
+	modelOutputTokens          int
+	contextCompactionTokens    int
+	contextKeepRecentTokens    int
+	summaryTokens              int
+	configuredCompactionTokens int
+	configuredKeepRecentTokens int
+	configuredSummaryTokens    int
+	contextSettingsExplicit    bool
+	projectInstructionsFile    string
+	githubMCP                  bool
+	initialPrompt              string
+	model                      modelconfig.Selection
+	modelExplicit              bool
 }
 
 func interactiveSetup(options interactiveSetupOptions) (interactiveSetupOptions, bool, *bufio.Scanner, error) {

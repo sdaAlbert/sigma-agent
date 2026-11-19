@@ -14,7 +14,7 @@ Sigma 是一个用 Go 编写的 Coding Agent，面向真实仓库里的代码任
 
 ## 开始使用
 
-需要 Docker Desktop 和一个受支持模型提供商的 API Key。Git 是可选的，安装后 Sigma 还能提供 Git diff 检查。从当前源码构建需要 Go 1.26+。
+需要一个受支持模型提供商的 API Key。Sigma 默认在主机上执行命令，不要求 Docker；将 `command_execution_mode` 设为 `docker` 后，项目命令才会放入 Linux 容器执行。Git 是可选的，可提供本地 Git 操作和 diff 检查。从当前源码构建需要 Go 1.26+。
 
 在 `go-runtime` 目录构建并安装 `sigma`：
 
@@ -61,11 +61,11 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 | 方面 | Pi | Sigma |
 | --- | --- | --- |
 | 主要目标 | 极简、可定制的 Coding Agent Harness | 面向仓库任务和后端集成的 Go 原生 Runtime |
-| 运行时 | TypeScript / Node.js | Go 可执行程序；Docker 执行仓库命令 |
+| 运行时 | TypeScript / Node.js | Go 可执行程序；默认在主机执行命令，也可选 Docker |
 | 交互方式 | 交互式 CLI、print/JSON、RPC 和 TypeScript SDK | 集成终端 TUI、单次 `--task`/JSONL 和本机 `--serve` 任务 API |
 | 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | 包内 Skills、MCP 工具，以及支持斜杠命令、Agent 工具、通知、确认和只读生命周期事件的 JavaScript 工作流扩展宿主 |
-| 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 文件工具直接修改所选仓库；仓库命令/测试工具在挂载该仓库的 Docker 容器中执行 |
-| 环境准备 | 使用本机工具链，或另行配置容器/沙箱 | Agent 可检查项目配置并准备缓存的 Docker 镜像，安装选择的工具链和系统依赖 |
+| 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 文件工具直接修改所选仓库；命令默认使用 Sigma 进程权限在主机执行，也可选 Docker 隔离 |
+| 环境准备 | 使用本机工具链，或另行配置容器/沙箱 | 默认使用主机已安装的工具；Docker 模式下 Agent 可检查项目配置并准备缓存镜像 |
 | 编码任务重点与证据 | Pi 是更广泛、成熟且可定制的 Coding Agent Harness，支持多种交互方式和扩展生态 | Sigma 专注仓库 Issue 修复，提供仓库感知的 Docker 环境准备和由 Runtime 管控的测试/diff 验证；Mini 实验的范围和证据边界见下文 |
 
 ### Runtime 执行流程
@@ -88,11 +88,11 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 
 ## Docker 命令隔离与环境准备
 
-Sigma 的 `run_command` 会在 Docker 中执行项目命令，而不是直接在宿主机运行。命令容器以可写方式挂载所选仓库到 `/workspace`，移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。容器默认不能访问外网；需要下载依赖时，可用 `/network on` 为当前会话启用网络。依赖包缓存会在多次命令间保留。
+默认情况下，Sigma 的 `run_command` 在主机上执行：Windows 使用 PowerShell，macOS/Linux 使用 Bash（不可用时退回 `sh`），命令继承当前用户的权限、环境、文件和网络访问能力。将 `command_execution_mode` 设为 `docker`，或启动时传 `--command-execution-mode docker`，即可改用 Docker。Docker 模式以可写方式挂载工作区到 `/workspace`，移除 Linux capabilities、启用 `no-new-privileges`，并限制为 2 GiB 内存、2 个 CPU、128 个进程和 5 分钟运行时间。容器网络默认关闭；可用 `/settings`、`allow_container_network` 或 `--allow-container-network` 开启。该网络设置仅适用于 Docker 模式。包缓存保存在所选工作区中，可供后续命令复用。
 
 运行命令前，Agent 可以检查仓库 Dockerfile、devcontainer、CI workflow、README 和依赖清单，再调用 `prepare_environment` 指定基础镜像与准备命令。Sigma 会构建并缓存派生镜像，供后续命令和恢复的 session 复用。Docker 构建上下文只有自动生成的 Dockerfile，不包含仓库源码；需要下载系统包或项目依赖时，应有意识地开启网络。
 
-这属于**命令执行隔离**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行。所选仓库会以读写方式挂入 Docker，因此 Agent 的文件修改和命令都会直接作用于该仓库。这个容器不是面向恶意多租户任务的强化安全边界。
+Docker 是可选的**命令执行隔离层**，不等于整个 Agent 都处在完整安全沙箱中。模型客户端和仓库文件工具仍由 Sigma 进程运行。Docker 模式把所选仓库以读写方式挂载进容器，其他主机目录不会挂入；host 模式的 shell 命令则继承当前用户的主机权限。默认情况下两种模式都操作所选目录；使用 `--isolated` 时，操作对象改为单独的 Git worktree。容器不是面向恶意多租户任务的强化安全边界。
 
 镜像复用、网络行为、资源限制和清理方式见[Docker 文档](docs/DOCKER.md)与[配置说明](docs/CONFIGURATION.md)。
 

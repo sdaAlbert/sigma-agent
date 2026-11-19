@@ -61,7 +61,7 @@ func restoreWorkspaceCheckpoint(ctx context.Context, checkpoints *workspaceagent
 
 func isCheckpointMutationTool(name string) bool {
 	switch name {
-	case "create_file", "edit_file", "apply_patch", "run_command":
+	case "create_file", "edit_file", "run_command":
 		return true
 	default:
 		return false

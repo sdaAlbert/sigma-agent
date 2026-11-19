@@ -105,12 +105,12 @@ func (p *workflowPolicy) observe(call, result ContentBlock, registry *ToolRegist
 			}
 		}
 		if workspaceChanged {
-			feedback = "Workflow status: this command changed the workspace, so earlier checks are stale. After the remaining edits, inspect git_diff and run a relevant test if the project provides one that can run; otherwise state why testing was not applicable or available."
+			feedback = "Workflow status: this command changed the workspace, so earlier checks are stale. After the remaining edits, inspect git with action=diff and run a relevant test if the project provides one that can run; otherwise state why testing was not applicable or available."
 		} else if commandInput.Purpose == "test" && commandInput.Action != "start" && status != "running" {
 			if p.lastTestPassed {
 				feedback = p.verificationFeedback()
 			} else {
-				feedback = "Test command failed. Inspect its first actionable failure and distinguish a code failure from an environment/tool failure. Make a targeted correction only when the failure is actionable; rerun only after that correction, then inspect git_diff. If the failure is environmental or the test is inapplicable, state that limitation and continue with diff review."
+				feedback = "Test command failed. Inspect its first actionable failure and distinguish a code failure from an environment/tool failure. Make a targeted correction only when the failure is actionable; rerun only after that correction, then inspect git with action=diff. If the failure is environmental or the test is inapplicable, state that limitation and continue with diff review."
 			}
 		} else if status == "failed" {
 			feedback = "Command failed. Use its exit code and output to identify the first concrete cause; distinguish repository/test failures from infrastructure failures before changing source. Choose one focused recovery action and change the command or workspace state before retrying."
@@ -123,16 +123,25 @@ func (p *workflowPolicy) observe(call, result ContentBlock, registry *ToolRegist
 	}
 	if tool, ok := registry.byName[call.Name]; ok && tool.ModifiesWorkspace {
 		p.lastWriteOrder = p.toolOrder
-		feedback = "Workflow status: this tool changed the workspace, so earlier checks are stale. After the remaining edits, inspect git_diff and run a relevant test if the project provides one that can run; otherwise state why testing was not applicable or available."
+		feedback = "Workflow status: this tool changed the workspace, so earlier checks are stale. After the remaining edits, inspect git with action=diff and run a relevant test if the project provides one that can run; otherwise state why testing was not applicable or available."
 		return feedback, ""
 	}
 	switch call.Name {
-	case "create_file", "edit_file", "apply_patch":
+	case "create_file", "edit_file":
 		p.lastWriteOrder = p.toolOrder
-		feedback = "Workflow status: the source changed, so earlier checks are stale. After the remaining edits, inspect git_diff and run a relevant test if the project provides one that can run; otherwise state why testing was not applicable or available."
-	case "git_diff":
+		feedback = "Workflow status: the source changed, so earlier checks are stale. After the remaining edits, inspect git with action=diff and run a relevant test if the project provides one that can run; otherwise state why testing was not applicable or available."
+	case "git_diff": // Support historical transcripts created before the tool-surface migration.
 		p.lastDiffOrder = p.toolOrder
 		feedback = p.verificationFeedback()
+	case "git":
+		var gitInput struct {
+			Action string `json:"action"`
+		}
+		_ = json.Unmarshal(call.Input, &gitInput)
+		if gitInput.Action == "diff" {
+			p.lastDiffOrder = p.toolOrder
+			feedback = p.verificationFeedback()
+		}
 	}
 	return feedback, ""
 }
@@ -141,11 +150,11 @@ func (p *workflowPolicy) verificationFeedback() string {
 	review := p.review()
 	switch {
 	case review.TestsNeeded && review.DiffNeeded:
-		return "Workflow status: the latest source changes still need a git_diff review. Run a relevant test if one exists and can run; otherwise explain why it was skipped."
+		return "Workflow status: the latest source changes still need git action=diff review. Run a relevant test if one exists and can run; otherwise explain why it was skipped."
 	case review.TestsNeeded:
 		return "Workflow status: the latest diff has been inspected. Run a relevant test if one exists and can run; otherwise explain why it was skipped."
 	case review.DiffNeeded:
-		return "Workflow status: the latest source changes still need a git_diff review. The relevant test has run; if it was unavailable or inapplicable, state why."
+		return "Workflow status: the latest source changes still need git action=diff review. The relevant test has run; if it was unavailable or inapplicable, state why."
 	case p.lastTestOrder > p.lastWriteOrder && p.lastDiffOrder > p.lastWriteOrder && p.lastTestPassed:
 		return "Workflow status: the latest source revision has a passing test and a reviewed diff. Compare both against the acceptance checklist; if you make another edit, repeat those checks."
 	default:
@@ -158,7 +167,7 @@ func (p *workflowPolicy) missingChecks() []string {
 		return nil
 	}
 	if p.lastDiffOrder <= p.lastWriteOrder {
-		return []string{"git_diff review"}
+		return []string{"git action=diff review"}
 	}
 	return nil
 }

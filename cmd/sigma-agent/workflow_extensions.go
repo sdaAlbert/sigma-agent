@@ -70,6 +70,7 @@ func workflowAgentTools(host *workflow.Host, existing []agent.Tool) []agent.Tool
 		used[tool.Name] = true
 		name := tool.Name
 		tools = append(tools, agent.Tool{
+			OnDemand: true,
 			Definition: agent.ToolDefinition{
 				Name: tool.Name, Description: tool.Description,
 				InputSchema: append(json.RawMessage(nil), tool.InputSchema...),

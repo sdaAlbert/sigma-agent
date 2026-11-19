@@ -16,6 +16,12 @@ sigma --list-packages
 sigma --uninstall npm:pi-web-access
 ```
 
+In the TUI, use `/install npm:pi-web-access` for user scope or
+`/install --local npm:pi-web-access` for the current project. Git sources use
+`git:<repository>` and local packages use a path, for example
+`/install ./my-package`. The TUI shows the installed resources and reloads the
+session so contributed Skills, MCP servers, and extensions are discovered.
+
 Supported sources:
 
 | Source | Example | Notes |

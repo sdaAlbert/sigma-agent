@@ -10,7 +10,8 @@ defaults. A file can contain only the settings that need changing.
   "max_tool_calls": 256,
   "max_repeated_failed_commands": 3,
   "max_context_tokens": 64000,
-  "context_compaction_threshold_tokens": 30000,
+  "context_compaction_threshold_tokens": 0,
+  "context_keep_recent_tokens": 20000,
   "summary_tokens": 800,
   "max_tool_result_bytes": 51200,
   "max_retrieval_query_bytes": 8192,
@@ -24,9 +25,7 @@ defaults. A file can contain only the settings that need changing.
   "skills_enabled": true,
   "web_search_enabled": false,
   "default_tool_permission": "allow",
-  "tool_permissions": {
-    "apply_patch": "deny"
-  },
+  "tool_permissions": {},
   "risk_permissions": {
     "read_only": "allow",
     "workspace_write": "ask",
@@ -63,10 +62,11 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `max_turns` | 128 | 1–512 | Assistant/model turns allowed in one run |
 | `max_tool_calls` | 256 | 1–4096 | Tool calls allowed in one run |
 | `max_repeated_failed_commands` | 0 (disabled) | 0–20 | Pause the run after this many identical failed `run_command` calls without a workspace change; benchmark configs can set 3 to limit command loops |
-| `max_context_tokens` | 64000 | 512–1000000 | Hard estimated context ceiling; proactive compaction normally uses the lower threshold below. If MiniMax explicitly rejects an oversized prompt, Sigma Agent compacts the request and retries up to three times |
-| `context_compaction_threshold_tokens` | `min(30000, max_context_tokens)` | 0–`max_context_tokens` | Proactively compact older conversation history when estimated input exceeds this soft threshold. The context manager permits up to 256 estimated tokens above the threshold, capped by `max_context_tokens`; if the newest complete turn still cannot fit the soft budget, it can retain that turn up to the hard context ceiling after shrinking tool output. `0` selects the automatic default. |
-| `summary_tokens` | 800 | 0 to less than compaction threshold | Maximum estimated size of summaries produced by automatic or model-requested context compaction |
-| `max_tool_result_bytes` | 51200 | 1024–4194304 | Inline limit for each tool result, matching Pi's 50 KiB output budget. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. Use `read_tool_output` with offsets to fetch long results in chunks. If artifact storage fails or reaches its cap, the inline result is truncated. |
+| `max_context_tokens` | 64000 | 512–1000000 | Hard estimated input ceiling, including an approximate tool-schema token estimate; proactive compaction normally uses the lower threshold below. Provider tokenization can differ. If MiniMax explicitly rejects an oversized prompt, Sigma Agent compacts the request and retries up to three times |
+| `context_compaction_threshold_tokens` | `max_context_tokens - model_output_tokens - 2048` (or the hard limit when that leaves under 512 tokens) | 0–`max_context_tokens` | Start automatic model-generated checkpoint compaction when estimated input exceeds this soft threshold. Keep `0` to follow changes to the hard context and output budget. A provider overflow still triggers the existing bounded recovery path. |
+| `context_keep_recent_tokens` | 20000 | 0–1000000 | Upper bound for the recent raw transcript suffix retained across automatic compaction. The actual suffix is reduced as needed to leave room for the system prompt, checkpoint, and evidence index; tool-call/result exchanges are kept together. Values above the available context are safe because the runtime clamps the retained suffix to the computed budget. |
+| `summary_tokens` | 800 | 0 to less than compaction threshold | Maximum estimated size of the model-generated task checkpoint. A separate deterministic evidence index is retained alongside it. |
+| `max_tool_result_bytes` | 51200 | 1024–4194304 | Inline limit for each tool result, matching Pi's 50 KiB output budget. Larger results are saved as session artifacts (32 MiB per artifact, 128 MiB per session) and replaced by a preview/reference. Use `read_file` with `artifact_id` and `byte_offset` to fetch long results in chunks. If artifact storage fails or reaches its cap, the inline result is truncated. |
 | `max_retrieval_query_bytes` | 8192 | 500–65536 | Maximum UTF-8 bytes accepted by `search_memory` (legacy setting name) |
 | `model_output_tokens` | 16384 | 256–65536 | Requested output limit for each model response; truncated responses get up to two continuation attempts |
 | `model_reasoning_effort` | `max` | `low`, `medium`, `high`, `xhigh`, `max` | For MiniMax M3.1 Flash, sends `output_config.effort`. M3.1 Flash always thinks; lower effort can reduce latency and reasoning tokens. For DeepSeek, this value is sent as `reasoning_effort` only when `deepseek_thinking_enabled` is true. |
@@ -74,11 +74,12 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `tool_timeout_ms` | 600000 | 1000–1800000 | Timeout for each tool execution, including Docker environment image preparation |
 | `model_timeout_ms` | 120000 | 1000–1800000 | HTTP timeout for a model request |
 | `max_retries` | 2 | 0–10 | Retries for retryable transport/server failures, including HTTP 429 and 529 |
-| `command_execution_image` | `debian:trixie-slim` | Linux Docker image reference | Fallback image used by `run_command` until the Agent prepares an environment or chooses an image for a command |
-| `command_filesystem_scope` | `unrestricted` | `unrestricted` or `workspace` | In `workspace` mode, rejects explicit absolute paths outside `/workspace` and parent-directory traversal before starting a command. This is a command admission guard, not a complete OS sandbox against programs that construct paths dynamically |
-| `allow_container_network` | `false` | boolean | Allow Docker command and environment-build steps to access the internet. Change the saved setting in the TUI `/settings` picker or set it in configuration; see [Docker command environments](DOCKER.md) |
+| `command_execution_mode` | `host` | `host` or `docker` | Where `run_command` executes. `host` uses PowerShell on Windows or Bash/sh on macOS/Linux with the current user's permissions, environment, filesystem, and network access. `docker` enables the isolated Linux command environment described in [Docker command environments](DOCKER.md). Set this in `config.json` or override it for an invocation with `--command-execution-mode docker` |
+| `command_execution_image` | `debian:trixie-slim` | Linux Docker image reference | Docker-mode fallback image used by `run_command` until the Agent prepares an environment or chooses an image for a command |
+| `command_filesystem_scope` | `unrestricted` | `unrestricted` or `workspace` | Docker mode only. In `workspace` mode, rejects explicit absolute paths outside `/workspace` and parent-directory traversal before starting a command. This is a command admission guard, not a complete OS sandbox against programs that construct paths dynamically |
+| `allow_container_network` | `false` | boolean | Docker mode only: allow command and environment-build containers to access the internet. It does not restrict networking in host mode, where commands inherit the host's network access. Change the saved Docker setting in the TUI `/settings` picker or set it in configuration; see [Docker command environments](DOCKER.md) |
 | `skills_enabled` | `true` | boolean | Discover project `.agents/skills/` and `.pi/skills/`, plus user `~/.agents/skills/` and `~/.pi/agent/skills/`. Set to `false` for a matched no-Skill evaluation; repository memory stays enabled |
-| `memory_enabled` | `true` | boolean | Enable repository memory context and `search_memory`. Set to `false` for a matched no-memory comparison; code browsing tools remain available |
+| `memory_enabled` | `true` | boolean | Enable repository memory context and the `search` scope `memory`. Set to `false` for a matched no-memory comparison; code browsing tools remain available |
 | `memory_auto_write` | `false` | boolean | After a successful non-interactive run, use one bounded model call to extract up to three durable repository facts into `.sigma-agent/MEMORY.md`, then refresh Qdrant when configured. Requires `memory_enabled`; generated notes and extra tokens are recorded in `run.json`. Set it to `true` to opt in. |
 | `project_instructions_file` | unset | absolute path after config resolution | Add an external Markdown instruction file to the session prompt without copying it into the target checkout. Maximum 16 KiB; `run.json` records its path and SHA-256. |
 | `memory_file` | unset | absolute path after config resolution | Use an external reviewed memory source instead of the selected repository's `.sigma-agent/MEMORY.md`; it is loaded into the active repository workspace and can receive automatic memory writes. Maximum 16 KiB. |
@@ -114,21 +115,42 @@ Approving a `network` request does not turn container networking on; configure
 
 In the TUI, `/trust` saves a per-folder decision under the user's Sigma configuration. Project-scoped JavaScript extensions and MCP servers stay disabled until that folder is trusted; use `/reload` after changing the decision. User-scoped integrations and project Skills remain available. Trust does not override `risk_permissions` or `tool_permissions`, enable container networking, or grant operating-system permissions.
 
-The model can also call `compact_context` by itself when it judges that older
-conversation or tool output can be summarized without losing information needed
-for the task. This makes one additional model request, is bounded by
-`summary_tokens`, and is lossy. The generated handoff summary and its message
-boundary are saved with the session, so resumed sessions keep using the compact
-context. The full conversation remains in the session history. Run metadata
-reports `context_compactions`, `context_compaction_input_tokens`, and
+When the soft context threshold is crossed, Sigma automatically asks the
+configured model for a task checkpoint, keeps a bounded recent raw suffix, and
+stores a deterministic evidence index with source message indices and tool-call
+IDs. The Go fallback only preserves exact transcript/tool anchors; it no longer
+tries to summarize agent reasoning by keywords. The original transcript remains
+in the session snapshot. After compaction, `search` with `scope=session_history` searches that
+full transcript lexically and returns source excerpts plus paired tool-call and
+tool-result records when available; this is on-demand recovery, not a guarantee
+that every semantic paraphrase will match. The model can also call
+`compact_context` for an earlier handoff. Each model-generated checkpoint makes
+an extra model request and is lossy. Run metadata reports `context_compactions`, `context_compaction_input_tokens`, and
 `context_compaction_output_tokens`. Run metadata and `model_usage` events also
 record input/output tokens plus cache-read and cache-creation input tokens when
 the provider returns them. For MiniMax's Anthropic-compatible API, `input_tokens`
 is normalized to include uncached, cache-read, and cache-creation input tokens;
 cache fields remain separate subsets for calculating reuse. The event log records
-`context_compacted_model` and any failed summary attempt. Automatic extractive
-compaction at `context_compaction_threshold_tokens` remains available as a
-separate safety mechanism.
+`context_compacted_model` and any failed summary attempt. If automatic summary
+generation fails, Sigma emits the failure and falls back to the deterministic
+evidence-index/window-preparation path so the agent can still make a request.
+In the TUI, `/settings` → `Context compression` adjusts the threshold, recent
+raw-history cap, and checkpoint budget in 4,096/200-token steps. These user
+preferences are saved in the per-user `sigma-agent/tui-settings.json` file and
+apply before the next user request in the current TUI session and to future
+sessions; an explicit `--context-tokens` or
+`--context-compaction-tokens` command-line option takes precedence.
+
+For provider prefix caches, Sigma keeps the stable system instructions first
+and appends checkpoint/evidence text after them. Tool definitions are sorted
+and the unified `search` router is included on every model request so compaction
+does not add/remove that schema. Turns before compaction append to the existing
+transcript, which may let a provider reuse the exact shared prefix. Compaction
+replaces the old transcript suffix with a new checkpoint and recent suffix, so
+cache reuse normally stops at the stable instruction prefix for that request;
+later turns can build a new reusable prefix until the next compaction. Cache
+reuse depends on the provider and should be checked against the returned cache
+hit/miss counters, not inferred from Sigma's local token estimates.
 
 For quick one-run adjustments, `--max-turns`, `--max-tool-calls`,
 `--context-tokens`, `--context-compaction-tokens`, and `--model-output-tokens`
@@ -282,7 +304,7 @@ replacement for `AGENTS.md`, README files, tests, or the code itself. The legacy
 `date | source | fact` format is still accepted as `kind: general`.
 
 `memory_enabled` defaults to `true`. During an ordinary task run, Sigma exposes
-`search_memory`; the Agent can retrieve relevant facts when useful. Local BM25
+`search` with `scope=memory`; the Agent can retrieve relevant facts when useful. Local BM25
 reads the Markdown directly, so no extra command or Qdrant service is needed
 for the local-only path. Set `memory_enabled` to `false` to disable memory for
 a run.
@@ -309,16 +331,33 @@ captured notes are model-generated and may be wrong; verify them before relying
 on them. Keep this setting disabled in controlled memory/no-memory evaluations
 so one task cannot alter another task's memory condition.
 
+Use `/memory` in either interactive terminal to inspect entries, their source,
+age, and stable content ID. To selectively forget one fact, run
+`/memory forget <id-prefix>` using at least eight hexadecimal characters shown
+beside that entry. The content ID does not depend on the entry's line number, so
+removing or appending other facts will not redirect a saved selection. Updates
+are file-locked across Sigma processes and written atomically. The Markdown file
+is authoritative; when vector memory is configured, forgetting also syncs the
+Qdrant collection and removes deleted facts. If that sync fails, the command
+reports it and lexical search still uses the updated Markdown. No entry is
+deleted just because it is old: entries over 180 days are flagged for review,
+and a human can keep, revise, or forget them. At the 16 KiB limit, automatic
+capture reports `capacity_reached` (or `saved_capacity_reached` if only some
+proposed facts fit) instead of silently appearing successful. Review or forget
+entries to make room.
+
 Agent tasks use the current working folder, so this file must be present there
-for `search_memory` to be registered. Vector results
+for the memory search scope to be registered. Vector results
 are validated against the current Markdown entry hashes before use.
 
 When vector settings are configured, run `sigma --index-memory` from the workspace to sync
 only repository memory facts into the `sigma_agent_memory` collection. Source files are
-not embedded or stored in Qdrant. The Agent keeps ordinary `search_code`,
-`list_files`, and `read_file` tools for current-code exploration.
+not embedded or stored in Qdrant. For current-code exploration, the Agent uses
+`run_command` with `rg --files` and `rg -n` when ripgrep is available; the tool
+description supplies host-specific shell fallbacks. `read_file` remains the
+bounded, workspace-relative interface for opening source files.
 
-The `search_memory` tool retrieves a small, repository-filtered set of relevant
+`search` with `scope=memory` retrieves a small, repository-filtered set of relevant
 entries. With embeddings and Qdrant available, it fuses BM25 and semantic vector
 ranks using reciprocal-rank fusion (RRF); without them, it uses local BM25.
 Changed or removed Markdown entries are synchronized on the next index run;

@@ -43,15 +43,16 @@ type investigationManager struct {
 // read-only repository tools. The parent receives a bounded final report.
 func (w workspace) delegateInvestigationTool(model agent.Model, parentTools []agent.Tool, toolOutputs agent.ToolOutputStore) agent.Tool {
 	allowed := map[string]bool{
-		"list_files": true, "search_code": true,
-		"read_file": true, "git_diff": true, "search_memory": true,
+		"read_file": true, "git": true, "search_memory": true,
 	}
 	childTools := make([]agent.Tool, 0, len(allowed))
 	for _, candidate := range parentTools {
-		if allowed[candidate.Definition.Name] {
+		if allowed[candidate.Definition.Name] && candidate.Definition.Name != "git" {
 			childTools = append(childTools, candidate)
 		}
 	}
+	childTools = append(childTools, w.workspaceSearchTool())
+	childTools = append(childTools, w.readOnlyGitTool())
 	if toolOutputs != nil {
 		childTools = append(childTools, agent.ReadToolOutputTool(toolOutputs, 8*1024))
 	}
@@ -60,7 +61,7 @@ func (w workspace) delegateInvestigationTool(model agent.Model, parentTools []ag
 		"delegate_investigation",
 		"Start or manage a child task. Use action=start with mode=investigate for read-only work or mode=implement to let the child edit in its own temporary Git worktree. Use status, wait, steer, or cancel with the returned task_id. Review an implement child's diff before applying it; it cannot push or create a PR.",
 		`{"type":"object","properties":{"action":{"type":"string","enum":["start","status","wait","steer","cancel"]},"task":{"type":"string","minLength":8,"maxLength":4000},"mode":{"type":"string","enum":["investigate","implement"]},"task_id":{"type":"string"},"message":{"type":"string","minLength":1,"maxLength":4000},"wait_ms":{"type":"integer","minimum":0,"maximum":45000}},"required":["action"],"additionalProperties":false}`,
-		"parallel",
+		"serialized",
 		func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var args struct {
 				Action  string `json:"action"`
@@ -75,7 +76,7 @@ func (w workspace) delegateInvestigationTool(model agent.Model, parentTools []ag
 			}
 			switch args.Action {
 			case "start":
-				return manager.start(ctx, model, childTools, toolOutputs, strings.TrimSpace(args.Task), args.Mode, w.root)
+				return manager.start(agent.SessionRunContext(ctx), model, childTools, toolOutputs, strings.TrimSpace(args.Task), args.Mode, w.root)
 			case "status":
 				return manager.status(args.TaskID)
 			case "wait":
@@ -123,7 +124,13 @@ func (m *investigationManager) start(parent context.Context, model agent.Model, 
 	}
 	ctx, cancel := context.WithCancel(parent)
 	m.mu.Lock()
-	if len(m.tasks) >= 8 {
+	running := 0
+	for _, existing := range m.tasks {
+		if existing.Status == "running" {
+			running++
+		}
+	}
+	if running >= 8 {
 		m.mu.Unlock()
 		cancel()
 		if workspacePath != "" {
@@ -151,12 +158,15 @@ func (m *investigationManager) start(parent context.Context, model agent.Model, 
 	go func() {
 		result, runErr := child.Prompt(ctx, task)
 		diff := ""
+		var diffErr error
 		keepWorktree := false
 		if workspacePath != "" {
-			if output, diffErr := WorkspaceDiff(workspacePath, baseCommit); diffErr == nil {
+			if output, err := WorkspaceDiff(workspacePath, baseCommit); err == nil {
 				diff = capUTF8(output, 24*1024)
+			} else {
+				diffErr = err
 			}
-			keepWorktree = strings.TrimSpace(diff) != "" || ctx.Err() != nil
+			keepWorktree = diffErr != nil || strings.TrimSpace(diff) != "" || ctx.Err() != nil
 			if !keepWorktree {
 				_, _ = gitWorktree(repository, "worktree", "remove", "--force", workspacePath)
 				_ = os.RemoveAll(workspacePath)
@@ -171,12 +181,17 @@ func (m *investigationManager) start(parent context.Context, model agent.Model, 
 		entry.Report = capUTF8(result.Text, maxInvestigationReportBytes)
 		entry.Turns, entry.Calls = result.Turns, result.ToolCalls
 		entry.Input, entry.Output = result.InputTokens, result.OutputTokens
+		if entry.Error == "" && diffErr != nil {
+			entry.Error = "could not inspect child worktree diff; worktree preserved at " + workspacePath + ": " + diffErr.Error()
+		}
 		if entry.Status == "cancelled" {
 			entry.cancel()
 			return
 		}
 		if runErr != nil {
 			entry.Error = runErr.Error()
+			entry.Status = "failed"
+		} else if diffErr != nil {
 			entry.Status = "failed"
 		} else {
 			entry.Status = "completed"
@@ -195,7 +210,23 @@ func createChildWorktree(repository string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	workspacePath, err := os.MkdirTemp("", "sigma-agent-child-*")
+	worktreeRoot := filepath.Join(repository, ".sigma-agent", "child-worktrees")
+	for _, directory := range []string{filepath.Join(repository, ".sigma-agent"), worktreeRoot} {
+		info, statErr := os.Lstat(directory)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return "", "", fmt.Errorf("create child worktree directory: %w", err)
+			}
+			info, statErr = os.Lstat(directory)
+		}
+		if statErr != nil {
+			return "", "", fmt.Errorf("inspect child worktree directory: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", "", errors.New("child worktree path contains a symlink or non-directory component")
+		}
+	}
+	workspacePath, err := os.MkdirTemp(worktreeRoot, "sigma-agent-child-*")
 	if err != nil {
 		return "", "", err
 	}
@@ -213,13 +244,15 @@ func childWorkspaceTools(root, baseCommit string, outputs agent.ToolOutputStore)
 	if err != nil {
 		return nil, err
 	}
-	allowed := map[string]bool{"list_files": true, "search_code": true, "read_file": true, "create_file": true, "edit_file": true, "apply_patch": true, "git_diff": true}
+	allowed := map[string]bool{"read_file": true, "create_file": true, "edit_file": true, "git": true}
 	filtered := make([]agent.Tool, 0, len(allowed))
 	for _, candidate := range tools {
-		if allowed[candidate.Definition.Name] {
+		if allowed[candidate.Definition.Name] && candidate.Definition.Name != "git" {
 			filtered = append(filtered, candidate)
 		}
 	}
+	filtered = append(filtered, (workspace{root: root, diffBase: baseCommit}).workspaceSearchTool())
+	filtered = append(filtered, (workspace{root: root, diffBase: baseCommit}).readOnlyGitTool())
 	return filtered, nil
 }
 

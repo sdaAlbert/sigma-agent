@@ -182,26 +182,39 @@ func ReadToolOutputTool(store ToolOutputStore, inlineLimit int) Tool {
 	if readLimit < 256 {
 		readLimit = 256
 	}
-	return Tool{Definition: ToolDefinition{
+	return Tool{InternalOnly: true, ReplayPolicy: ToolReplaySafe, Definition: ToolDefinition{
 		Name:        "read_tool_output",
 		Description: fmt.Sprintf("Read a bounded byte range from a large tool result saved as a session artifact. Use the artifact_id returned in the tool result; continue from next_offset to read later sections. Each content chunk is at most %d bytes.", readLimit),
 		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"artifact_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1,"maximum":%d}},"required":["artifact_id"],"additionalProperties":false}`, readLimit)),
 	}, ExecutionMode: "parallel", Handle: func(_ context.Context, raw json.RawMessage) (string, error) {
 		var args struct {
 			ArtifactID string `json:"artifact_id"`
-			Offset     int64  `json:"offset"`
+			Offset     *int64 `json:"offset"`
+			ByteOffset *int64 `json:"byte_offset"`
 			MaxBytes   int    `json:"max_bytes"`
 		}
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("decode tool output read arguments: %w", err)
 		}
-		if args.Offset < 0 {
+		if args.Offset != nil && args.ByteOffset != nil {
+			return "", errors.New("provide only one of offset or byte_offset")
+		}
+		var offset int64
+		if args.ByteOffset != nil {
+			offset = *args.ByteOffset
+		} else if args.Offset != nil {
+			offset = *args.Offset
+		}
+		if offset < 0 {
 			return "", errors.New("offset must not be negative")
 		}
 		if args.MaxBytes == 0 {
 			args.MaxBytes = readLimit
 		}
-		content, nextOffset, size, err := store.ReadRange(args.ArtifactID, args.Offset, args.MaxBytes)
+		if args.MaxBytes < 1 || args.MaxBytes > readLimit {
+			return "", fmt.Errorf("max_bytes must be between 1 and %d for this session", readLimit)
+		}
+		content, nextOffset, size, err := store.ReadRange(args.ArtifactID, offset, args.MaxBytes)
 		if err != nil {
 			return "", err
 		}
@@ -210,7 +223,7 @@ func ReadToolOutputTool(store ToolOutputStore, inlineLimit int) Tool {
 			content = limited
 			nextOffset = startOffset + int64(len(content))
 		}
-		return fmt.Sprintf("artifact_id=%s | requested_offset=%d | next_offset=%d | size_bytes=%d\n%s", args.ArtifactID, args.Offset, nextOffset, size, content), nil
+		return fmt.Sprintf("artifact_id=%s | requested_offset=%d | next_offset=%d | size_bytes=%d\n%s", args.ArtifactID, offset, nextOffset, size, content), nil
 	}}
 }
 
@@ -250,7 +263,7 @@ func externalizedToolOutput(ref ToolOutputRef, output string, inlineLimit int) s
 	if tail != "" {
 		preview += "\n[… middle stored in artifact …]\n" + tail
 	}
-	return fmt.Sprintf("Large tool result saved to session artifact. artifact_id=%s | size_bytes=%d | sha256=%s. Use read_tool_output with this artifact_id and offset to inspect the complete result.\n--- preview ---\n%s", ref.ID, ref.SizeBytes, ref.SHA256, preview)
+	return fmt.Sprintf("Large tool result saved to session artifact. artifact_id=%s | size_bytes=%d | sha256=%s. Use read_file with this artifact_id and byte_offset to inspect the complete result.\n--- preview ---\n%s", ref.ID, ref.SizeBytes, ref.SHA256, preview)
 }
 
 func limitPreviewLines(content string, maxLines int, keepHead bool) string {

@@ -14,7 +14,7 @@ Sigma is a Go coding agent for real repository work. It connects language models
 
 ## Get started
 
-Requirements: Docker Desktop and an API key for a supported model provider. Git is optional and enables Git diff review. Building from this checkout requires Go 1.26+.
+Requirements: an API key for a supported model provider. Sigma defaults to host command execution and does not require Docker. Set `command_execution_mode` to `docker` when you want project commands isolated in Linux containers. Git is optional and enables local Git operations and diff review. Building from this checkout requires Go 1.26+.
 
 From the `go-runtime` directory, build and install `sigma`:
 
@@ -64,11 +64,11 @@ Sigma takes architectural inspiration from [Pi](https://github.com/earendil-work
 | Area | Pi | Sigma |
 | --- | --- | --- |
 | Main goal | Minimal, customizable coding-agent harness | Go-native runtime for repository tasks and backend integrations |
-| Runtime | TypeScript / Node.js | Go executable; Docker runs repository commands |
+| Runtime | TypeScript / Node.js | Go executable; commands run on the host by default, with optional Docker execution |
 | Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Integrated terminal TUI, one-shot `--task`/JSONL, and loopback `--serve` task API |
 | Customization | Extensions, Skills, prompt templates, themes, and shareable packages; see the [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) for customization and interaction modes | Package Skills, MCP tools, and a JavaScript workflow host for slash commands, Agent tools, notifications, confirmations, and read-only lifecycle events |
-| Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | File tools edit the selected checkout directly; repository commands/tests run in Docker with that checkout mounted writable |
-| Environment preparation | Integrate the local toolchain or configure a container/sandbox separately | Agent can inspect repository setup files and prepare a cached Docker image with a selected toolchain and system packages |
+| Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | File tools edit the selected checkout directly; host commands use the Sigma process permissions, or optional Docker mode runs commands with the checkout mounted writable |
+| Environment preparation | Integrate the local toolchain or configure a container/sandbox separately | Use the host's installed tools by default; in Docker mode, Agent can inspect repository setup files and prepare a cached image with a selected toolchain and system packages |
 | Coding focus and evidence | A broader, mature, customizable coding-agent harness with multiple interaction modes and an extension ecosystem | Sigma focuses on repository issue repair through repository-aware Docker setup and runtime-gated test/diff verification. The Mini study's scope and evidence limits are described below. |
 
 ### Runtime outline
@@ -91,11 +91,11 @@ The model boundary supports Anthropic Messages and OpenAI Chat Completions-compa
 
 ## Docker execution sandbox and environment preparation
 
-In Sigma's repository-task workflow, `run_command` executes project commands in Docker rather than directly on the host. The command container mounts the selected repository as `/workspace` with write access, drops Linux capabilities, enables `no-new-privileges`, and applies limits of 2 GiB RAM, 2 CPUs, 128 processes, and a five-minute command timeout. External network access is blocked by default; `/network on` enables it for the session. Package caches persist between commands.
+By default, `run_command` runs on the host in PowerShell on Windows or Bash/sh on macOS/Linux. It inherits the user's permissions, environment, filesystem access, and network access. To use Docker instead, set `command_execution_mode` to `docker` in `config.json`, or pass `--command-execution-mode docker`. Docker mode mounts the selected workspace read/write at `/workspace`, drops Linux capabilities, enables `no-new-privileges`, and applies limits of 2 GiB RAM, 2 CPUs, 128 processes, and a five-minute command timeout. Container networking is disabled by default; enable it with `/settings`, `allow_container_network`, or `--allow-container-network`. The network setting only applies to Docker mode. Package caches persist in the selected workspace between commands.
 
 Before running project commands, the Agent can inspect the repository's Dockerfile, devcontainer, CI workflow, README, and dependency manifests. It can then call `prepare_environment` with a base image and setup command. Sigma builds and caches a derived image for later commands and session resumes. The Docker build context contains only the generated Dockerfile, not repository source. Setup commands that download packages require network access to be enabled deliberately.
 
-This is a **command-execution isolation boundary**, not a complete sandbox for the whole Agent. The model client and repository file tools run in the Sigma process. The selected repository is mounted read/write into Docker, so both file tools and commands can change it immediately. The container mount does not expose other host directories; this is not a hardened boundary for hostile multi-tenant workloads.
+Docker is an optional **command-execution isolation layer**, not a complete sandbox for the whole Agent. The model client and repository file tools run in the Sigma process. In Docker mode, the selected repository is mounted read/write, so both file tools and commands can change it immediately; other host directories are not mounted. In host mode, shell commands run with the current user's normal access. By default, both modes use the selected checkout; `--isolated` selects a separate Git worktree for the session. Neither mode is a hardened boundary for hostile multi-tenant workloads.
 
 For image reuse, network behavior, limits, and cleanup, see the [Docker guide](docs/DOCKER.md) and [configuration reference](docs/CONFIGURATION.md).
 

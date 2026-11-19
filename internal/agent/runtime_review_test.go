@@ -30,16 +30,15 @@ func TestRequiredSkillBootstrapKeepsToolSchemaStable(t *testing.T) {
 	definitions := []ToolDefinition{
 		{Name: "read_skill"},
 		{Name: "search_memory"},
-		{Name: "list_files"},
-		{Name: "search_code"},
+		{Name: "workspace_search"},
 		{Name: "run_command"},
 	}
 	got := requiredSkillBootstrapTools(definitions, []string{"python-issue-workflow"})
-	if !reflect.DeepEqual(toolNames(got), []string{"read_skill", "search_memory", "list_files", "search_code", "run_command"}) {
+	if !reflect.DeepEqual(toolNames(got), []string{"read_skill", "search_memory", "workspace_search", "run_command"}) {
 		t.Fatalf("bootstrap tools = %v, want the stable full tool schema", toolNames(got))
 	}
 	got = requiredSkillBootstrapTools(definitions, nil)
-	if !reflect.DeepEqual(toolNames(got), []string{"read_skill", "search_memory", "list_files", "search_code", "run_command"}) {
+	if !reflect.DeepEqual(toolNames(got), []string{"read_skill", "search_memory", "workspace_search", "run_command"}) {
 		t.Fatalf("tools without a pending Skill = %v, want all tools", toolNames(got))
 	}
 }
@@ -52,7 +51,7 @@ func TestRequiredSkillGateBlocksWorkUntilMatchingSkillIsRead(t *testing.T) {
 	if skillBootstrapCallAllowed("read_skill", json.RawMessage(`{"name":"other"}`), pending) {
 		t.Fatal("unmatched read_skill should be blocked")
 	}
-	for _, name := range []string{"read_file", "search_code", "run_command", "search_memory"} {
+	for _, name := range []string{"read_file", "workspace_search", "run_command", "search_memory"} {
 		if skillBootstrapCallAllowed(name, json.RawMessage(`{}`), pending) {
 			t.Errorf("%s should be blocked until the required Skill is loaded", name)
 		}
