@@ -62,6 +62,10 @@ func ClassifyToolAuthorization(name string, input json.RawMessage, networkEnable
 	case "create_file", "edit_file", "create_skill", "record_change_contract":
 		request.RiskClass = RiskWorkspaceWrite
 		request.Reason = "Writes repository files or task-local change state."
+	case "remember_memory":
+		request.RiskClass = RiskWorkspaceWrite
+		request.Target = ".sigma/MEMORY.md"
+		request.Reason = "Writes a durable fact to project memory for future Sigma sessions."
 	case "prepare_environment":
 		request.RiskClass = RiskExternalService
 		request.Reason = "Builds or selects a Docker image and changes the local Docker image/cache state."

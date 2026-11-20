@@ -275,7 +275,7 @@ func (v *vectorConfig) searchMemoryForRepo(ctx context.Context, root, repoID, qu
 		return nil, err
 	}
 	if len(entries) == 0 {
-		return nil, errors.New("no entries found in .sigma-agent/MEMORY.md")
+		return nil, errors.New("no entries found in .sigma/MEMORY.md")
 	}
 	queryVectors, err := v.embeddings(ctx, []string{query})
 	if err != nil {

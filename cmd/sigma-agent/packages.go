@@ -42,7 +42,7 @@ func projectScope(repo string) (packageScope, error) {
 	if err != nil {
 		return packageScope{}, err
 	}
-	return packageScope{Name: "project", Dir: filepath.Join(absolute, ".sigma-agent")}, nil
+	return packageScope{Name: "project", Dir: filepath.Join(absolute, ".sigma")}, nil
 }
 
 // packageScopes returns the scopes a package can be installed into, in
@@ -144,6 +144,12 @@ func installPackageForTUI(ctx context.Context, repo, source string, local bool) 
 				relative = path
 			}
 			fmt.Fprintf(&output, "\n    %s", filepath.ToSlash(relative))
+		}
+	}
+	if len(installed.Manifest.CommandTools) > 0 {
+		fmt.Fprintf(&output, "\n  agent tools: %d", len(installed.Manifest.CommandTools))
+		for _, tool := range installed.Manifest.CommandTools {
+			fmt.Fprintf(&output, "\n    %s", tool.Name)
 		}
 	}
 	return output.String(), nil
@@ -315,6 +321,30 @@ func packageExtensions(scopes []packageScope) ([]string, error) {
 		}
 	}
 	return paths, nil
+}
+
+// packageCommandTools returns executable tools declared by trusted Sigma
+// packages. They are converted into the same Agent Tool interface used by
+// JavaScript workflow extensions and legacy runtime command_tools.
+func packageCommandTools(scopes []packageScope, workspace string) ([]agent.Tool, error) {
+	packages, err := installedPackages(scopes)
+	if err != nil {
+		return nil, err
+	}
+	var plugins []agent.CommandPlugin
+	for _, installed := range packages {
+		for _, tool := range installed.Manifest.CommandTools {
+			if err := tool.Validate(); err != nil {
+				return nil, fmt.Errorf("package %q tool %q is invalid: %w", installed.Name, tool.Name, err)
+			}
+			plugins = append(plugins, agent.CommandPlugin{
+				Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema,
+				Command: tool.Command, Args: append([]string(nil), tool.Args...),
+				PackageRoot: installed.Root, ModifiesWorkspace: tool.ModifiesWorkspace,
+			})
+		}
+	}
+	return agent.CommandPluginTools(workspace, plugins), nil
 }
 
 func packageExtensionLabels(scopes []packageScope) []string {

@@ -22,7 +22,11 @@ func (consoleWorkflowHandler) Confirm(context.Context, string) (bool, error) {
 }
 
 func workflowEvent(event agent.Event) (workflow.Event, bool) {
-	projected := workflow.Event{SessionID: event.Session, Turn: event.Turn, Tool: event.Tool, Status: event.Status, Error: event.Error}
+	projected := workflow.Event{
+		TraceID: event.TraceID, SpanID: event.SpanID, ParentSpanID: event.ParentSpanID,
+		TaskID: event.TaskID, RunID: event.RunID, WorkerID: event.WorkerID,
+		SessionID: event.Session, Turn: event.Turn, Tool: event.Tool, Status: event.Status, Error: event.Error,
+	}
 	switch event.Type {
 	case "turn_start", "turn_end":
 		projected.Type = event.Type
@@ -47,6 +51,7 @@ func registerAgentTools(host *workflow.Host, tools []agent.Tool) {
 			Name: tool.Definition.Name, Description: tool.Definition.Description,
 			InputSchema:   append(json.RawMessage(nil), tool.Definition.InputSchema...),
 			ExecutionMode: tool.ExecutionMode, ModifiesWorkspace: tool.ModifiesWorkspace,
+			Validate: tool.Validate,
 		}
 		if err := host.RegisterTool(workflowTool, tool.Handle); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent: warning: skip workflow tool:", err)
@@ -77,6 +82,7 @@ func workflowAgentTools(host *workflow.Host, existing []agent.Tool) []agent.Tool
 			},
 			ExecutionMode:     tool.ExecutionMode,
 			ModifiesWorkspace: tool.ModifiesWorkspace,
+			Validate:          tool.Validate,
 			Handle: func(ctx context.Context, arguments json.RawMessage) (string, error) {
 				return host.RunTool(ctx, name, arguments)
 			},

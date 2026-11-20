@@ -37,7 +37,9 @@ type Runtime struct {
 	DisableWorkflowExtensions        bool              `json:"disable_workflow_extensions"`
 	SkillsEnabled                    bool              `json:"skills_enabled"`
 	MemoryEnabled                    bool              `json:"memory_enabled"`
+	RequireChangeContractBeforeWrite bool              `json:"require_change_contract_before_write"`
 	MemoryAutoWrite                  bool              `json:"memory_auto_write"`
+	MemorySearchBackend              string            `json:"memory_search_backend"`
 	ProjectInstructionsFile          string            `json:"project_instructions_file,omitempty"`
 	MemoryFile                       string            `json:"memory_file,omitempty"`
 	MemoryRepositoryID               string            `json:"memory_repository_id,omitempty"`
@@ -74,7 +76,7 @@ func Defaults() Runtime {
 		CommandExecutionImage:  "debian:trixie-slim",
 		CommandFilesystemScope: "unrestricted",
 		AllowContainerNetwork:  false,
-		SkillsEnabled:          true, MemoryEnabled: true, MemoryAutoWrite: false, DefaultToolPermission: "allow",
+		SkillsEnabled:          true, MemoryEnabled: true, MemoryAutoWrite: true, MemorySearchBackend: "local", DefaultToolPermission: "allow",
 	}
 }
 
@@ -170,6 +172,9 @@ func (c Runtime) Validate() error {
 	}
 	if c.MemoryAutoWrite && !c.MemoryEnabled {
 		return errors.New("memory_auto_write requires memory_enabled")
+	}
+	if c.MemorySearchBackend != "local" && c.MemorySearchBackend != "hybrid" {
+		return errors.New("memory_search_backend must be 'local' or 'hybrid'")
 	}
 	for name, path := range map[string]string{
 		"project_instructions_file": c.ProjectInstructionsFile,

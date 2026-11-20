@@ -46,7 +46,7 @@ func SessionSearchToolDefinition(scopes []string) ToolDefinition {
 	encodedScopes, _ := json.Marshal(scopes)
 	return ToolDefinition{
 		Name:        sessionSearchToolName,
-		Description: "Search a selected Sigma index. Choose scope=tools to find and activate optional tool schemas for the next turn; skills for Skill metadata; memory for durable repository facts; or session_history for earlier transcript messages. Results are capped by the selected route. This tool searches indexes, not workspace source code; use run_command with rg for that.",
+		Description: "Search a selected Sigma index. Choose scope=tools to find and activate optional tool schemas for the next turn; skills for Skill metadata; memory for curated durable repository facts; prior_sessions for older saved transcripts from this repository; or session_history for earlier transcript messages in this conversation. Results are capped by the selected route. This tool searches indexes, not workspace source code; use run_command with rg for that.",
 		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"scope":{"type":"string","enum":%s},"query":{"type":"string","minLength":2,"maxLength":2000}},"required":["scope","query"],"additionalProperties":false}`, encodedScopes)),
 	}
 }
@@ -137,8 +137,8 @@ func (s *Session) sessionSearchTool() Tool {
 				return "Available tools for the next model turn (matching tools are active): " + strings.Join(activated, ", "), nil
 			case "session_history":
 				return s.searchSessionHistory(input.Query, 3), nil
-			case "skills", "memory":
-				name := map[string]string{"skills": "search_skills", "memory": "search_memory"}[input.Scope]
+			case "skills", "memory", "prior_sessions":
+				name := map[string]string{"skills": "search_skills", "memory": "search_memory", "prior_sessions": "search_prior_sessions"}[input.Scope]
 				route, ok := s.Tools.byName[name]
 				if !ok || !route.InternalOnly {
 					return "", fmt.Errorf("search scope %q is unavailable", input.Scope)

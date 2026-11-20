@@ -15,6 +15,7 @@
   "command_execution_image": "debian:trixie-slim",
   "allow_container_network": false,
   "memory_enabled": true,
-  "memory_auto_write": false,
+  "memory_search_backend": "local",
+  "memory_auto_write": true,
   "web_search_enabled": true
 }

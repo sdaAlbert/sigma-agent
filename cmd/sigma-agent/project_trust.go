@@ -145,6 +145,13 @@ func projectHasExecutableResources(project string) bool {
 	if err != nil {
 		return false
 	}
+	if packages, err := installedPackages([]packageScope{scope}); err == nil {
+		for _, installed := range packages {
+			if len(installed.Manifest.CommandTools) > 0 {
+				return true
+			}
+		}
+	}
 	if paths, err := packageExtensions([]packageScope{scope}); err == nil && len(paths) > 0 {
 		return true
 	}

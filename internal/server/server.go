@@ -21,16 +21,32 @@ import (
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
 	"github.com/sdaAlbert/sigma-agent/internal/filelock"
+	"github.com/sdaAlbert/sigma-agent/internal/sigmahome"
+	"github.com/sdaAlbert/sigma-agent/internal/tracecontext"
 )
 
 type Task struct {
-	ID        string    `json:"id"`
-	Repo      string    `json:"repo"`
-	Prompt    string    `json:"prompt"`
-	Status    string    `json:"status"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	Repo        string    `json:"repo"`
+	Prompt      string    `json:"prompt"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	TraceID     string    `json:"trace_id,omitempty"`
+	Traceparent string    `json:"traceparent,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func sessionSnapshotPath(root, id string) string {
+	current := filepath.Join(sigmahome.Sessions(root), id+".json")
+	if _, err := os.Stat(current); err == nil {
+		return current
+	}
+	legacy := filepath.Join(root, "var", "sessions", id+".json")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return current
 }
 
 type manager struct {
@@ -60,7 +76,13 @@ func ListenAndServeWithCommandMode(addr string, maxConcurrent int, configPath, c
 	if err != nil {
 		return err
 	}
-	stateDir := filepath.Join(root, "var", "server")
+	stateDir := sigmahome.Server(root)
+	if _, err := os.Stat(stateDir); errors.Is(err, os.ErrNotExist) {
+		legacy := filepath.Join(root, "var", "server")
+		if _, legacyErr := os.Stat(legacy); legacyErr == nil {
+			stateDir = legacy
+		}
+	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return err
 	}
@@ -69,7 +91,7 @@ func ListenAndServeWithCommandMode(addr string, maxConcurrent int, configPath, c
 		return err
 	}
 	for i := 0; i < maxConcurrent; i++ {
-		go m.worker()
+		go m.worker(fmt.Sprintf("worker-%02d", i+1))
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /tasks", m.submit)
@@ -137,7 +159,12 @@ func (m *manager) submit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not allocate task id"})
 		return
 	}
-	task := &Task{ID: id, Repo: repo, Prompt: strings.TrimSpace(request.Task), Status: "queued", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	requestTrace, err := requestSpan(r.Header.Get("traceparent"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not allocate trace context"})
+		return
+	}
+	task := &Task{ID: id, Repo: repo, Prompt: strings.TrimSpace(request.Task), Status: "queued", TraceID: requestTrace.TraceID, Traceparent: requestTrace.Traceparent(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	m.mu.Lock()
 	m.tasks[id] = task
 	err = m.saveLocked(task)
@@ -146,7 +173,7 @@ func (m *manager) submit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not persist task"})
 		return
 	}
-	m.appendEvent(id, map[string]any{"type": "task_queued", "task_id": id, "at": time.Now().UTC()})
+	m.appendTaskEvent(id, requestTrace, "", map[string]any{"type": "task_queued", "at": time.Now().UTC()})
 	m.queue <- id
 	writeJSON(w, http.StatusAccepted, task)
 }
@@ -238,9 +265,13 @@ func (m *manager) message(w http.ResponseWriter, r *http.Request) {
 	copy := *task
 	m.mu.Unlock()
 
-	m.appendEvent(copy.ID, map[string]any{"type": "user_message_queued", "task_id": copy.ID, "message_id": messageID, "mode": request.Mode, "message": request.Message, "at": time.Now().UTC()})
+	messageTrace, traceErr := childTaskTrace(copy.Traceparent)
+	if traceErr != nil {
+		messageTrace = tracecontext.Context{}
+	}
+	m.appendTaskEvent(copy.ID, messageTrace, "", map[string]any{"type": "user_message_queued", "message_id": messageID, "mode": request.Mode, "message": request.Message, "at": time.Now().UTC()})
 	if queueTask {
-		m.appendEvent(copy.ID, map[string]any{"type": "task_queued", "task_id": copy.ID, "resume": true, "at": time.Now().UTC()})
+		m.appendTaskEvent(copy.ID, messageTrace, "", map[string]any{"type": "task_queued", "resume": true, "at": time.Now().UTC()})
 		m.queue <- copy.ID
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": copy.ID, "message_id": messageID, "mode": request.Mode, "status": copy.Status})
@@ -258,7 +289,10 @@ func (m *manager) cancel(w http.ResponseWriter, r *http.Request) {
 	if cancel := m.running[id]; cancel != nil {
 		cancel()
 	} else if task.Status == "queued" {
-		m.appendEvent(id, map[string]any{"type": "task_cancelled", "task_id": id, "at": time.Now().UTC()})
+		cancelTrace, traceErr := childTaskTrace(task.Traceparent)
+		if traceErr == nil {
+			m.appendTaskEvent(id, cancelTrace, "", map[string]any{"type": "task_cancelled", "at": time.Now().UTC()})
+		}
 		task.Status = "cancelled"
 		task.UpdatedAt = time.Now().UTC()
 		_ = m.saveLocked(task)
@@ -282,7 +316,7 @@ func (m *manager) resume(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "only interrupted, cancelled, or failed tasks can be resumed"})
 		return
 	}
-	if _, err := os.Stat(filepath.Join(m.root, "var", "sessions", id+".json")); err != nil {
+	if _, err := os.Stat(sessionSnapshotPath(m.root, id)); err != nil {
 		m.mu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "no saved agent session is available to resume"})
 		return
@@ -295,7 +329,10 @@ func (m *manager) resume(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not persist task"})
 		return
 	}
-	m.appendEvent(id, map[string]any{"type": "task_queued", "task_id": id, "resume": true, "at": time.Now().UTC()})
+	resumeTrace, traceErr := childTaskTrace(copy.Traceparent)
+	if traceErr == nil {
+		m.appendTaskEvent(id, resumeTrace, "", map[string]any{"type": "task_queued", "resume": true, "at": time.Now().UTC()})
+	}
 	m.queue <- id
 	writeJSON(w, http.StatusAccepted, copy)
 }
@@ -349,7 +386,7 @@ func (m *manager) events(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *manager) worker() {
+func (m *manager) worker(workerID string) {
 	for id := range m.queue {
 		lock, busy, err := m.tryWorkspaceLock(id)
 		if busy {
@@ -361,7 +398,7 @@ func (m *manager) worker() {
 			m.failQueuedTask(id, err)
 			continue
 		}
-		m.runTask(id, lock)
+		m.runTask(id, lock, workerID)
 	}
 }
 
@@ -417,11 +454,15 @@ func (m *manager) failQueuedTask(id string, cause error) {
 	}
 	task.Status, task.Error, task.UpdatedAt = "failed", cause.Error(), time.Now().UTC()
 	_ = m.saveLocked(task)
+	copy := *task
 	m.mu.Unlock()
-	m.appendEvent(id, map[string]any{"type": "task_failed", "task_id": id, "error": cause.Error(), "at": time.Now().UTC()})
+	failedTrace, traceErr := childTaskTrace(copy.Traceparent)
+	if traceErr == nil {
+		m.appendTaskEvent(id, failedTrace, "", map[string]any{"type": "task_failed", "error": cause.Error(), "at": time.Now().UTC()})
+	}
 }
 
-func (m *manager) runTask(id string, workspaceLock *filelock.Lock) {
+func (m *manager) runTask(id string, workspaceLock *filelock.Lock, workerID string) {
 	if workspaceLock != nil {
 		defer workspaceLock.Close()
 	}
@@ -432,17 +473,37 @@ func (m *manager) runTask(id string, workspaceLock *filelock.Lock) {
 		return
 	}
 	copy := *task
-	resume := task.CreatedAt.Before(task.UpdatedAt) && task.Status == "queued" && fileExists(filepath.Join(m.root, "var", "sessions", id+".json"))
+	parentTrace, traceErr := tracecontext.ParseTraceparent(copy.Traceparent)
+	if traceErr != nil {
+		parentTrace, traceErr = tracecontext.New()
+		if traceErr != nil {
+			m.mu.Unlock()
+			m.failQueuedTask(id, traceErr)
+			return
+		}
+		copy.Traceparent = parentTrace.Traceparent()
+		task.Traceparent = copy.Traceparent
+	}
+	copy.TraceID = parentTrace.TraceID
+	task.TraceID = parentTrace.TraceID
+	workerTrace, traceErr := tracecontext.Child(parentTrace)
+	if traceErr != nil {
+		m.mu.Unlock()
+		m.failQueuedTask(id, traceErr)
+		return
+	}
+	resume := task.CreatedAt.Before(task.UpdatedAt) && task.Status == "queued" && fileExists(sessionSnapshotPath(m.root, id))
 	task.Status, task.Error, task.UpdatedAt = "running", "", time.Now().UTC()
 	_ = m.saveLocked(task)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(tracecontext.WithContext(context.Background(), workerTrace))
 	m.running[id] = cancel
 	m.mu.Unlock()
-	m.appendEvent(id, map[string]any{"type": "task_started", "task_id": id, "at": time.Now().UTC()})
+	workerStarted := time.Now()
+	m.appendTaskEvent(id, workerTrace, workerID, map[string]any{"type": "task_started", "queue_duration_ms": workerStarted.Sub(copy.CreatedAt).Milliseconds(), "at": workerStarted})
 
 	executable, err := os.Executable()
 	if err == nil {
-		args := []string{"--config", m.configPath, "--repo", copy.Repo, "--session-id", id, "--event-file", m.eventPath(id), "--message-file", m.messagePath(id)}
+		args := []string{"--config", m.configPath, "--repo", copy.Repo, "--session-id", id, "--event-file", m.eventPath(id), "--message-file", m.messagePath(id), "--traceparent", workerTrace.Traceparent(), "--task-id", id, "--worker-id", workerID}
 		if m.commandMode != "" {
 			args = append(args, "--command-execution-mode", m.commandMode)
 		}
@@ -480,9 +541,9 @@ func (m *manager) runTask(id string, workspaceLock *filelock.Lock) {
 	task.UpdatedAt = time.Now().UTC()
 	_ = m.saveLocked(task)
 	m.mu.Unlock()
-	m.appendEvent(id, map[string]any{"type": "task_" + status, "task_id": id, "error": errText, "at": time.Now().UTC()})
+	m.appendTaskEvent(id, workerTrace, workerID, map[string]any{"type": "task_" + status, "duration_ms": time.Since(workerStarted).Milliseconds(), "error": errText, "at": time.Now().UTC()})
 	if requeue {
-		m.appendEvent(id, map[string]any{"type": "task_queued", "task_id": id, "resume": true, "at": time.Now().UTC()})
+		m.appendTaskEvent(id, workerTrace, workerID, map[string]any{"type": "task_queued", "resume": true, "at": time.Now().UTC()})
 		m.queue <- id
 	}
 }
@@ -523,6 +584,51 @@ func (m *manager) appendEvent(id string, event any) {
 	}
 	_ = json.NewEncoder(file).Encode(event)
 	_ = file.Close()
+}
+
+func (m *manager) appendTaskEvent(id string, trace tracecontext.Context, workerID string, event map[string]any) {
+	event["task_id"] = id
+	if trace.TraceID != "" {
+		event["trace_id"] = trace.TraceID
+	}
+	if trace.SpanID != "" {
+		event["span_id"] = trace.SpanID
+	}
+	if trace.ParentSpanID != "" {
+		event["parent_span_id"] = trace.ParentSpanID
+	}
+	if workerID != "" {
+		event["worker_id"] = workerID
+	}
+	if _, exists := event["at"]; !exists {
+		event["at"] = time.Now().UTC()
+	}
+	m.appendEvent(id, event)
+}
+
+func requestSpan(traceparent string) (tracecontext.Context, error) {
+	traceparent = strings.TrimSpace(traceparent)
+	if traceparent == "" {
+		return tracecontext.New()
+	}
+	parent, err := tracecontext.ParseTraceparent(traceparent)
+	if err != nil {
+		// Invalid external context starts a fresh trace instead of poisoning the
+		// task's persisted propagation state.
+		return tracecontext.New()
+	}
+	return tracecontext.Child(parent)
+}
+
+func childTaskTrace(traceparent string) (tracecontext.Context, error) {
+	parent, err := tracecontext.ParseTraceparent(traceparent)
+	if err != nil {
+		parent, err = tracecontext.New()
+		if err != nil {
+			return tracecontext.Context{}, err
+		}
+	}
+	return tracecontext.Child(parent)
 }
 
 func (m *manager) saveLocked(task *Task) error {
@@ -569,7 +675,7 @@ func (m *manager) hasPendingMessagesLocked(id string) bool {
 			return true
 		}
 	}
-	data, err := os.ReadFile(filepath.Join(m.root, "var", "sessions", id+".json"))
+	data, err := os.ReadFile(sessionSnapshotPath(m.root, id))
 	if err != nil {
 		return false
 	}

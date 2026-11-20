@@ -383,7 +383,7 @@ func renderContextReport(workspace string, runtimeConfig config.Runtime, guidanc
 	} else {
 		memoryPath := runtimeConfig.MemoryFile
 		if memoryPath == "" {
-			memoryPath = filepath.Join(workspace, ".sigma-agent", "MEMORY.md")
+			memoryPath = filepath.Join(workspace, ".sigma", "MEMORY.md")
 		}
 		info, statErr := os.Stat(memoryPath)
 		if statErr != nil {
@@ -397,7 +397,7 @@ func renderContextReport(workspace string, runtimeConfig config.Runtime, guidanc
 				if runtimeConfig.MemoryRepositoryID != "" {
 					scope = "shared scope " + runtimeConfig.MemoryRepositoryID
 				}
-				lines = append(lines, fmt.Sprintf("  %s · %d entries · %d/16384 bytes · %s", memoryPath, len(entries), info.Size(), scope))
+				lines = append(lines, fmt.Sprintf("  %s · %d entries · %d/25600 bytes · %s", memoryPath, len(entries), info.Size(), scope))
 				if len(entries) > 0 {
 					lines = append(lines, "  retrieval · on demand through search (scope=memory)")
 				} else {
@@ -406,7 +406,7 @@ func renderContextReport(workspace string, runtimeConfig config.Runtime, guidanc
 			}
 		}
 		if runtimeConfig.MemoryAutoWrite {
-			lines = append(lines, "  automatic capture · enabled after verified successful non-interactive runs")
+			lines = append(lines, "  automatic capture · enabled after successful runs; explicit remember requests save immediately")
 		} else {
 			lines = append(lines, "  automatic capture · disabled")
 		}
@@ -428,6 +428,25 @@ func renderMemoryCommand(workspace string, runtimeConfig config.Runtime, argumen
 	}
 	fields := strings.Fields(arguments)
 	memoryFile, repoID := runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID
+	if len(fields) > 0 && fields[0] == "remember" {
+		kind := "preference"
+		factStart := 1
+		if len(fields) > 1 && workspaceagent.IsMemoryKind(fields[1]) {
+			kind = fields[1]
+			factStart = 2
+		}
+		if factStart >= len(fields) {
+			return "Usage: /memory remember [kind] <fact to keep for future sessions>"
+		}
+		added, err := workspaceagent.SaveProjectMemoryFact(workspace, memoryFile, repoID, kind, strings.Join(fields[factStart:], " "))
+		if err != nil {
+			return "Could not save memory: " + safeTerminalText(err.Error())
+		}
+		if !added {
+			return "That fact is already in project memory."
+		}
+		return "Saved to project memory for future sessions."
+	}
 	if len(fields) > 0 {
 		if len(fields) != 2 || fields[0] != "forget" {
 			return "Usage: /memory [forget <memory-id-prefix>]"
@@ -442,7 +461,7 @@ func renderMemoryCommand(workspace string, runtimeConfig config.Runtime, argumen
 			}
 		}
 		var indexErr error
-		if workspaceagent.MemoryVectorConfigured() {
+		if runtimeConfig.MemorySearchBackend == "hybrid" && workspaceagent.MemoryVectorConfigured() {
 			if memoryFile != "" {
 				_, indexErr = workspaceagent.IndexProjectMemoryFile(memoryFile, repoID)
 			} else {
@@ -461,14 +480,14 @@ func renderMemoryCommand(workspace string, runtimeConfig config.Runtime, argumen
 	}
 	path := memoryFile
 	if path == "" {
-		path = filepath.Join(workspace, ".sigma-agent", "MEMORY.md")
+		path = filepath.Join(workspace, ".sigma", "MEMORY.md")
 	}
 	info, _ := os.Stat(path)
 	bytes := int64(0)
 	if info != nil {
 		bytes = info.Size()
 	}
-	lines := []string{fmt.Sprintf("Long-term project memory · %d entries · %d/16384 bytes", len(entries), bytes), path}
+	lines := []string{fmt.Sprintf("Long-term project memory · %d entries · %d/25600 bytes", len(entries), bytes), path}
 	for _, entry := range entries {
 		freshness := "reviewed"
 		if reviewed, parseErr := time.Parse("2006-01-02", entry.UpdatedAt); parseErr == nil && time.Since(reviewed) > 180*24*time.Hour {
@@ -476,7 +495,7 @@ func renderMemoryCommand(workspace string, runtimeConfig config.Runtime, argumen
 		}
 		lines = append(lines, fmt.Sprintf("%s · [%s · %s · %s · %s] %s", entry.ContentHash[:10], entry.Kind, entry.UpdatedAt, freshness, entry.Source, entry.Text))
 	}
-	lines = append(lines, "Use /memory forget <memory-id-prefix> to remove one listed fact.")
+	lines = append(lines, "Use /memory remember <fact> to add a preference or correction, or /memory forget <memory-id-prefix> to remove one listed fact.")
 	return safeTerminalText(strings.Join(lines, "\n"))
 }
 
@@ -498,7 +517,7 @@ func inspectTUIStartupInfo(repo, externalInstructionsFile string) tuiStartupInfo
 			}
 		}
 		if strings.TrimSpace(guidance.Memory) != "" {
-			info.contexts = append(info.contexts, filepath.Join(".sigma-agent", "MEMORY.md"))
+			info.contexts = append(info.contexts, filepath.Join(".sigma", "MEMORY.md"))
 		}
 		if guidance.ExternalInstructionsPath != "" {
 			info.contexts = append(info.contexts, filepath.Base(guidance.ExternalInstructionsPath))
@@ -1319,24 +1338,30 @@ func (m *tuiModel) openModelSelector() {
 }
 
 func (m *tuiModel) openSessionSelector() {
-	root := strings.TrimSpace(m.setup.workspace)
-	if root == "" {
-		var err error
-		root, err = os.Getwd()
-		if err != nil {
-			m.appendError("Could not find session directory: " + err.Error())
+	root, err := os.Getwd()
+	if err != nil {
+		m.appendError("Could not find session directory: " + err.Error())
+		return
+	}
+	seen := make(map[string]bool)
+	var sessions []agent.SavedSession
+	for _, directory := range sessionDirectories(root) {
+		store, storeErr := agent.NewFileSessionStore(directory)
+		if storeErr != nil {
+			m.appendError("Could not read saved sessions: " + storeErr.Error())
 			return
 		}
-	}
-	store, err := agent.NewFileSessionStore(filepath.Join(root, "var", "sessions"))
-	if err != nil {
-		m.appendError("Could not read saved sessions: " + err.Error())
-		return
-	}
-	sessions, err := store.List()
-	if err != nil {
-		m.appendError("Could not list saved sessions: " + err.Error())
-		return
+		listed, listErr := store.List()
+		if listErr != nil {
+			m.appendError("Could not list saved sessions: " + listErr.Error())
+			return
+		}
+		for _, saved := range listed {
+			if !seen[saved.ID] {
+				seen[saved.ID] = true
+				sessions = append(sessions, saved)
+			}
+		}
 	}
 	items := make([]tuiOverlayItem, 0, len(sessions))
 	for _, session := range sessions {
@@ -3074,12 +3099,32 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 					continue
 				}
 				if arguments == "" {
-					store, storeErr := agent.NewFileSessionStore(filepath.Join(workspace, "var", "sessions"))
-					if storeErr != nil {
-						bridge.failure("Could not list saved sessions: " + storeErr.Error())
+					processDir, cwdErr := os.Getwd()
+					if cwdErr != nil {
+						bridge.failure("Could not locate Sigma session storage: " + cwdErr.Error())
 						continue
 					}
-					sessions, listErr := store.List()
+					seen := make(map[string]bool)
+					var sessions []agent.SavedSession
+					var listErr error
+					for _, directory := range sessionDirectories(processDir) {
+						store, storeErr := agent.NewFileSessionStore(directory)
+						if storeErr != nil {
+							listErr = storeErr
+							break
+						}
+						listed, storeErr := store.List()
+						if storeErr != nil {
+							listErr = storeErr
+							break
+						}
+						for _, saved := range listed {
+							if !seen[saved.ID] {
+								seen[saved.ID] = true
+								sessions = append(sessions, saved)
+							}
+						}
+					}
 					if listErr != nil {
 						bridge.failure("Could not list saved sessions: " + listErr.Error())
 						continue
@@ -3099,7 +3144,12 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 					bridge.failure("Usage: /resume <saved-session-id>")
 					continue
 				}
-				store, storeErr := agent.NewFileSessionStore(filepath.Join(workspace, "var", "sessions"))
+				processDir, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					bridge.failure("Could not locate Sigma session storage: " + cwdErr.Error())
+					continue
+				}
+				store, storeErr := agent.NewFileSessionStore(sessionDirectoryForID(processDir, arguments))
 				if storeErr == nil {
 					_, storeErr = store.Load(arguments)
 				}
@@ -3170,7 +3220,7 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 					bridge.failure("Could not locate Sigma session storage: " + cwdErr.Error())
 					continue
 				}
-				store, storeErr := agent.NewFileSessionStore(filepath.Join(processDir, "var", "sessions"))
+				store, storeErr := agent.NewFileSessionStore(sessionDirectoryForID(processDir, imported.snapshot.ID))
 				if storeErr != nil {
 					bridge.failure("Could not access Sigma session storage: " + storeErr.Error())
 					continue
@@ -3277,7 +3327,12 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 				}
 				exportPath := arguments
 				if exportPath == "" {
-					exportPath = filepath.Join(workspace, "var", "sessions", "exports", session.ID+".md")
+					processDir, cwdErr := os.Getwd()
+					if cwdErr != nil {
+						bridge.failure("Could not locate Sigma session storage: " + cwdErr.Error())
+						continue
+					}
+					exportPath = filepath.Join(sessionDirectoryForID(processDir, session.ID), "exports", session.ID+".md")
 				} else if !filepath.IsAbs(exportPath) {
 					exportPath = filepath.Join(workspace, exportPath)
 				}
@@ -3463,7 +3518,7 @@ func interactiveTUISessionWithCheckpoints(ctx context.Context, session *agent.Se
 					} else {
 						args = append(args, "HEAD")
 					}
-					args = append(args, "--", ".", ":(exclude).sigma-agent/MEMORY.md", ":(exclude).sigma-agent/container-home", ":(exclude).sigma-agent/command-environment.json", ":(exclude)var/runs", ":(exclude)var/sessions")
+					args = append(args, "--", ".", ":(exclude).sigma", ":(exclude).sigma-agent", ":(exclude)var/runs", ":(exclude)var/sessions")
 					diff, err := gitOutput(workspace, args...)
 					if err != nil {
 						bridge.failure(err.Error())

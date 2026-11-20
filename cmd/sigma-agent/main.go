@@ -26,7 +26,10 @@ import (
 	"github.com/sdaAlbert/sigma-agent/internal/buildinfo"
 	"github.com/sdaAlbert/sigma-agent/internal/config"
 	modelconfig "github.com/sdaAlbert/sigma-agent/internal/model"
+	"github.com/sdaAlbert/sigma-agent/internal/pkgmgr"
 	"github.com/sdaAlbert/sigma-agent/internal/server"
+	"github.com/sdaAlbert/sigma-agent/internal/sigmahome"
+	"github.com/sdaAlbert/sigma-agent/internal/tracecontext"
 	"github.com/sdaAlbert/sigma-agent/internal/workflow"
 	workspaceagent "github.com/sdaAlbert/sigma-agent/internal/workspace"
 )
@@ -65,10 +68,14 @@ func main() {
 	sessionID := flag.String("session-id", "", "use this id for a new session")
 	eventFile := flag.String("event-file", "", "append agent lifecycle events to this JSONL file")
 	messageFile := flag.String("message-file", "", "read durable task messages from this JSONL file")
+	traceParent := flag.String("traceparent", "", "internal W3C trace context inherited from the task dispatcher")
+	taskID := flag.String("task-id", "", "internal asynchronous task correlation ID")
+	workerID := flag.String("worker-id", "", "internal worker handling the asynchronous task")
 	installSource := flag.String("install", "", "install a package (npm:<name>, git:<repo>, or a local path) and exit")
 	uninstallSource := flag.String("uninstall", "", "remove a package from the registry and exit")
 	listInstalled := flag.Bool("list-packages", false, "list the installed packages and exit")
 	listMCPServers := flag.Bool("list-mcp", false, "connect to the configured MCP servers, list their tools, and exit")
+	validateExtensionPackage := flag.String("validate-extension-package", "", "statically validate a local extension package candidate and exit")
 	localScope := flag.Bool("local", false, "install or remove the package in the project scope instead of the user scope")
 	flag.Parse()
 	contextSettingsExplicit := false
@@ -79,6 +86,33 @@ func main() {
 	})
 	if *showVersion {
 		fmt.Printf("sigma-agent v%s\n", buildinfo.Version)
+		return
+	}
+	if strings.TrimSpace(*validateExtensionPackage) != "" {
+		result, validateErr := pkgmgr.ValidateExtensionPackage(context.Background(), *validateExtensionPackage)
+		if validateErr != nil {
+			fmt.Fprintln(os.Stderr, "sigma-agent: extension package validation failed:", validateErr)
+			os.Exit(1)
+		}
+		version := result.PackageVersion
+		if version == "" {
+			version = "no version"
+		}
+		fmt.Printf("Valid package candidate: %s@%s\n", result.PackageName, version)
+		fmt.Printf("Command tools with valid declarations: %d\n", len(result.CommandTools))
+		for _, name := range result.CommandTools {
+			fmt.Printf("  command tool: %s\n", name)
+		}
+		fmt.Printf("JavaScript extension modules syntax-checked (not executed): %d\n", len(result.JavaScriptModules))
+		for _, path := range result.JavaScriptModules {
+			fmt.Printf("  extension: %s\n", path)
+		}
+		if len(result.TypeScriptModules) > 0 {
+			fmt.Printf("TypeScript modules not checked (compile them to JavaScript first): %d\n", len(result.TypeScriptModules))
+			for _, path := range result.TypeScriptModules {
+				fmt.Printf("  TypeScript: %s\n", path)
+			}
+		}
 		return
 	}
 	if *installSource != "" && *uninstallSource != "" {
@@ -224,7 +258,7 @@ func main() {
 			if options.modelReasoningEffort != "" {
 				runConfig.ModelReasoningEffort = options.modelReasoningEffort
 			}
-			return run(options.workspace, options.initialPrompt, runConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, true, false, options.model, options.modelExplicit, nil, bridge, *isolated)
+			return run(options.workspace, options.initialPrompt, runConfig, options.resumeID, options.githubMCP, options.sessionID, *eventFile, *messageFile, "", "", "", true, false, options.model, options.modelExplicit, nil, bridge, *isolated)
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 			os.Exit(1)
@@ -250,7 +284,7 @@ func main() {
 		}
 		return
 	}
-	if err := run(workspacePath, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil, *isolated); err != nil {
+	if err := run(workspacePath, *task, runtimeConfig, *resumeID, *githubMCP, *sessionID, *eventFile, *messageFile, *traceParent, *taskID, *workerID, interactiveMode, *jsonOutput, requestedModel, modelExplicit, nil, nil, *isolated); err != nil {
 		fmt.Fprintln(os.Stderr, "sigma-agent:", err)
 		os.Exit(1)
 	}
@@ -265,19 +299,26 @@ func inspectSessions(repository string, list bool, diffID, exportSpec string) er
 	if err != nil {
 		return err
 	}
-	store, err := agent.NewFileSessionStore(filepath.Join(workingDir, "var", "sessions"))
-	if err != nil {
-		return err
-	}
 	if list {
-		sessions, err := store.List()
-		if err != nil {
-			return err
-		}
-		for _, saved := range sessions {
-			workspace, _, _, err := savedSessionWorkspace(store.Directory, repository, saved.ID)
-			if err == nil {
-				fmt.Printf("%s\t%s\t%s\n", saved.ID, saved.UpdatedAt.Format(time.RFC3339), workspace)
+		seen := make(map[string]bool)
+		for _, directory := range sessionDirectories(workingDir) {
+			store, err := agent.NewFileSessionStore(directory)
+			if err != nil {
+				return err
+			}
+			sessions, err := store.List()
+			if err != nil {
+				return err
+			}
+			for _, saved := range sessions {
+				if seen[saved.ID] {
+					continue
+				}
+				workspace, _, _, err := savedSessionWorkspace(store.Directory, repository, saved.ID)
+				if err == nil {
+					seen[saved.ID] = true
+					fmt.Printf("%s\t%s\t%s\n", saved.ID, saved.UpdatedAt.Format(time.RFC3339), workspace)
+				}
 			}
 		}
 		return nil
@@ -292,7 +333,7 @@ func inspectSessions(repository string, list bool, diffID, exportSpec string) er
 	if diffID == "" {
 		return errors.New("choose --list-sessions, --session-diff SESSION_ID, or --export-patch SESSION_ID=PATH")
 	}
-	workspace, baseCommit, _, err := savedSessionWorkspace(store.Directory, repository, diffID)
+	workspace, baseCommit, _, err := savedSessionWorkspace(sessionDirectoryForID(workingDir, diffID), repository, diffID)
 	if err != nil {
 		return err
 	}
@@ -312,6 +353,22 @@ func inspectSessions(repository string, list bool, diffID, exportSpec string) er
 	}
 	fmt.Print(patch)
 	return nil
+}
+
+func sessionDirectories(workingDir string) []string {
+	return []string{sigmahome.Sessions(workingDir), filepath.Join(workingDir, "var", "sessions")}
+}
+
+func sessionDirectoryForID(workingDir, id string) string {
+	if !agent.ValidSessionID(id) {
+		return sigmahome.Sessions(workingDir)
+	}
+	for _, directory := range sessionDirectories(workingDir) {
+		if _, err := os.Stat(filepath.Join(directory, id+".json")); err == nil {
+			return directory
+		}
+	}
+	return sigmahome.Sessions(workingDir)
 }
 
 func savedSessionWorkspace(sessionsDir, repository, id string) (string, string, string, error) {
@@ -349,7 +406,7 @@ func publishIsolatedSession(repository, sessionID, branch, title, body, base str
 	if err != nil {
 		return err
 	}
-	sessionsDir := filepath.Join(workingDir, "var", "sessions")
+	sessionsDir := sessionDirectoryForID(workingDir, sessionID)
 	workspace, _, mode, err := savedSessionWorkspace(sessionsDir, repository, sessionID)
 	if err != nil {
 		return err
@@ -534,7 +591,7 @@ func resolveWorkspacePath(repoArg string) (string, error) {
 	return workspacePath, nil
 }
 
-func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge, isolationOptions ...bool) error {
+func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID string, githubMCP bool, requestedSessionID, requestedEventFile, requestedMessageFile, requestedTraceParent, requestedTaskID, requestedWorkerID string, interactive, jsonOutput bool, requestedModel modelconfig.Selection, modelExplicit bool, setupInput *bufio.Scanner, tui *tuiBridge, isolationOptions ...bool) error {
 	workspacePath, err := filepath.Abs(workspaceArg)
 	if err != nil {
 		return fmt.Errorf("resolve workspace path: %w", err)
@@ -551,16 +608,29 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if err != nil {
 		return err
 	}
-	baseDir := filepath.Join(workingDir, "var", "runs")
+	baseDir := sigmahome.Runs(workingDir)
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return err
 	}
-	sessionsDir := filepath.Join(workingDir, "var", "sessions")
+	sessionsDir := sessionDirectoryForID(workingDir, resumeID)
 	store, err := agent.NewFileSessionStore(sessionsDir)
 	if err != nil {
 		return err
 	}
 	runID, err := newRunID()
+	if err != nil {
+		return err
+	}
+	var runTrace tracecontext.Context
+	if strings.TrimSpace(requestedTraceParent) != "" {
+		parentTrace, parseErr := tracecontext.ParseTraceparent(requestedTraceParent)
+		if parseErr != nil {
+			return fmt.Errorf("parse inherited trace context: %w", parseErr)
+		}
+		runTrace, err = tracecontext.Child(parentTrace)
+	} else {
+		runTrace, err = tracecontext.New()
+	}
 	if err != nil {
 		return err
 	}
@@ -742,7 +812,27 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	var traceMu sync.Mutex
 	var stdoutMu sync.Mutex
 	var workflowHost *workflow.Host
+	runStarted := time.Now()
 	eventSink := func(event agent.Event) {
+		if event.At.IsZero() {
+			event.At = time.Now().UTC()
+		}
+		if event.TraceID == "" {
+			event.TraceID = runTrace.TraceID
+		}
+		if event.SpanID == "" {
+			event.SpanID = runTrace.SpanID
+			event.ParentSpanID = runTrace.ParentSpanID
+		}
+		if event.TaskID == "" {
+			event.TaskID = requestedTaskID
+		}
+		if event.RunID == "" {
+			event.RunID = runID
+		}
+		if event.WorkerID == "" {
+			event.WorkerID = requestedWorkerID
+		}
 		traceMu.Lock()
 		_ = json.NewEncoder(traceFile).Encode(event)
 		traceMu.Unlock()
@@ -787,6 +877,14 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		}
 	}
 	authorizationAudit := func(event agent.Event) error {
+		if event.TraceID == "" {
+			event.TraceID = runTrace.TraceID
+		}
+		if event.SpanID == "" {
+			event.SpanID = runTrace.SpanID
+			event.ParentSpanID = runTrace.ParentSpanID
+		}
+		event.TaskID, event.RunID, event.WorkerID = requestedTaskID, runID, requestedWorkerID
 		var auditErr error
 		event, auditErr = appendAuthorizationAuditEvent(event, sessionID, authorizationLog, traceFile, &traceMu)
 		if auditErr != nil {
@@ -809,21 +907,15 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if err != nil {
 		return fmt.Errorf("configure background task manager: %w", err)
 	}
-	tools, err := workspaceagent.BuiltinToolsWithNetworkAndMemoryRepositoryID(workspace, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.MemoryRepositoryID, startingCommit)
+	tools, err := workspaceagent.BuiltinToolsWithChangeContractMode(workspace, runtimeConfig.MaxRetrievalQueryBytes, model, toolOutputStore, backgroundTasks, runtimeConfig.AllowContainerNetwork, runtimeConfig.MemoryRepositoryID, runtimeConfig.MemorySearchBackend, runtimeConfig.RequireChangeContractBeforeWrite, startingCommit)
 	if err != nil {
 		return err
 	}
-	tools = append(tools, agent.CompactContextTool())
-	if len(runtimeConfig.CommandTools) > 0 {
-		plugins := make([]agent.CommandPlugin, 0, len(runtimeConfig.CommandTools))
-		for _, plugin := range runtimeConfig.CommandTools {
-			plugins = append(plugins, agent.CommandPlugin{
-				Name: plugin.Name, Description: plugin.Description, InputSchema: plugin.InputSchema,
-				Command: plugin.Command, Args: append([]string(nil), plugin.Args...), ModifiesWorkspace: plugin.ModifiesWorkspace,
-			})
-		}
-		tools = append(tools, agent.CommandPluginTools(workspace, plugins)...)
+	if runtimeConfig.MemoryEnabled {
+		tools = append(tools, workspaceagent.RememberProjectMemoryTool(workspace, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID))
 	}
+	tools = append(tools, agent.CompactContextTool())
+	tools = append(tools, agent.PriorSessionSearchTool(store, workspacePath, sessionID))
 	var commandTools []agent.Tool
 	var closeCommandSession func() error
 	if interactive {
@@ -885,6 +977,23 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 			fmt.Fprintln(os.Stderr, "sigma-agent: warning: close workflow extensions:", err)
 		}
 	}()
+	var configuredCommandTools []agent.CommandPlugin
+	for _, plugin := range runtimeConfig.CommandTools {
+		configuredCommandTools = append(configuredCommandTools, agent.CommandPlugin{
+			Name: plugin.Name, Description: plugin.Description, InputSchema: plugin.InputSchema,
+			Command: plugin.Command, Args: append([]string(nil), plugin.Args...), ModifiesWorkspace: plugin.ModifiesWorkspace,
+		})
+	}
+	commandContributions := agent.CommandPluginTools(workspace, configuredCommandTools)
+	var packageContributions []agent.Tool
+	if !runtimeConfig.DisableWorkflowExtensions {
+		packageContributions, err = packageCommandTools(executableScopes, workspace)
+		if err != nil {
+			return fmt.Errorf("discover package command tools: %w", err)
+		}
+	}
+	registerAgentTools(workflowHost, commandContributions)
+	registerAgentTools(workflowHost, packageContributions)
 	mcpTools, shutdownMCPServers, err := startConfiguredMCPServers(context.Background(), executableScopes, runtimeConfig.DisableConfiguredMCPServers)
 	if runtimeConfig.DisableConfiguredMCPServers {
 		fmt.Fprintln(os.Stderr, "sigma-agent: configured MCP servers disabled by run config")
@@ -906,11 +1015,12 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if err != nil {
 		return fmt.Errorf("load repository skills and memory: %w", err)
 	}
+	projectGuidance.RequireChangeContract = runtimeConfig.RequireChangeContractBeforeWrite
 	if !runtimeConfig.MemoryEnabled {
 		projectGuidance.Memory = ""
 		filtered := tools[:0]
 		for _, registeredTool := range tools {
-			if registeredTool.Definition.Name != "search_memory" {
+			if registeredTool.Definition.Name != "search_memory" && registeredTool.Definition.Name != "remember_memory" {
 				filtered = append(filtered, registeredTool)
 			}
 		}
@@ -985,7 +1095,7 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if workspaceMode == "direct" {
 		systemPrompt += "\n\nYou are working directly in the user's selected folder. File changes take effect there immediately. Preserve unrelated existing files and changes. If this folder has Git with a commit, review the diff before finishing; otherwise explain that Git diff is unavailable. Never revert user changes unless the user asks."
 	}
-	systemPrompt += "\n\nCONTEXT MANAGEMENT: Sigma automatically checkpoints older session history when the configured context threshold is crossed, keeps a recent raw message suffix, and preserves a deterministic evidence index. The full original transcript remains available; use search with scope=session_history when an earlier fact, exact wording, decision rationale, tool output, or cross-turn relationship is missing or uncertain. Results are lexical excerpts with source message indices and tool-call IDs; verify them before relying on a conclusion. You may also call compact_context by itself for a focused handoff."
+	systemPrompt += "\n\nCONTEXT AND MEMORY: Sigma checkpoints older session history while retaining the full transcript. Use search with scope=session_history or prior_sessions to recover details from the current or earlier conversations. These are lexical excerpts; verify cited session and message indices. Project memory is separate under scope=memory. When the user explicitly asks you to remember a stable preference, correction, or project decision, save it immediately with remember_memory. Also save clear corrections that should change future behavior. Do not save temporary task details or facts already stated in repository instructions."
 	if newSession {
 		session = &agent.Session{ID: sessionID, System: systemPrompt, Store: store}
 	} else {
@@ -995,6 +1105,10 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		}
 		session.System = systemPrompt
 	}
+	session.TraceContext = runTrace
+	session.TaskID = requestedTaskID
+	session.RunID = runID
+	session.WorkerID = requestedWorkerID
 	session.Model = model
 	session.Tools = registry
 	if runtimeConfig.SkillsEnabled {
@@ -1011,9 +1125,11 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 			return err
 		}
 		request := agent.ClassifyToolAuthorization(tool.Definition.Name, arguments, runtimeConfig.AllowContainerNetwork || runtimeConfig.CommandExecutionMode == "host")
+		trace, _ := tracecontext.FromContext(ctx)
 		return workflowHost.BeforeTool(ctx, workflow.Event{
-			Type: "before_tool", SessionID: session.ID, Tool: request.Tool,
-			Args: string(request.Args),
+			Type: "before_tool", TraceID: trace.TraceID, SpanID: trace.SpanID, ParentSpanID: trace.ParentSpanID,
+			TaskID: requestedTaskID, RunID: runID, WorkerID: requestedWorkerID,
+			SessionID: session.ID, Tool: request.Tool, Args: string(request.Args),
 		})
 	}
 	session.SerializeToolCalls = hasAskPermissions(runtimeConfig)
@@ -1028,9 +1144,14 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 		ToolTokens:                toolDefinitionTokens,
 	}
 	session.OnEvent = eventSink
-	workflowHost.Dispatch(workflow.Event{Type: "session_start", SessionID: session.ID})
+	eventSink(agent.Event{Type: "run_started"})
+	workflowHost.Dispatch(workflow.Event{
+		Type: "session_start", TraceID: runTrace.TraceID, SpanID: runTrace.SpanID, ParentSpanID: runTrace.ParentSpanID,
+		TaskID: requestedTaskID, RunID: runID, WorkerID: requestedWorkerID, SessionID: session.ID,
+	})
 	ctx, cancel := signalContext()
 	defer cancel()
+	ctx = tracecontext.WithContext(ctx, runTrace)
 	if tui != nil && tui.appContext != nil {
 		linkedContext, cancelLinked := context.WithCancel(ctx)
 		go func() {
@@ -1069,7 +1190,10 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	} else {
 		result, runErr = session.Continue(ctx)
 	}
-	workflowHost.Dispatch(workflow.Event{Type: "session_end", SessionID: session.ID, Error: errorText(runErr)})
+	workflowHost.Dispatch(workflow.Event{
+		Type: "session_end", TraceID: runTrace.TraceID, SpanID: runTrace.SpanID, ParentSpanID: runTrace.ParentSpanID,
+		TaskID: requestedTaskID, RunID: runID, WorkerID: requestedWorkerID, SessionID: session.ID, Error: errorText(runErr),
+	})
 	patch := ""
 	var diffErr error
 	if !gitDiffAvailable && workspaceagent.HasGitCommit(workspace) {
@@ -1107,16 +1231,12 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	memoryWrite := workspaceagent.MemoryWriteReport{Status: "disabled"}
 	if runtimeConfig.MemoryEnabled && runtimeConfig.MemoryAutoWrite {
 		switch {
-		case !gitDiffAvailable:
-			memoryWrite.Status = "skipped_non_git_workspace"
-		case interactive:
-			memoryWrite.Status = "skipped_interactive"
 		case runErr != nil:
 			memoryWrite.Status = "skipped_unsuccessful_run"
 		case result.VerificationStatus == "incomplete" || result.VerificationStatus == "diff_reviewed" || result.VerificationStatus == "test_failed":
 			memoryWrite.Status = "skipped_unverified_run"
 		default:
-			memoryWrite = workspaceagent.CaptureSuccessfulRunMemoryWithProfile(context.Background(), model, workspacePath, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID, runID, task, patch, session.Messages())
+			memoryWrite = workspaceagent.CaptureSuccessfulRunMemoryWithProfileAndBackend(context.Background(), model, workspacePath, runtimeConfig.MemoryFile, runtimeConfig.MemoryRepositoryID, runID, task, patch, session.Messages(), runtimeConfig.MemorySearchBackend)
 			event := agent.Event{At: time.Now().UTC(), Type: "memory_write_completed", Session: sessionID}
 			if memoryWrite.Warning != "" {
 				event.Error = memoryWrite.Warning
@@ -1124,7 +1244,13 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 			eventSink(event)
 		}
 	}
+	runStatus := "completed"
+	if runErr != nil {
+		runStatus = "failed"
+	}
 	metadata, _ := json.MarshalIndent(map[string]any{
+		"trace_id": runTrace.TraceID, "span_id": runTrace.SpanID, "parent_span_id": runTrace.ParentSpanID,
+		"task_id": requestedTaskID, "worker_id": requestedWorkerID,
 		"run_id": runID, "session_id": sessionID, "repo": workspacePath, "starting_commit": startingCommit, "model": session.Model.ModelID(), "push_branch": "",
 		"verification_status":   result.VerificationStatus,
 		"git_diff_available":    gitDiffAvailable,
@@ -1169,9 +1295,14 @@ func run(workspaceArg, task string, runtimeConfig config.Runtime, resumeID strin
 	if writeErr := os.WriteFile(filepath.Join(runDir, "run.json"), metadata, 0o600); writeErr != nil && runErr == nil {
 		runErr = writeErr
 	}
+	if runErr != nil {
+		runStatus = "failed"
+	}
+	eventSink(agent.Event{Type: "run_completed", Status: runStatus, Duration: time.Since(runStarted).Milliseconds(), Error: errorText(runErr)})
 	if jsonOutput {
 		completion := map[string]any{
-			"protocol_version": 1, "type": "run_completed", "status": "completed", "run_id": runID, "session_id": sessionID,
+			"protocol_version": 1, "type": "run_completed", "status": runStatus, "trace_id": runTrace.TraceID, "span_id": runTrace.SpanID,
+			"task_id": requestedTaskID, "worker_id": requestedWorkerID, "run_id": runID, "session_id": sessionID,
 			"run_dir": runDir, "patch_path": filepath.Join(runDir, "result.patch"), "push_branch": "",
 			"verification_status":   result.VerificationStatus,
 			"candidate_patch_saved": patchSaved,
@@ -1610,11 +1741,15 @@ func configuredToolPolicy(runtimeConfig config.Runtime, approve func(context.Con
 			if audit == nil {
 				return errors.New("tool authorization audit log is unavailable; operation was not executed")
 			}
-			return audit(agent.Event{
+			event := agent.Event{
 				Type: "tool_authorization", Tool: tool.Definition.Name, ToolCallID: agent.ToolCallID(ctx),
 				AuthorizationID: request.ID, RiskClass: request.RiskClass, Decision: decision, ApprovedBy: actor,
 				Target: request.Target, RiskReason: request.Reason, Args: request.Args, Status: status, Error: detail,
-			})
+			}
+			if trace, ok := tracecontext.FromContext(ctx); ok {
+				event.TraceID, event.SpanID, event.ParentSpanID = trace.TraceID, trace.SpanID, trace.ParentSpanID
+			}
+			return audit(event)
 		}
 		switch permission {
 		case "deny":

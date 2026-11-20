@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sdaAlbert/sigma-agent/internal/tracecontext"
 )
 
 type ToolDefinition struct {
@@ -25,6 +27,24 @@ type toolTurnContextKey struct{}
 type toolCallIDContextKey struct{}
 type toolIdempotencyKeyContextKey struct{}
 type sessionRunContextKey struct{}
+type runMetadataContextKey struct{}
+
+type RunMetadata struct {
+	TraceContext tracecontext.Context
+	TaskID       string
+	RunID        string
+	WorkerID     string
+	EventSink    EventSink
+}
+
+func WithRunMetadata(ctx context.Context, metadata RunMetadata) context.Context {
+	return context.WithValue(ctx, runMetadataContextKey{}, metadata)
+}
+
+func RunMetadataFromContext(ctx context.Context) (RunMetadata, bool) {
+	metadata, ok := ctx.Value(runMetadataContextKey{}).(RunMetadata)
+	return metadata, ok
+}
 
 // ToolCallID returns the model-supplied ID for the tool call currently being
 // authorized or executed.
@@ -201,6 +221,8 @@ func (r *ToolRegistry) SearchScopes() []string {
 			scopes = append(scopes, "memory")
 		case "search_skills":
 			scopes = append(scopes, "skills")
+		case "search_prior_sessions":
+			scopes = append(scopes, "prior_sessions")
 		}
 	}
 	sort.Strings(scopes)
@@ -415,6 +437,12 @@ type Model interface {
 type Event struct {
 	At                               time.Time       `json:"at"`
 	Type                             string          `json:"type"`
+	TraceID                          string          `json:"trace_id,omitempty"`
+	SpanID                           string          `json:"span_id,omitempty"`
+	ParentSpanID                     string          `json:"parent_span_id,omitempty"`
+	TaskID                           string          `json:"task_id,omitempty"`
+	RunID                            string          `json:"run_id,omitempty"`
+	WorkerID                         string          `json:"worker_id,omitempty"`
 	Session                          string          `json:"session_id,omitempty"`
 	Turn                             int             `json:"turn,omitempty"`
 	Tool                             string          `json:"tool,omitempty"`
@@ -481,6 +509,10 @@ type Result struct {
 
 type Session struct {
 	ID                 string
+	TaskID             string
+	RunID              string
+	WorkerID           string
+	TraceContext       tracecontext.Context
 	Name               string
 	System             string
 	Model              Model
@@ -720,7 +752,18 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		}
 		result.Turns = turn
 		s.emit(Event{Type: "turn_start", Turn: turn})
-		s.emit(Event{Type: "model_request", Turn: turn})
+		modelTrace, traceErr := tracecontext.Child(s.TraceContext)
+		if traceErr != nil {
+			modelTrace = s.TraceContext
+		}
+		modelStarted := time.Now()
+		emitModelEvent := func(event Event) {
+			event.TraceID = modelTrace.TraceID
+			event.SpanID = modelTrace.SpanID
+			event.ParentSpanID = modelTrace.ParentSpanID
+			s.emit(event)
+		}
+		emitModelEvent(Event{Type: "model_request", Turn: turn})
 		if window, ok := s.Context.(WindowContextManager); ok {
 			compaction, estimatedBefore, compactErr := s.compactAutomatically(ctx, turn, window)
 			if compactErr != nil {
@@ -760,7 +803,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		var lastDraftCheckpoint time.Time
 		var draftCheckpointErr error
 		response, err := s.Model.Stream(ctx, systemPrompt, requestMessages, toolDefinitions, func(modelEvent ModelEvent) {
-			s.emit(Event{Type: "model_" + modelEvent.Type, Turn: turn, Text: modelEvent.Text, Tool: modelEvent.Name})
+			emitModelEvent(Event{Type: "model_" + modelEvent.Type, Turn: turn, Text: modelEvent.Text, Tool: modelEvent.Name})
 			if modelEvent.Type == "text_delta" && modelEvent.Text != "" {
 				partialText += modelEvent.Text
 				if time.Since(lastDraftCheckpoint) >= 200*time.Millisecond || lastDraftCheckpoint.IsZero() {
@@ -780,9 +823,11 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 			return result, fmt.Errorf("persist interrupted model draft: %w", draftCheckpointErr)
 		}
 		if err != nil {
-			s.emit(Event{Type: "model_error", Turn: turn, Error: err.Error()})
+			emitModelEvent(Event{Type: "model_error", Turn: turn, Duration: time.Since(modelStarted).Milliseconds(), Error: err.Error()})
 			return result, err
 		}
+		normalizedContent, invalidToolInputs := normalizeToolCallInputs(response.Content)
+		response.Content = normalizedContent
 		result.InputTokens += response.InputTokens
 		result.OutputTokens += response.OutputTokens
 		result.CacheReadInputTokens += response.CacheReadInputTokens
@@ -791,7 +836,7 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 		if !shouldRecoverMissingStopReason(response.StopReason) {
 			emptyStopReasonRetries = 0
 		}
-		s.emit(Event{Type: "model_usage", Turn: turn, InputTokens: response.InputTokens, OutputTokens: response.OutputTokens, CacheReadInputTokens: response.CacheReadInputTokens, CacheMissInputTokens: response.CacheMissInputTokens, CacheCreationInputTokens: response.CacheCreationInputTokens})
+		emitModelEvent(Event{Type: "model_usage", Turn: turn, Duration: time.Since(modelStarted).Milliseconds(), InputTokens: response.InputTokens, OutputTokens: response.OutputTokens, CacheReadInputTokens: response.CacheReadInputTokens, CacheMissInputTokens: response.CacheMissInputTokens, CacheCreationInputTokens: response.CacheCreationInputTokens})
 		result.Text += textBlocks(response.Content)
 		toolCalls := make([]ContentBlock, 0)
 		for _, block := range response.Content {
@@ -848,12 +893,15 @@ func (s *Session) start(parent context.Context, prompt Message, continuation boo
 				toolResults = make([]ContentBlock, len(toolCalls))
 				for i, call := range toolCalls {
 					message := "compact_context must be called by itself; no tools in this batch were executed"
+					if rejected := invalidToolInputs[call.ID]; rejected != "" {
+						message = rejected
+					}
 					s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
 					s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultSummary: message, ResultOutput: message, Status: "failed"})
 					toolResults[i] = toolResult(call.ID, message, true)
 				}
 			} else {
-				toolResults, toolErr = s.executeTools(ctx, turn, toolCalls, limits.ToolTimeout, limits.MaxToolResultBytes)
+				toolResults, toolErr = s.executeTools(ctx, turn, toolCalls, invalidToolInputs, limits.ToolTimeout, limits.MaxToolResultBytes)
 			}
 			compactIndex, compactCount := -1, 0
 			for i, call := range toolCalls {
@@ -1080,7 +1128,32 @@ func (s *Session) hasMessageIDLocked(id string) bool {
 	return contains(s.messages) || contains(s.steering) || contains(s.followUps)
 }
 
-func (s *Session) executeTools(ctx context.Context, turn int, calls []ContentBlock, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
+func normalizeToolCallInputs(content []ContentBlock) ([]ContentBlock, map[string]string) {
+	normalized := append([]ContentBlock(nil), content...)
+	var rejected map[string]string
+	for i := range normalized {
+		if normalized[i].Type != "tool_use" {
+			continue
+		}
+		input := strings.TrimSpace(string(normalized[i].Input))
+		if input == "" {
+			normalized[i].Input = json.RawMessage(`{}`)
+			continue
+		}
+		if json.Valid([]byte(input)) {
+			normalized[i].Input = json.RawMessage(input)
+			continue
+		}
+		normalized[i].Input = json.RawMessage(`{}`)
+		if rejected == nil {
+			rejected = make(map[string]string)
+		}
+		rejected[normalized[i].ID] = "tool arguments are malformed JSON; the tool was not executed. Retry this tool call with a valid JSON object matching its input schema."
+	}
+	return normalized, rejected
+}
+
+func (s *Session) executeTools(ctx context.Context, turn int, calls []ContentBlock, rejectedInputs map[string]string, timeout time.Duration, maxResultBytes int) ([]ContentBlock, error) {
 	parallel := len(calls) > 1 && !s.SerializeToolCalls
 	if len(s.pendingRequiredSkills()) > 0 {
 		parallel = false
@@ -1102,19 +1175,28 @@ func (s *Session) executeTools(ctx context.Context, turn int, calls []ContentBlo
 		}
 	}
 	results := make([]ContentBlock, len(calls))
+	execute := func(call ContentBlock) ContentBlock {
+		if message := rejectedInputs[call.ID]; message != "" {
+			started := time.Now()
+			s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
+			s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, ResultSummary: message, Status: "failed"})
+			return toolResult(call.ID, message, true)
+		}
+		return s.executeTool(ctx, turn, call, timeout, maxResultBytes)
+	}
 	if parallel {
 		var wg sync.WaitGroup
 		for i, call := range calls {
 			wg.Add(1)
 			go func(i int, call ContentBlock) {
 				defer wg.Done()
-				results[i] = s.executeTool(ctx, turn, call, timeout, maxResultBytes)
+				results[i] = execute(call)
 			}(i, call)
 		}
 		wg.Wait()
 	} else {
 		for i, call := range calls {
-			results[i] = s.executeTool(ctx, turn, call, timeout, maxResultBytes)
+			results[i] = execute(call)
 			if ctx.Err() != nil {
 				break
 			}
@@ -1512,46 +1594,56 @@ func (s *Session) CompensateToolOperation(ctx context.Context, callID string) er
 func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, timeout time.Duration, maxResultBytes int) ContentBlock {
 	tool, exists := s.resolveToolCall(call.Name, call.Input)
 	started := time.Now()
-	s.emit(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
+	toolTrace, traceErr := tracecontext.Child(s.TraceContext)
+	if traceErr != nil {
+		toolTrace = s.TraceContext
+	}
+	emitToolEvent := func(event Event) {
+		event.TraceID = toolTrace.TraceID
+		event.SpanID = toolTrace.SpanID
+		event.ParentSpanID = toolTrace.ParentSpanID
+		s.emit(event)
+	}
+	emitToolEvent(Event{Type: "tool_execution_start", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Args: eventToolArgs(call.Input), Status: "running"})
 	if err := ctx.Err(); err != nil {
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: err.Error(), ResultOutput: err.Error(), Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: err.Error(), ResultOutput: err.Error(), Status: "failed"})
 		return toolResult(call.ID, "Tool call cancelled before execution: "+err.Error(), true)
 	}
 	if !exists {
 		message := "unknown tool"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if !isSearchRouterCall(call.Name) && s.Tools != nil && !s.Tools.isActive(call.Name) {
 		message := "tool is available in the catalog but not active; use search with scope=tools to find and activate it first"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if tool.InternalOnly && call.Name != "read_tool_output" {
 		message := "this operation is available only through the matching search/read route"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if pendingSkills := s.pendingRequiredSkills(); !skillBootstrapCallAllowed(call.Name, call.Input, pendingSkills) {
 		message := "load the matching repository Skill with read_skill before using repository tools"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Duration: time.Since(started).Milliseconds(), Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if !json.Valid(call.Input) {
 		message := "tool arguments are not valid JSON"
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	if tool.Validate != nil {
 		if err := tool.Validate(call.Input); err != nil {
-			s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: err.Error(), ResultOutput: err.Error(), Status: "failed"})
+			emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: err.Error(), ResultOutput: err.Error(), Status: "failed"})
 			return toolResult(call.ID, "invalid tool arguments: "+err.Error(), true)
 		}
 	}
 	if call.Name == "read_file" && hasToolOutputArtifact(call.Input) {
 		if s.ToolOutputs == nil {
 			message := "tool output artifact storage is unavailable"
-			s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+			emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 			return toolResult(call.ID, message, true)
 		}
 	}
@@ -1562,12 +1654,17 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 	}
 	if err := s.beginToolOperation(turn, call, key, tool.ReplayPolicy); err != nil {
 		message := "could not persist tool operation intent: " + err.Error()
-		s.emit(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
+		emitToolEvent(Event{Type: "tool_execution_end", Turn: turn, Tool: call.Name, ToolCallID: call.ID, Error: message, ResultOutput: message, Status: "failed"})
 		return toolResult(call.ID, message, true)
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	toolCtx = context.WithValue(toolCtx, sessionRunContextKey{}, ctx)
+	toolCtx = tracecontext.WithContext(toolCtx, toolTrace)
+	runContext := tracecontext.WithContext(ctx, toolTrace)
+	metadata := RunMetadata{TraceContext: toolTrace, TaskID: s.TaskID, RunID: s.RunID, WorkerID: s.WorkerID, EventSink: s.OnEvent}
+	runContext = WithRunMetadata(runContext, metadata)
+	toolCtx = context.WithValue(toolCtx, sessionRunContextKey{}, runContext)
+	toolCtx = WithRunMetadata(toolCtx, metadata)
 	toolCtx = context.WithValue(toolCtx, toolTurnContextKey{}, turn)
 	toolCtx = context.WithValue(toolCtx, toolCallIDContextKey{}, call.ID)
 	toolCtx = context.WithValue(toolCtx, toolIdempotencyKeyContextKey{}, key)
@@ -1577,7 +1674,7 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 	if s.BeforeTool != nil {
 		callErr = s.BeforeTool(toolCtx, tool, call.Input)
 		if callErr != nil {
-			s.emit(Event{Type: "tool_permission_denied", Turn: turn, Tool: call.Name, Error: callErr.Error()})
+			emitToolEvent(Event{Type: "tool_permission_denied", Turn: turn, Tool: call.Name, Error: callErr.Error()})
 		}
 	}
 	if callErr == nil {
@@ -1642,7 +1739,7 @@ func (s *Session) executeTool(ctx context.Context, turn int, call ContentBlock, 
 		event.Error = callErr.Error()
 		event.Status = "failed"
 	}
-	s.emit(event)
+	emitToolEvent(event)
 	return toolResult(call.ID, output, callErr != nil)
 }
 
@@ -1700,6 +1797,22 @@ func (s *Session) emit(event Event) {
 	if s.OnEvent != nil {
 		event.At = time.Now().UTC()
 		event.Session = s.ID
+		if event.TraceID == "" {
+			event.TraceID = s.TraceContext.TraceID
+		}
+		if event.SpanID == "" {
+			event.SpanID = s.TraceContext.SpanID
+			event.ParentSpanID = s.TraceContext.ParentSpanID
+		}
+		if event.TaskID == "" {
+			event.TaskID = s.TaskID
+		}
+		if event.RunID == "" {
+			event.RunID = s.RunID
+		}
+		if event.WorkerID == "" {
+			event.WorkerID = s.WorkerID
+		}
 		s.OnEvent(event)
 	}
 }

@@ -7,12 +7,15 @@ isolated task workspace as an external profile. Keep it short and stable.
 ## Where project guidance belongs
 
 - Put stable project workflow and document pointers here.
-- Put reusable, source-backed facts in `.sigma-agent/MEMORY.md` using its dated
+- Put reusable, source-backed facts in `.sigma/MEMORY.md` using its dated
   `kind` and `source` format. Memory is retrieved on demand; it is not a task
   transcript or a place for general procedures.
 - Put task-specific procedures in `.agents/skills/<name>/SKILL.md`. Sigma shows
   Skill names and descriptions first, then loads a matching Skill when asked.
-- Session snapshots are only for resuming one conversation.
+- Sigma-owned project state belongs under `.sigma/`: durable memory, sessions,
+  run records, server state, package state, and command/container caches.
+- Session snapshots are only for resuming one conversation; prior-session
+  search can retrieve details from them when needed.
 
 ## Working on Sigma
 
@@ -54,7 +57,11 @@ isolated session workspace and searches it under the configured stable ID.
 
 ## Benchmark archive layout
 
-- Keep the study index, 50 task pages, config snapshots, and compact result summaries under `evals/swebench-verified-mini`. Keep full task/batch archives under `../archive/benchmarks/swebench-verified-mini/runs`; maintain the shared issue-pattern summary in the `Operational issue patterns and recoveries` section of `evals/swebench-verified-mini/experiment-method.md`. `var` is for active run logs and resumable runtime state, not the permanent study index.
+- Keep the study index, 50 task pages, config snapshots, and compact result summaries under `evals/swebench-verified-mini`. Keep full task/batch archives under `../archive/benchmarks/swebench-verified-mini/runs`; maintain the shared issue-pattern summary in the `Operational issue patterns and recoveries` section of `evals/swebench-verified-mini/experiment-method.md`. `var` is for active benchmark logs and staging, not the permanent study index or Sigma session storage.
 - Keep run-specific temporary logs and active evaluation staging under `var`; after the Agent run, official evaluation, and archive are complete, move the finished archive into the central `../archive` tree.
-- Keep Sigma's resumable runtime state in `var/runs` and `var/sessions`; do not move incomplete session state as part of archive cleanup.
+- Keep Sigma's resumable runtime state in `.sigma/runs` and `.sigma/sessions`;
+  do not move incomplete session state as part of archive cleanup. Legacy
+  `var/sessions` and `.sigma-agent/MEMORY.md` remain readable for recovery;
+  legacy `var/runs` artifacts are preserved in place. Migration never deletes
+  the legacy paths.
 - Historical `swb5/outputs` records are in `../archive/legacy/swb5/outputs`; shared datasets and task checkouts remain under the sibling `../swb5` cache.

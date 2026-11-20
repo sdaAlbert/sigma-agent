@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -25,19 +26,76 @@ const (
 // ResourceTypes lists every resource type a package can declare.
 var ResourceTypes = []ResourceType{ResourceExtensions, ResourceSkills, ResourcePrompts, ResourceThemes}
 
-// Manifest is the "pi" field of a package's package.json.
+// Manifest contains Pi-compatible resource declarations and Sigma-specific
+// executable tool declarations from a package's package.json.
 type Manifest struct {
-	Extensions    []string `json:"extensions,omitempty"`
-	Skills        []string `json:"skills,omitempty"`
-	Prompts       []string `json:"prompts,omitempty"`
-	Themes        []string `json:"themes,omitempty"`
-	ChangelogPath string   `json:"changelogPath,omitempty"`
+	Extensions    []string      `json:"extensions,omitempty"`
+	Skills        []string      `json:"skills,omitempty"`
+	Prompts       []string      `json:"prompts,omitempty"`
+	Themes        []string      `json:"themes,omitempty"`
+	ChangelogPath string        `json:"changelogPath,omitempty"`
+	CommandTools  []CommandTool `json:"commandTools,omitempty"`
 }
 
-// HasResources reports whether the manifest declares any resource type. A
+// CommandTool declares an executable-backed Agent tool in a Sigma package.
+// Command and Args are fixed by the package author; model input is sent as JSON
+// on stdin. ${package} and ${workspace} are expanded before execution.
+type CommandTool struct {
+	Name              string          `json:"name"`
+	Description       string          `json:"description"`
+	InputSchema       json.RawMessage `json:"input_schema"`
+	Command           string          `json:"command"`
+	Args              []string        `json:"args,omitempty"`
+	ModifiesWorkspace bool            `json:"modifies_workspace,omitempty"`
+}
+
+// Validate checks the manifest fields needed to expose a command as a tool.
+func (t CommandTool) Validate() error {
+	if !validPackageToolName(t.Name) {
+		return errors.New("name must start with a letter and contain only letters, digits, '_' or '-' (max 64 characters)")
+	}
+	if strings.TrimSpace(t.Description) == "" || len(t.Description) > 4096 {
+		return errors.New("description must contain 1–4096 characters")
+	}
+	if strings.TrimSpace(t.Command) == "" || strings.TrimSpace(t.Command) != t.Command {
+		return errors.New("command must be a non-empty executable")
+	}
+	if len(t.Args) > 64 {
+		return errors.New("args may contain at most 64 arguments")
+	}
+	for _, arg := range t.Args {
+		if len(arg) > 4096 {
+			return errors.New("an argument exceeds 4096 characters")
+		}
+	}
+	if len(t.InputSchema) == 0 || len(t.InputSchema) > 32*1024 || !json.Valid(t.InputSchema) {
+		return errors.New("input_schema must be valid JSON no larger than 32 KiB")
+	}
+	var schema struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(t.InputSchema, &schema); err != nil || schema.Type != "object" {
+		return errors.New("input_schema must define an object schema")
+	}
+	return nil
+}
+
+func validPackageToolName(name string) bool {
+	if len(name) == 0 || len(name) > 64 || !((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) {
+		return false
+	}
+	for _, r := range name[1:] {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// HasResources reports whether the package declares resources or tools. A
 // manifest that only carries metadata still uses directory auto-discovery.
 func (m Manifest) HasResources() bool {
-	return len(m.Extensions) > 0 || len(m.Skills) > 0 || len(m.Prompts) > 0 || len(m.Themes) > 0
+	return len(m.Extensions) > 0 || len(m.Skills) > 0 || len(m.Prompts) > 0 || len(m.Themes) > 0 || len(m.CommandTools) > 0
 }
 
 // Entries returns the declared patterns for one resource type.
@@ -59,10 +117,12 @@ type packageJSON struct {
 	Name    string          `json:"name"`
 	Version string          `json:"version"`
 	Pi      json.RawMessage `json:"pi"`
+	Sigma   json.RawMessage `json:"sigma"`
 }
 
-// ReadManifest reads the "pi" field of a package's package.json. It returns a
-// zero manifest when the file has no usable "pi" object.
+// ReadManifest reads Pi-compatible resources and Sigma tools from a package's
+// package.json. An unusable optional "pi" object is ignored for compatibility;
+// malformed Sigma tool declarations are rejected because they are executable.
 func ReadManifest(packageRoot string) (Manifest, error) {
 	var manifest Manifest
 	data, err := os.ReadFile(filepath.Join(packageRoot, "package.json"))
@@ -76,26 +136,41 @@ func ReadManifest(packageRoot string) (Manifest, error) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return manifest, err
 	}
-	if len(decoded.Pi) == 0 {
-		return manifest, nil
+	if len(decoded.Pi) > 0 {
+		var raw struct {
+			Extensions    []string `json:"extensions"`
+			Skills        []string `json:"skills"`
+			Prompts       []string `json:"prompts"`
+			Themes        []string `json:"themes"`
+			ChangelogPath string   `json:"changelogPath"`
+		}
+		if err := json.Unmarshal(decoded.Pi, &raw); err == nil {
+			manifest.Extensions = stringList(raw.Extensions)
+			manifest.Skills = stringList(raw.Skills)
+			manifest.Prompts = stringList(raw.Prompts)
+			manifest.Themes = stringList(raw.Themes)
+			manifest.ChangelogPath = raw.ChangelogPath
+		}
 	}
-	var raw struct {
-		Extensions    []string `json:"extensions"`
-		Skills        []string `json:"skills"`
-		Prompts       []string `json:"prompts"`
-		Themes        []string `json:"themes"`
-		ChangelogPath string   `json:"changelogPath"`
+	if len(decoded.Sigma) > 0 {
+		var raw struct {
+			Tools []CommandTool `json:"tools"`
+		}
+		if err := json.Unmarshal(decoded.Sigma, &raw); err != nil {
+			return Manifest{}, errors.New("sigma package manifest must be a JSON object")
+		}
+		seen := make(map[string]bool, len(raw.Tools))
+		for index, tool := range raw.Tools {
+			if err := tool.Validate(); err != nil {
+				return Manifest{}, errors.New("sigma.tools[" + strconv.Itoa(index) + "]: " + err.Error())
+			}
+			if seen[tool.Name] {
+				return Manifest{}, errors.New("sigma.tools contains duplicate tool " + tool.Name)
+			}
+			seen[tool.Name] = true
+		}
+		manifest.CommandTools = raw.Tools
 	}
-	if err := json.Unmarshal(decoded.Pi, &raw); err != nil {
-		// A "pi" object that is not a resource manifest is ignored, the
-		// same way Pi ignores a manifest it cannot read.
-		return Manifest{}, nil
-	}
-	manifest.Extensions = stringList(raw.Extensions)
-	manifest.Skills = stringList(raw.Skills)
-	manifest.Prompts = stringList(raw.Prompts)
-	manifest.Themes = stringList(raw.Themes)
-	manifest.ChangelogPath = raw.ChangelogPath
 	return manifest, nil
 }
 

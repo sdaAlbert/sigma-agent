@@ -38,13 +38,38 @@ Prompt / steering / follow-up
                        +----------------------> next model turn
 ```
 
+## Trace correlation
+
+Sigma carries W3C `traceparent` context into asynchronous service tasks and
+records trace and span IDs on its existing JSONL events. A submitted task gets
+a trace ID and a request span; each worker attempt creates a child span and
+passes its context to the Sigma process. The process creates a run span, then
+model requests and tool calls create child spans. Delegated investigation
+sessions create child spans under the tool that launched them. Task, run,
+worker, session, turn, and tool-call IDs remain separate fields because they
+describe different runtime entities.
+
+The service event stream is stored in `.sigma/sessions/<task-id>/events.jsonl`
+and includes queue, worker, and agent events in one task timeline. Direct CLI
+runs write agent events to `.sigma/runs/<run-id>/trace.jsonl`; their session
+transcript and snapshots remain in `.sigma/sessions`. Resume and retry attempts
+keep the task trace ID while receiving new worker and run spans. SSE event IDs
+are byte offsets for reconnecting and are not trace or span IDs.
+
+This is correlation in Sigma's event journal; it does not yet export OTLP spans
+or capture traces inside external tools, Docker containers, or model providers.
+
 ## Tool catalog and on-demand exposure
 
 The runtime keeps one registry of handlers and schemas. Ordinary Sigma tools
 remain visible to the model; tools marked `OnDemand` stay registered and
 permission checked but their schemas are omitted from model requests until
-activated. One `search` tool routes by scope: `tools` searches the catalog and
-activates matching schemas for the next turn; `skills`, `memory`, and
+activated. JavaScript workflow tools, package-declared command tools, and
+legacy `command_tools` settings are bridged into one workflow host before they
+enter this registry. They share tool search, permissions, timeout, output
+handling, and execution policy; only their handler adapter differs. One
+`search` tool routes by scope: `tools` searches the catalog and activates
+matching schemas for the next turn; `skills`, `memory`, and
 `session_history` search their respective indexes. The first user prompt
 preselects likely relevant extensions before the initial model request, so
 common tasks usually avoid a discovery turn. Activated tool names are stored
@@ -142,7 +167,9 @@ The default host-mode model surface is organized as follows:
 | `create_skill` | Create reusable project guidance with Skill metadata and path validation. | When Skills are enabled; on-demand through `search(scope=tools)` |
 | `prepare_environment` | Prepare a reusable Docker image. | Docker command mode only |
 | `web_search` | Current external information. | When configured; on-demand through `search(scope=tools)` |
-| MCP, command-plugin, workflow-extension tools | Package or external-service capabilities. | When configured; schemas are on-demand through `search(scope=tools)` |
+| Package command tools, `command_tools`, JavaScript workflow tools, MCP tools | Package or external-service capabilities routed through the shared workflow host and tool registry. | When configured; schemas are on-demand through `search(scope=tools)` |
+
+For issue-driven code changes, `record_change_contract` can capture expected behavior, likely code paths, and verification commands before implementation. Setting `require_change_contract_before_write` makes this a required gate before the first workspace write; the default runtime leaves it optional. The contract supplies a concrete plan and acceptance checklist, while the regular test and diff gates verify the resulting patch.
 
 `search_memory`, `search_skills`, `search_session_history`, and `tool_search`
 are internal routes behind `search`, not separate model-visible entries.
@@ -169,7 +196,7 @@ POST /cancel -> process context cancel -> cancelled session snapshot
 POST /resume -> same task/session id -> Continue persisted transcript
 ```
 
-The service binds to loopback by default and stores task records and event logs under `var/server/`. It is a single-process prototype without authentication; do not expose it on a network. A saved session is required for resume. Tasks targeting the same canonical workspace are queued behind an OS-backed workspace lock; separate worktrees remain eligible to run concurrently. CLI processes also hold a per-session OS lock for their lifetime, so the same session cannot be resumed by two Sigma processes at once. Locks are released by the operating system when a process exits.
+The service binds to loopback by default and stores task records and event logs under `.sigma/server/`. It is a single-process prototype without authentication; do not expose it on a network. A saved session is required for resume. Tasks targeting the same canonical workspace are queued behind an OS-backed workspace lock; separate worktrees remain eligible to run concurrently. CLI processes also hold a per-session OS lock for their lifetime, so the same session cannot be resumed by two Sigma processes at once. Locks are released by the operating system when a process exits.
 
 The HTTP API accepts a task with `POST /tasks`, reports state through `GET /tasks/{id}`, and streams lifecycle/model/tool events through `GET /tasks/{id}/events`. `POST /tasks/{id}/messages` accepts `{"message":"...","mode":"steer"}` or `{"message":"...","mode":"follow_up"}`. Steering is inserted at the next safe Agent turn boundary; follow-up runs after the current request would otherwise settle. Messages are durably queued and deduplicated across worker restarts. Sending a message to a completed task queues continuation of its saved session. SSE reconnects replay events after `Last-Event-ID`; that resumes event delivery, while session continuation resumes Agent work. The runtime currently exposes these interfaces through HTTP and CLI without a browser chat client.
 
@@ -177,15 +204,16 @@ The HTTP API accepts a task with `POST /tasks`, reports state through `GET /task
 
 Current source is explored with ordinary file listing, literal search, and bounded reads. Sigma Agent does not chunk, embed, or store source files in Qdrant.
 
-Long-term memory is a separate, opt-in retrieval path:
+Curated project memory is separate from transcripts. Local lexical retrieval is
+the default; vector retrieval is an opt-in alternative:
 
 ```text
-.sigma-agent/MEMORY.md -> parse facts + provenance -> embed facts -> Qdrant sigma_agent_memory
-query -> local BM25 ranks ----------------------------------------------\
-query -> embedding -> repository-filtered vector ranks -------------------+-> RRF -> search(scope=memory)
+.sigma/MEMORY.md -> parse facts + provenance -> embed facts -> Qdrant sigma_agent_memory
+query -> local BM25 ranks -----------------------------------------------> search(scope=memory)
+query -> embedding -> repository-filtered vector ranks ---- optional -----> RRF -> search(scope=memory)
 ```
 
-The Markdown file remains the source of truth. Run `--index-memory` from its workspace to sync only its facts into the derived Qdrant collection. At runtime, `search(scope=memory)` combines local BM25 with vector candidates using reciprocal-rank fusion; Qdrant filters by exact workspace identity. If embedding/Qdrant is unavailable or no vector candidates match, it falls back to BM25. Returned facts retain source, category, and date; current source and tests take precedence. When `memory_auto_write` is enabled, a successful non-interactive run gets a separate bounded post-run model call that may append up to three facts; failed/interrupted runs do not write. Markdown stays outside the result patch, and vector indexing is refreshed after additions.
+The Markdown file remains the source of truth. Local BM25 is the default and reads it directly. Set `memory_search_backend: "hybrid"` to opt into `--index-memory`-prepared Qdrant candidates and reciprocal-rank fusion; Qdrant filters by exact workspace identity. If embedding/Qdrant is unavailable or no vector candidates match, hybrid mode falls back to BM25. Returned facts retain source, category, and date; current source and tests take precedence. When `memory_auto_write` is enabled, a successful run gets a separate bounded post-run model call that may append up to three facts; failed/interrupted runs do not write. Markdown stays outside the result patch, and vector indexing is refreshed after additions only in hybrid mode.
 
 Repository memory is used during ordinary task runs through `search` with
 `scope=memory`. Mini SWE configs may enable it, but a memory-enabled run
@@ -213,7 +241,7 @@ and adds its bounded contents (up to 16 KiB) as project instructions. This
 project-level file is for stable conventions and pointers; Sigma currently
 loads the repository-root file only, not ancestor or nested `AGENTS.md` files.
 Keep task-specific procedures in Skills and source-backed cross-task facts in
-`.sigma-agent/MEMORY.md` instead of duplicating them in `AGENTS.md`.
+`.sigma/MEMORY.md` instead of duplicating them in `AGENTS.md`.
 
 `project_instructions_file` can add an external Markdown profile to a run. This
 is useful when issue tasks use independent checkouts: Sigma reads the profile
@@ -222,16 +250,17 @@ The target repository does not need an `AGENTS.md` copy.
 
 At startup, Sigma scans the project `.agents/skills/` and `.pi/skills/` roots, followed by user `~/.agents/skills/` and `~/.pi/agent/skills/`. Project Skills win name collisions over user Skills. It discovers nested `SKILL.md` files and nested frontmatter Markdown under `.agents/skills/`; `.pi/skills/` and `~/.pi/agent/skills/` also accept standalone root Markdown Skill files. Frontmatter requires `name` and `description`; `license`, `compatibility`, `disable-model-invocation`, and `user-invocable` are also read. Other fields are tolerated but do not change Sigma's tool policy. When Skills are present, the model uses `search` with `scope=skills` to retrieve up to ten lexical matches from Skill metadata, then calls `read_skill` with a name to load the body (up to 12 KiB) or with a Skill-relative path to load a supported text reference (up to 32 KiB). A user can explicitly invoke a Skill from the REPL with `/skill:<name> <task>`. When explicitly asked to preserve reusable guidance, the model can create a project Skill through `create_skill`; it refuses to overwrite existing files, and the new Skill becomes visible after `/reload` or a session restart. Skill reads reject symlinks and path traversal; loading Skill files does not automatically run scripts. Pi's `allowed-tools` permission behavior and full npm/git Pi package behavior are not implemented. Set `skills_enabled` to `false` to run a no-Skill ablation; repository memory remains independently enabled.
 
-The optional `.sigma-agent/MEMORY.md` is read from the current repository worktree with a 16 KiB source-file limit, but its contents are never injected wholesale into the prompt. It stores short durable facts shared across sessions; session snapshots remain separate recovery state, and source browsing remains separate. Memory should capture expensive-to-rediscover test procedures, architecture decisions, compatibility rules, and recurring pitfalls—not source code or task transcripts. New entries use `- YYYY-MM-DD | kind: testing | source: path | fact`; supported kinds are `testing`, `architecture`, `compatibility`, `pitfall`, and `workflow`. When entries exist, the `search` router exposes `scope=memory`: local BM25 works without services, while configured embeddings and Qdrant add vector search and RRF. Vector failures or empty results fall back to local BM25. `memory_enabled: false` removes this scope. Agent edit tools cannot modify the file.
+The optional `.sigma/MEMORY.md` is read from the current repository worktree with a 25 KiB source-file limit, but its contents are never injected wholesale into the prompt. It stores concise durable preferences, feedback, project decisions, test procedures, architecture choices, compatibility rules, and recurring pitfalls; session snapshots remain separate recovery state. `/memory remember [kind] <fact>` and the `remember_memory` tool persist explicit requests and useful corrections immediately. When entries exist, `search` exposes `scope=memory`: local BM25 is the default; `memory_search_backend: "hybrid"` opts into configured embeddings and Qdrant. Hybrid failures or empty results fall back to local BM25. `memory_enabled: false` removes this scope. Agent edit tools cannot modify the file.
 
 For cross-clone work, `memory_file` can point at a reviewed Markdown source
 outside the target checkout and `memory_repository_id` gives it a stable scope.
-Sigma materializes that file in the active workspace so BM25 and vector search
-use the same local facts and stable Qdrant filter. For direct TUI sessions this
+Sigma materializes that file in the active workspace so BM25 and optional vector search
+use the same local facts and stable repository scope. For direct TUI sessions this
 is the selected checkout; legacy sessions created with a worktree use that
 saved worktree. `--index-memory` also uses the configured external source. When
 `memory_auto_write` is enabled,
-successful sessions append to the external source and refresh that same scope.
+successful sessions append to the external source; they refresh the vector index
+only when `memory_search_backend` is `hybrid`.
 
 `--index-memory` synchronizes current-workspace memory facts to `sigma_agent_memory`; no code collection or code indexing command exists. Vector search applies exact `repo_id` filtering and returns kind, provenance, and age. Entries older than 180 days are marked for revalidation. The prompt asks the Agent to verify retrieved facts against current code/tests, treats memory as untrusted reference data, and gives current source and user instructions precedence. Automatic capture is controlled by `memory_auto_write` and must remain disabled in controlled memory/no-memory evaluations to prevent cross-task leakage. Symlink paths are rejected so project context cannot escape the workspace.
 
@@ -249,7 +278,7 @@ successful sessions append to the external source and refresh that same scope.
 - Session events and tool policy hooks are independent of the provider adapter. The file session store checkpoints transcript, queued messages, partial streamed text, and the tool-operation journal; the context manager compacts only the provider request while retaining canonical history. A per-session OS lease prevents multiple Sigma processes from resuming and writing the same session concurrently. Each tool registration defaults to `never_replay`; an adapter may explicitly opt into `safe_to_replay` and receives a stable idempotency key through its context. On resume, Sigma reuses persisted results, asks an optional recovery hook about external state, replays only when both the saved operation and current registration allow it, and otherwise returns an unknown-outcome result for inspection. Safe replay is an adapter contract, not a universal exactly-once guarantee; external systems must honor the key for deduplication. Compensation remains explicit and domain-specific.
 - A read-only GitHub MCP adapter can add issue, repository, and pull-request context when credentials are configured. The built-in integration cannot push branches or create pull requests. Separately configured MCP servers can expose additional tools. The runtime owns JSON-RPC framing, version discovery/fallback, tool listing, and process cleanup; all remote tools are namespaced and serialized.
 - A shared MCP client (`internal/mcp`) supports stdio child processes and Streamable HTTP endpoints. It handles protocol discovery/fallback, JSON-RPC requests, tool listing, and transport shutdown. Configured HTTP servers can supply static request headers; OAuth and legacy HTTP+SSE are not implemented. The GitHub adapter and configured MCP servers use the same host tool registration and dispatch path. Remote tools are exposed as `mcp__<server>__<tool>` and run in sequence.
-- A package manager (`internal/pkgmgr`) installs npm and git packages into a scope directory and records them in a scope registry. A package contributes Agent Skills, MCP servers over stdio or Streamable HTTP, and JavaScript workflow extensions. The workflow host supports slash commands, Agent tool registration, notifications, TUI confirmations, and read-only lifecycle events; it does not expose mutable session state or custom TUI rendering. Built-in GitHub MCP and configured MCP server tools use the same host tool registration and dispatch path.
+- A package manager (`internal/pkgmgr`) installs npm and git packages into a scope directory and records them in a scope registry. A package can contribute Agent Skills, JavaScript workflow extensions, and Sigma-declared command tools under `sigma.tools`. MCP servers are configured separately and can launch code from an installed package. The legacy `command_tools` setting remains available for local one-off tools. Both command forms and JavaScript tools are registered through the same workflow host and Agent registry. The workflow host supports slash commands, Agent tool registration, notifications, TUI confirmations, and read-only lifecycle events; it does not expose mutable session state or custom TUI rendering. Built-in GitHub MCP and configured MCP server tools use the same host tool registration and dispatch path.
 - Configured external command tools run one trusted host executable per tool call with JSON stdin and bounded stdout. They inherit the user's environment and permissions; this adapter is not a sandbox or package manager.
 
 ## Initial scope and limits

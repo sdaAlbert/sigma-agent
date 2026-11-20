@@ -23,6 +23,7 @@ defaults. A file can contain only the settings that need changing.
   "command_execution_image": "debian:trixie-slim",
   "allow_container_network": false,
   "skills_enabled": true,
+  "memory_search_backend": "local",
   "web_search_enabled": false,
   "default_tool_permission": "allow",
   "tool_permissions": {},
@@ -43,18 +44,18 @@ shared profile outside a target checkout without editing that checkout:
 ```json
 {
   "project_instructions_file": "../../AGENTS.md",
-  "memory_file": "../../.sigma-agent/profiles/my-benchmark/MEMORY.md",
+  "memory_file": "../../.sigma/profiles/my-benchmark/MEMORY.md",
   "memory_repository_id": "benchmark:owner/repository"
 }
 ```
 
 The external instructions file is added alongside any root `AGENTS.md` in the
 task workspace. An external memory file is copied into the active repository
-workspace's `.sigma-agent/MEMORY.md`; BM25 and Qdrant search use the configured
-stable `memory_repository_id`, so separate clones of the same upstream repo can
-share one memory namespace. The target checkout itself is not changed. If
+workspace's `.sigma/MEMORY.md`; local BM25 and the optional hybrid backend
+use the configured stable `memory_repository_id`, so separate clones of the same
+upstream repo can share one memory namespace. The target checkout itself is not changed. If
 `memory_auto_write` is enabled, successful runs append reviewed-format facts to
-the configured external file and refresh its Qdrant index. Run metadata records
+the configured external file and refresh its Qdrant index only in `hybrid` mode. Run metadata records
 the external paths, instruction hash, memory scope, and starting memory hash.
 
 | Setting | Default | Allowed range | Purpose |
@@ -80,14 +81,16 @@ the external paths, instruction hash, memory scope, and starting memory hash.
 | `allow_container_network` | `false` | boolean | Docker mode only: allow command and environment-build containers to access the internet. It does not restrict networking in host mode, where commands inherit the host's network access. Change the saved Docker setting in the TUI `/settings` picker or set it in configuration; see [Docker command environments](DOCKER.md) |
 | `skills_enabled` | `true` | boolean | Discover project `.agents/skills/` and `.pi/skills/`, plus user `~/.agents/skills/` and `~/.pi/agent/skills/`. Set to `false` for a matched no-Skill evaluation; repository memory stays enabled |
 | `memory_enabled` | `true` | boolean | Enable repository memory context and the `search` scope `memory`. Set to `false` for a matched no-memory comparison; code browsing tools remain available |
-| `memory_auto_write` | `false` | boolean | After a successful non-interactive run, use one bounded model call to extract up to three durable repository facts into `.sigma-agent/MEMORY.md`, then refresh Qdrant when configured. Requires `memory_enabled`; generated notes and extra tokens are recorded in `run.json`. Set it to `true` to opt in. |
+| `memory_search_backend` | `local` | `local` or `hybrid` | `local` searches the Markdown memory file directly with BM25 and needs no embedding service or Qdrant. `hybrid` opts into BM25 plus semantic vector retrieval when embedding and Qdrant settings are available; failures fall back to local BM25. |
+| `memory_auto_write` | `true` | boolean | After a successful run, use one bounded model call to extract up to three durable repository facts into `.sigma/MEMORY.md`. Explicit `/memory remember` requests and the `remember_memory` tool save immediately. The default `local` backend skips vector indexing; `hybrid` also refreshes the optional Qdrant index. Requires `memory_enabled`; generated notes and extra tokens are recorded in the run record. Set it to `false` to opt out. |
 | `project_instructions_file` | unset | absolute path after config resolution | Add an external Markdown instruction file to the session prompt without copying it into the target checkout. Maximum 16 KiB; `run.json` records its path and SHA-256. |
-| `memory_file` | unset | absolute path after config resolution | Use an external reviewed memory source instead of the selected repository's `.sigma-agent/MEMORY.md`; it is loaded into the active repository workspace and can receive automatic memory writes. Maximum 16 KiB. |
+| `memory_file` | unset | absolute path after config resolution | Use an external reviewed memory source instead of the selected repository's `.sigma/MEMORY.md`; it is loaded into the active repository workspace and can receive automatic memory writes. Maximum 25 KiB. |
 | `memory_repository_id` | unset | 1–128 letters, digits, `.`, `_`, `:`, `/`, or `-` | Required with `memory_file`; stable Qdrant/BM25 scope shared by independent clones of one upstream repository. |
 | `web_search_enabled` | `false` | boolean | Add MiniMax's hosted `web_search` as an explicit Agent tool. Uses provider credentials and quota. |
 | `disable_configured_mcp_servers` | `false` | boolean | Skip every MCP server in user/project `mcp.json`; use `true` for issue-only benchmark runs. |
-| `disable_workflow_extensions` | `false` | boolean | Skip user/project JavaScript workflow extensions, which can register additional tools. |
+| `disable_workflow_extensions` | `false` | boolean | Skip package JavaScript workflow extensions and package-declared `sigma.tools`. Personal `command_tools` remain controlled by their own config entries. |
 | `default_tool_permission` | `allow` | `allow`, `deny`, or `ask` | Fallback permission applied to every registered tool. With no risk-class or per-tool override, registered tools run automatically. `ask` requires an interactive TUI approval; non-interactive runs deny it. |
+| `require_change_contract_before_write` | `false` | boolean | Require the Agent to call `record_change_contract` after inspecting the issue and before its first workspace write. The contract records behavior/acceptance conditions, intended paths, and verification commands. Use for controlled coding runs and matched workflow evaluations; it is optional by default. |
 | `risk_permissions` | `{}` | risk class → `allow`, `deny`, or `ask` | Policy for `read_only`, `workspace_write`, `network`, `external_service`, and `commit_publish` actions. Applied after the default and before per-tool overrides. |
 | `tool_permissions` | `{}` | tool name → `allow`, `deny`, or `ask` | Exact per-tool overrides, highest precedence. Names match those exposed to the model, including namespaced MCP tools. |
 
@@ -100,7 +103,7 @@ including the tool-call ID, decision, risk, target, reason, and local account
 label that approved it. The label is the local OS account name, not a
 cryptographic identity assertion. Authorization events are flushed before
 execution. The same events append to the session's
-`var/sessions/<session-id>/authorizations.jsonl`, so they remain queryable after
+`.sigma/sessions/<session-id>/authorizations.jsonl`, so they remain queryable after
 resuming the session; the effective policy and audit-log path are copied into
 `run.json`.
 
@@ -167,10 +170,10 @@ tunable limits.
 - Packages are installed with `sigma --install npm:<name>`, listed with
   `sigma --list-packages`, and recorded in a scope registry
   (`~/.sigma-agent/packages.json` for the user scope,
-  `<repo>/.sigma-agent/packages.json` for the project scope).
+  `<repo>/.sigma/packages.json` for the project scope).
 - MCP servers are configured in `mcp.json`, using the `mcpServers` shape shared
   by other MCP clients. Sigma Agent reads `~/.sigma-agent/mcp.json` and
-  `<repo>/.sigma-agent/mcp.json`, and also reads `<repo>/.pi/mcp.json`.
+  `<repo>/.sigma/mcp.json`, and also reads `<repo>/.pi/mcp.json`.
 
 ```json
 {
@@ -195,10 +198,13 @@ supported sources, and the current limits.
 
 ## External command tools
 
-`command_tools` can expose trusted local executables as Agent tools. Each call
-starts the configured command in the task workspace, writes one JSON object to
-stdin, and returns stdout as the tool result. Configure the tool's JSON Schema
-so the model knows the accepted arguments:
+`command_tools` is the concise, personal configuration form for exposing a
+trusted local executable as an Agent tool. Each call starts the configured
+command in the task workspace without a shell, writes one JSON object to stdin,
+and returns bounded stdout. This form remains supported for existing configs.
+For reusable tools that should ship with Skills or workflow extensions, declare
+the command under `sigma.tools` in a package manifest; see [Packages and MCP
+servers](PACKAGES.md#declare-a-command-backed-tool-in-a-package).
 
 ```json
 {
@@ -220,12 +226,14 @@ so the model knows the accepted arguments:
 }
 ```
 
-The executable runs on the host with the user's permissions and inherited
-environment. Only add commands you trust. Tool permission rules apply using the
-configured tool name; output is capped before it enters model context. Set
+Configured executables run on the host with the user's permissions and
+environment. Only add commands you trust. This config form and package-declared
+tools pass through the same extension host and Agent registry as JavaScript
+workflow tools, so the same tool search, permission policy, output limit, and
+execution lifecycle apply. Tool names are the permission keys. Set
 `modifies_workspace` to `true` if the tool may edit repository files; successful
-calls then trigger Sigma's normal test-and-diff review gate. This is a
-lightweight executable adapter, not a package manager or process sandbox.
+calls then trigger Sigma's normal test-and-diff review gate. The executable
+adapter does not sandbox the process.
 
 Interactive TUI setup uses `/login` to open a credential picker, or `/login <provider>`
 to enter one directly. It saves API keys or the GitHub token; `/model`
@@ -257,8 +265,8 @@ is read-only and can provide issue, repository, and pull-request context.
 See [Docker command environments](DOCKER.md) for the full lifecycle and cache
 model. In brief, interactive foreground `run_command` calls reuse one named
 container during a session. Sigma removes that container on graceful exit; the
-selected Docker image, prepared image, mounted workspace, `.sigma-agent` state,
-and `.sigma-agent/container-home` package caches remain available to the next
+selected Docker image, prepared image, mounted workspace, `.sigma` state,
+and `.sigma/container-home` package caches remain available to the next
 session. `prepare_environment` is optional and should be used only when the
 project needs a missing system tool or library. An empty setup command only
 selects an existing base image; a non-empty setup command builds a reusable
@@ -288,7 +296,7 @@ does not support `web_search`, set `SIGMA_AGENT_BASE_URL` to the supported host.
 
 ## Repository long-term memory
 
-Keep durable, cross-task repository facts in `.sigma-agent/MEMORY.md`, one entry per line. The file is the source of truth and is not injected wholesale into the model prompt:
+Keep durable, cross-task repository facts in `.sigma/MEMORY.md`, one entry per line. The file is the source of truth and is not injected wholesale into the model prompt:
 
 ```markdown
 - 2026-10-30 | kind: testing | source: docs/testing.md | Run focused package tests before the full Go suite.
@@ -309,23 +317,27 @@ reads the Markdown directly, so no extra command or Qdrant service is needed
 for the local-only path. Set `memory_enabled` to `false` to disable memory for
 a run.
 
-When vector search is configured, run `sigma --index-memory` from the workspace after
-updating entries so the derived Qdrant payloads include the category and new
-content hash. Local BM25 always reads the current Markdown file directly.
+`memory_search_backend` defaults to `local`, even if embedding credentials or a
+Qdrant service happen to be configured. This keeps ordinary memory retrieval
+local and lexical. Set it to `hybrid` only when semantic search is useful for
+your workflow. The explicit `--index-memory` command remains an opt-in
+maintenance operation for preparing the Qdrant index.
 
 When memory is retrieved, Sigma Agent labels entries reviewed more than 180 days
 ago as `revalidation_required`. The Agent is instructed to verify applicable
 facts against the current checkout and tests before using them. Current source,
 repository instructions, and the user's request take precedence over memory.
 
-`memory_auto_write` is an opt-in post-task capture step. It runs only after a
-non-interactive run returns successfully; failed, cancelled, or interrupted
+`memory_auto_write` defaults to enabled and runs after a
+successful run returns; failed, cancelled, or interrupted
 runs do not write. The same model receives a bounded evidence bundle containing
 the task, patch, test output, and final notes, and may return up to three short
 facts. The writer validates categories and source paths, removes common secret
-patterns, deduplicates exact facts, and enforces the 16 KiB memory-file limit.
+patterns, deduplicates exact facts, and enforces the 25 KiB memory-file limit.
 The memory Markdown is updated atomically and excluded from the task patch. The
-extra model call consumes tokens. If Qdrant or the embedding endpoint is
+extra model call consumes tokens. With `memory_search_backend: "local"`, saved
+facts are immediately searchable from Markdown without vector indexing. With
+`hybrid`, Sigma also refreshes Qdrant; if Qdrant or the embedding endpoint is
 unavailable, the Markdown entry remains available to local BM25. Automatically
 captured notes are model-generated and may be wrong; verify them before relying
 on them. Keep this setting disabled in controlled memory/no-memory evaluations
@@ -333,7 +345,7 @@ so one task cannot alter another task's memory condition.
 
 Use `/memory` in either interactive terminal to inspect entries, their source,
 age, and stable content ID. To selectively forget one fact, run
-`/memory forget <id-prefix>` using at least eight hexadecimal characters shown
+`/memory remember [kind] <fact>` to save a preference or correction immediately. Use `/memory forget <id-prefix>` with at least eight hexadecimal characters shown
 beside that entry. The content ID does not depend on the entry's line number, so
 removing or appending other facts will not redirect a saved selection. Updates
 are file-locked across Sigma processes and written atomically. The Markdown file
@@ -341,7 +353,7 @@ is authoritative; when vector memory is configured, forgetting also syncs the
 Qdrant collection and removes deleted facts. If that sync fails, the command
 reports it and lexical search still uses the updated Markdown. No entry is
 deleted just because it is old: entries over 180 days are flagged for review,
-and a human can keep, revise, or forget them. At the 16 KiB limit, automatic
+and a human can keep, revise, or forget them. At the 25 KiB limit, automatic
 capture reports `capacity_reached` (or `saved_capacity_reached` if only some
 proposed facts fit) instead of silently appearing successful. Review or forget
 entries to make room.
@@ -350,15 +362,16 @@ Agent tasks use the current working folder, so this file must be present there
 for the memory search scope to be registered. Vector results
 are validated against the current Markdown entry hashes before use.
 
-When vector settings are configured, run `sigma --index-memory` from the workspace to sync
-only repository memory facts into the `sigma_agent_memory` collection. Source files are
-not embedded or stored in Qdrant. For current-code exploration, the Agent uses
+To use the optional hybrid backend, set `memory_search_backend` to `hybrid` and
+configure an embedding endpoint plus Qdrant. Run `sigma --index-memory` from the
+workspace to sync only repository memory facts into the `sigma_agent_memory`
+collection. Source files are not embedded or stored in Qdrant. For current-code exploration, the Agent uses
 `run_command` with `rg --files` and `rg -n` when ripgrep is available; the tool
 description supplies host-specific shell fallbacks. `read_file` remains the
 bounded, workspace-relative interface for opening source files.
 
 `search` with `scope=memory` retrieves a small, repository-filtered set of relevant
-entries. With embeddings and Qdrant available, it fuses BM25 and semantic vector
+entries. In the optional `hybrid` mode, with embeddings and Qdrant available, it fuses BM25 and semantic vector
 ranks using reciprocal-rank fusion (RRF); without them, it uses local BM25.
 Changed or removed Markdown entries are synchronized on the next index run;
 stale vector hits are discarded by content hash. Vector failures or empty
@@ -377,7 +390,8 @@ credential in `.secrets/embedding-api-key`. Environment variables
 `SIGMA_AGENT_EMBEDDING_BASE_URL`, and `SIGMA_AGENT_EMBEDDING_API_KEY` override
 the local settings when set. For Hugging Face, `HF_TOKEN` can be used instead
 of the embedding API key. Qdrant defaults to `http://localhost:6333`; override
-it with `SIGMA_AGENT_QDRANT_URL` when needed.
+it with `SIGMA_AGENT_QDRANT_URL` when needed. These settings are used only by the
+optional `hybrid` backend or the explicit `--index-memory` operation.
 Start the existing Qdrant service and index a repository with:
 
 ```powershell

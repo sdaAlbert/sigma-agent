@@ -13,13 +13,19 @@ import (
 )
 
 type Event struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id,omitempty"`
-	Turn      int    `json:"turn,omitempty"`
-	Tool      string `json:"tool,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Args      string `json:"args,omitempty"`
+	Type         string `json:"type"`
+	TraceID      string `json:"trace_id,omitempty"`
+	SpanID       string `json:"span_id,omitempty"`
+	ParentSpanID string `json:"parent_span_id,omitempty"`
+	TaskID       string `json:"task_id,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	WorkerID     string `json:"worker_id,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	Turn         int    `json:"turn,omitempty"`
+	Tool         string `json:"tool,omitempty"`
+	Status       string `json:"status,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Args         string `json:"args,omitempty"`
 }
 
 type Command struct {
@@ -29,11 +35,12 @@ type Command struct {
 
 // Tool is an Agent callable registered by a workflow extension.
 type Tool struct {
-	Name              string          `json:"name"`
-	Description       string          `json:"description,omitempty"`
-	InputSchema       json.RawMessage `json:"input_schema"`
-	ExecutionMode     string          `json:"execution_mode,omitempty"`
-	ModifiesWorkspace bool            `json:"modifies_workspace,omitempty"`
+	Name              string                      `json:"name"`
+	Description       string                      `json:"description,omitempty"`
+	InputSchema       json.RawMessage             `json:"input_schema"`
+	ExecutionMode     string                      `json:"execution_mode,omitempty"`
+	ModifiesWorkspace bool                        `json:"modifies_workspace,omitempty"`
+	Validate          func(json.RawMessage) error `json:"-"`
 }
 
 type Handler interface {

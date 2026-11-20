@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/sdaAlbert/sigma-agent/internal/agent"
+	"github.com/sdaAlbert/sigma-agent/internal/sigmahome"
 	workspaceagent "github.com/sdaAlbert/sigma-agent/internal/workspace"
 )
 
@@ -286,7 +287,7 @@ func piContentText(raw json.RawMessage) (string, error) {
 }
 
 func saveImportedPiSession(imported importedPiSession, sessionRoot string) error {
-	store, err := agent.NewFileSessionStore(filepath.Join(sessionRoot, "var", "sessions"))
+	store, err := agent.NewFileSessionStore(sigmahome.Sessions(sessionRoot))
 	if err != nil {
 		return err
 	}

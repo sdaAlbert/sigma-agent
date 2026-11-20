@@ -24,6 +24,8 @@ Use this document for durable Sigma design decisions and the reasoning behind ch
 
 The benchmark-driven coding-agent changes are documented separately in [Sigma coding-agent iteration history](SIGMA_CODING_AGENT_ITERATION_HISTORY.md). That record distinguishes Sigma runtime/tool code from Skill content, Codex's benchmark operations, provider configuration, and Pi-side behavior, and links each claim to code or scored runs.
 
+The tool and workflow-extension iteration process is documented in [Sigma self-improvement v1](SELF_IMPROVEMENT.md); it complements this design history and does not automatically promote changes.
+
 ### 2026-11-07 — Align tool context and completion workflow with Pi
 
 - Raised file-reading and visible tool-result limits, added offset-based reads and chunked retrieval for longer outputs, and expanded command-output capture. Sigma keeps its own per-item and per-session artifact storage quotas; matching user-visible limits does not imply identical internals.

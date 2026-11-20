@@ -28,12 +28,19 @@ func TestProjectGuidanceSearchesSkillMetadataAndReadsBodyOnDemand(t *testing.T) 
 	if strings.Contains(guidance.SystemPrompt("base"), "Inspect the failing path") {
 		t.Fatal("skill body was disclosed before the skill was selected")
 	}
-	if strings.Contains(guidance.SystemPrompt("base"), "go-issue-workflow") || !strings.Contains(guidance.SystemPrompt("base"), "search_skills") {
+	if strings.Contains(guidance.SystemPrompt("base"), "go-issue-workflow") || !strings.Contains(guidance.SystemPrompt("base"), "scope=skills") {
 		t.Fatal("system prompt should expose Skill discovery without inlining the catalog")
 	}
 	projectPrompt := guidance.SystemPrompt("base")
 	if !strings.Contains(projectPrompt, "record_change_contract") || !strings.Contains(projectPrompt, "optional and never required before writing") {
 		t.Fatal("project guidance should describe the change contract as an optional planning aid")
+	}
+	if !strings.Contains(projectPrompt, "Treat concrete examples in the issue and existing test assertions as acceptance contracts") || !strings.Contains(projectPrompt, "Do not relax or rewrite an existing test expectation just to make the implementation pass") {
+		t.Fatal("project guidance should preserve acceptance syntax and test expectations")
+	}
+	guidance.RequireChangeContract = true
+	if forced := guidance.SystemPrompt("base"); !strings.Contains(forced, "BENCHMARK WRITE GATE") || !strings.Contains(forced, "exact_acceptance_examples") {
+		t.Fatalf("forced contract guidance missing: %s", forced)
 	}
 
 	tool := guidance.SkillTool()
@@ -116,7 +123,7 @@ func TestProjectGuidanceLoadsRepositoryMemoryAsReadOnlyContext(t *testing.T) {
 	if strings.Contains(prompt, "Run focused Go package tests before the full suite") || strings.Contains(prompt, "source: docs/testing.md") {
 		t.Fatalf("repository memory contents should be retrieved on demand, not injected into the prompt: %s", prompt)
 	}
-	if !strings.Contains(prompt, "search_memory") {
+	if !strings.Contains(prompt, "scope=memory") {
 		t.Fatalf("repository memory retrieval instructions missing from prompt: %s", prompt)
 	}
 	if _, err := guidance.SkillTool().Handle(context.Background(), json.RawMessage(`{"name":"missing"}`)); err == nil {
@@ -193,7 +200,7 @@ func TestLoadMemoryEntriesRejectsUnattributedFacts(t *testing.T) {
 func TestMemorySearchPromptDoesNotInjectWholeMemory(t *testing.T) {
 	guidance := ProjectGuidance{Memory: "sensitive architecture detail", Skills: nil}
 	prompt := guidance.SystemPromptWithMemorySearch("base")
-	if strings.Contains(prompt, "sensitive architecture detail") || !strings.Contains(prompt, "search_memory") {
+	if strings.Contains(prompt, "sensitive architecture detail") || !strings.Contains(prompt, "scope=memory") {
 		t.Fatalf("memory search prompt should direct retrieval without injecting every memory: %s", prompt)
 	}
 }

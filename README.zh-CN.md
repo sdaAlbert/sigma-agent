@@ -51,7 +51,7 @@ TUI 会自动启动会话。输入 `/login` 保存提供商 Key，输入 `/model
 - **面向真实 Issue 的编码流程：** 在持久化会话中浏览仓库、修改代码、运行项目命令和测试，并检查最终 diff。
 - **贴合仓库的执行环境：** Agent 可检查项目配置并准备可复用 Docker 工具链；仓库命令在有资源限制的容器中运行。
 - **支持长任务：** 会话保存对话、流式草稿和工具操作恢复状态，并支持恢复；每个 session 的进程租约避免两个 Sigma 进程同时续写同一段对话。基于 Git 的代码检查点支持预览和恢复。
-- **可扩展：** 支持项目 Skills、仓库记忆、MCP 工具和 JavaScript 工作流扩展。记忆检索仍属实验能力，尚无隔离实验能证明它提高了修复成功率。
+- **可扩展：** Sigma 支持包内 Skills、单独配置的 MCP 服务、JavaScript 工作流扩展和命令行工具；JS 与命令工具共用工具目录、检索和权限执行路径。记忆检索仍属实验能力，尚无隔离实验能证明它提高了修复成功率。
 - **Go 原生 Agent Runtime：** 模型流式调用、工具生命周期、权限策略、上下文管理和工作区工具均由 Go 实现。
 
 ## Sigma 与 Pi 的关系
@@ -63,7 +63,7 @@ Sigma 从 [Pi](https://github.com/earendil-works/pi) 的 Agent Loop、工具生�
 | 主要目标 | 极简、可定制的 Coding Agent Harness | 面向仓库任务和后端集成的 Go 原生 Runtime |
 | 运行时 | TypeScript / Node.js | Go 可执行程序；默认在主机执行命令，也可选 Docker |
 | 交互方式 | 交互式 CLI、print/JSON、RPC 和 TypeScript SDK | 集成终端 TUI、单次 `--task`/JSONL 和本机 `--serve` 任务 API |
-| 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | 包内 Skills、MCP 工具，以及支持斜杠命令、Agent 工具、通知、确认和只读生命周期事件的 JavaScript 工作流扩展宿主 |
+| 扩展方式 | Extensions、Skills、提示词模板、主题和可分发的包；自定义机制与交互模式见 [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) | 包内 Skills、单独配置的 MCP 服务、JavaScript 工作流扩展和命令行工具；JS 与命令工具共用工具宿主及注册表 |
 | 执行隔离 | 默认工具与 Pi 进程使用相同权限；官方文档另行介绍可选容器/虚拟机隔离 | 文件工具直接修改所选仓库；命令默认使用 Sigma 进程权限在主机执行，也可选 Docker 隔离 |
 | 环境准备 | 使用本机工具链，或另行配置容器/沙箱 | 默认使用主机已安装的工具；Docker 模式下 Agent 可检查项目配置并准备缓存镜像 |
 | 编码任务重点与证据 | Pi 是更广泛、成熟且可定制的 Coding Agent Harness，支持多种交互方式和扩展生态 | Sigma 专注仓库 Issue 修复，提供仓库感知的 Docker 环境准备和由 Runtime 管控的测试/diff 验证；Mini 实验的范围和证据边界见下文 |
@@ -125,11 +125,11 @@ Go 可执行程序由 `cmd/sigma-agent` 负责组装，可复用的实现模块�
 
 ## 扩展能力
 
-Sigma 支持项目 Skills、MCP 工具和 JavaScript 工作流扩展，可按项目需要增加指引、外部工具和流程行为。安装方式与支持格式见[包与 MCP 服务器](docs/PACKAGES.md)。
+Sigma 的扩展生态支持项目 Skills、单独配置的 MCP 服务、JavaScript 工作流扩展和命令行工具。可复用命令工具通过 `package.json` 的 `sigma.tools` 声明；个人临时配置仍可使用 `command_tools`，两者与 JS 工具共用工具目录、检索、权限和执行生命周期。示例与格式见[包与 MCP 服务器](docs/PACKAGES.md)。
 
 ## Skills 与仓库记忆
 
-Skills 按需提供项目工作流程；仓库记忆按需检索同一仓库中经过审核的事实。记忆使用词法搜索，也可按配置增加向量检索，不会索引源码。Mini 实验尚未通过开关对照隔离出记忆对 Issue 修复率的影响。详情见[Skills 与包](docs/PACKAGES.md)、[记忆配置](docs/CONFIGURATION.md#repository-long-term-memory)、[架构说明](docs/ARCHITECTURE.md)和[Mini 记忆实验记录](evals/planned/skills-memory/repository-memory-status.md).
+Skills 按需提供项目工作流程；仓库记忆默认从本地 Markdown 做 BM25 检索，Qdrant 混合向量检索只是可选后端，不会索引源码。Mini 实验尚未通过开关对照隔离出记忆对 Issue 修复率的影响。详情见[Skills 与包](docs/PACKAGES.md)、[记忆配置](docs/CONFIGURATION.md#repository-long-term-memory)、[架构说明](docs/ARCHITECTURE.md)和[Mini 记忆实验记录](evals/planned/skills-memory/repository-memory-status.md).
 
 ## 开发
 

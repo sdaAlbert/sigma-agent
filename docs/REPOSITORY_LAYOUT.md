@@ -74,7 +74,7 @@ The repository-root files `go.mod` and `go.sum` define and lock Go dependencies;
 test itself remains in `internal/server/server_live_test.go`; the unreferenced
 `scripts/test-service-e2e.ps1` wrapper is a local convenience, is not needed to
 build Sigma, and is intentionally excluded from GitHub. Local state such as
-`.secrets/`, `.sigma-agent/`, `.learnings/`, `var/`, and `research/` is ignored
+`.secrets/`, `.sigma/`, `.sigma-agent/` (legacy), `.learnings/`, `var/`, and `research/` is ignored
 by Git and is not distributed from GitHub.
 
 The three published credential scripts are optional setup conveniences, not
@@ -84,7 +84,7 @@ configured by another supported method.
 根目录的 `go.mod`、`go.sum` 定义并锁定 Go 依赖；`config.json` 是纳入版本管理的运行配置
 示例。服务集成测试本身仍在 `internal/server/server_live_test.go`；没有被文档或工作流引用的
 `scripts/test-service-e2e.ps1` 只是本机便捷包装，不是构建 Sigma 的必需文件，现已设为仅本地保留。
-`.secrets/`、`.sigma-agent/`、`.learnings/`、`var/` 和 `research/` 等本地状态目录由 Git 忽略，
+`.secrets/`、`.sigma/`、`.sigma-agent/`（旧目录）、`.learnings/`、`var/` 和 `research/` 等本地状态目录由 Git 忽略，
 不会从 GitHub 分发。
 
 公开保留的 3 个凭据脚本只是可选配置辅助工具，不是 Sigma 的运行依赖；也可以用其他受支持的

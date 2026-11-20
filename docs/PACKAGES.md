@@ -1,7 +1,10 @@
 # Packages and MCP servers
 
-Sigma Agent can install packages and connect to MCP servers. Packages
-contribute Agent Skills and, through their MCP server, new tools.
+Sigma Agent can install packages and connect to MCP servers. Packages can
+contribute Skills, JavaScript workflow extensions, and executable-backed
+tools; MCP servers are configured separately and can launch code from an
+installed package. JavaScript and command tools enter the same Sigma tool
+host, search catalog, permission checks, and execution lifecycle.
 
 ## Install a package
 
@@ -9,7 +12,7 @@ contribute Agent Skills and, through their MCP server, new tools.
 # user scope: ~/.sigma-agent/packages/
 sigma --install npm:pi-web-access
 
-# project scope: <repo>/.sigma-agent/packages/
+# project scope: <repo>/.sigma/packages/
 sigma --install npm:pi-web-access --local --repo .
 
 sigma --list-packages
@@ -57,7 +60,58 @@ directories. Manifest entries accept glob patterns and `!` exclusions.
 | --- | --- |
 | `skills` | `SKILL.md` files are discovered and loaded on demand with `read_skill`, the same way project Skills are |
 | `extensions` | JavaScript modules are loaded into the workflow host; TypeScript must be compiled to JavaScript first |
+| `sigma.tools` | Declares command-backed Agent tools in `package.json`; each tool is exposed through the same host and registry as a JavaScript registered tool |
 | `prompts`, `themes` | Listed by `--install`; not wired into the runtime yet |
+
+### Declare a command-backed tool in a package
+
+Keep the Pi-compatible `pi` resource manifest for Skills and extensions, and
+add Sigma-specific executable tools under `sigma.tools`:
+
+```json
+{
+  "name": "repo-helper",
+  "version": "1.0.0",
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "sigma": {
+    "tools": [
+      {
+        "name": "issue_summary",
+        "description": "Summarize an issue using this package's helper",
+        "input_schema": {
+          "type": "object",
+          "properties": {"issue": {"type": "string"}},
+          "required": ["issue"],
+          "additionalProperties": false
+        },
+        "command": "node",
+        "args": ["${package}/scripts/issue_summary.mjs"],
+        "modifies_workspace": false
+      }
+    ]
+  }
+}
+```
+
+Sigma starts the configured executable directly without a shell, sends one JSON
+object on stdin, and returns bounded stdout. Arguments are fixed by the package;
+`${package}` expands to the installed package directory and `${workspace}` to
+the active repository. The process working directory is the repository, so
+relative project paths work naturally. Set `modifies_workspace` to `true` if
+the command may edit the checkout; successful calls then reopen Sigma's normal
+verification gate. Tool names must be unique across installed packages,
+configured tools, extensions, and built-ins. Tools are loaded only from
+executable package scopes; project packages require the repository to be
+trusted. Installing a package that provides executable code means trusting
+that code to run with Sigma's user permissions.
+
+The older `command_tools` runtime setting remains supported for personal,
+one-off configuration. For reusable/shareable tools, put the declaration in a
+package so tool metadata and any helper code are versioned and installed
+together. Both forms use the same command adapter and Agent registry.
 
 Skills contributed by a package are bounded by the package directory, so a
 Skill can only read reference files that ship with its own package.
@@ -121,7 +175,8 @@ Sigma executes it. The handler receives the tool name and JSON arguments. Return
 after Sigma's own configured permission checks, so it cannot override a denial.
 
 Extensions can also register Agent tools with a JSON Schema and a handler that
-returns text:
+returns text. They use the same registry and runtime policy as package-declared
+command tools:
 
 ```js
 sigma.registerTool(
@@ -141,8 +196,8 @@ sigma.registerTool(
 
 Registered tools go through Sigma's normal Agent tool policy and execution
 loop. They run sequentially by default. Set `modifiesWorkspace: true` when a
-handler changes the active repository workspace so Sigma applies its normal test and diff
-review gate. Tool names in the `mcp__` namespace are reserved for MCP adapters.
+handler changes the active repository workspace so Sigma applies its normal
+test and diff review gate. Tool names in the `mcp__` namespace are reserved for MCP adapters.
 The built-in GitHub MCP tools and configured `mcp.json` server tools are
 registered through this same host tool path; the built-in GitHub MCP integration
 is read-only.
@@ -183,7 +238,7 @@ shared by other MCP clients, so an existing configuration can be reused as is.
 | `enabled` | `false` skips the server without deleting it |
 
 Sigma Agent reads `~/.sigma-agent/mcp.json` for the user scope and
-`<repo>/.sigma-agent/mcp.json` for the project scope. A project entry replaces
+`<repo>/.sigma/mcp.json` for the project scope. A project entry replaces
 the user entry with the same server name. The Pi Agent location
 `<repo>/.pi/mcp.json` is read as well, so a Pi configuration can be reused
 unchanged.

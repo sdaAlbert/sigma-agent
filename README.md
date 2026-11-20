@@ -54,7 +54,7 @@ Runs used Skills and Memory according to their recorded configurations; they wer
 - **Issue-focused coding workflow:** Repository exploration, edits, project-native commands, tests, and final diff review are handled in a persistent Agent session.
 - **Repository-aware execution:** Sigma can inspect project setup and prepare a reusable Docker toolchain; repository commands run in a resource-bounded container.
 - **Reliable long-running work:** Sessions preserve transcripts, partial streamed text, queued messages, and tool-operation recovery state; per-session process leases prevent concurrent resumes. Git-backed code checkpoints can be previewed and restored.
-- **Extensible agent:** Project Skills, repository memory, MCP tools, and JavaScript workflow extensions let teams add context and capabilities. Memory retrieval is experimental; its effect on issue-resolution success has not been isolated.
+- **Extensible agent:** Sigma combines package Skills, separately configured MCP servers, JavaScript workflow extensions, and command-backed tools. JavaScript and command tools share one tool registry, search, and permission path. Memory retrieval is experimental; its effect on issue-resolution success has not been isolated.
 - **Go-native runtime:** A streaming model loop, tool lifecycle, permission policies, context management, and workspace tools are implemented in Go.
 
 ## How Sigma relates to Pi
@@ -66,7 +66,7 @@ Sigma takes architectural inspiration from [Pi](https://github.com/earendil-work
 | Main goal | Minimal, customizable coding-agent harness | Go-native runtime for repository tasks and backend integrations |
 | Runtime | TypeScript / Node.js | Go executable; commands run on the host by default, with optional Docker execution |
 | Interaction | Interactive CLI, print/JSON, RPC, and TypeScript SDK | Integrated terminal TUI, one-shot `--task`/JSONL, and loopback `--serve` task API |
-| Customization | Extensions, Skills, prompt templates, themes, and shareable packages; see the [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) for customization and interaction modes | Package Skills, MCP tools, and a JavaScript workflow host for slash commands, Agent tools, notifications, confirmations, and read-only lifecycle events |
+| Customization | Extensions, Skills, prompt templates, themes, and shareable packages; see the [Coding Agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) for customization and interaction modes | Package Skills, separately configured MCP servers, JavaScript workflow extensions, and command-backed tools; JS and command tools share one host and registry |
 | Execution isolation | Default tools run with the Pi process permissions; its docs describe optional container/VM sandbox setups | File tools edit the selected checkout directly; host commands use the Sigma process permissions, or optional Docker mode runs commands with the checkout mounted writable |
 | Environment preparation | Integrate the local toolchain or configure a container/sandbox separately | Use the host's installed tools by default; in Docker mode, Agent can inspect repository setup files and prepare a cached image with a selected toolchain and system packages |
 | Coding focus and evidence | A broader, mature, customizable coding-agent harness with multiple interaction modes and an extension ecosystem | Sigma focuses on repository issue repair through repository-aware Docker setup and runtime-gated test/diff verification. The Mini study's scope and evidence limits are described below. |
@@ -134,7 +134,7 @@ For the project itself, [architecture](docs/ARCHITECTURE.md) explains component 
 
 ## Extensibility
 
-Sigma supports project Skills, MCP tools, and JavaScript workflow extensions. These let teams add task-specific guidance, external tools, and workflow behavior without expanding the core coding loop. See [Packages and MCP servers](docs/PACKAGES.md) for setup and supported formats.
+Sigma can combine project Skills, separately configured MCP tools, JavaScript workflow extensions, and command-backed tools. Command tools may be declared in a package's `sigma.tools` manifest or kept in `command_tools` for personal configuration; both routes share the Agent tool registry, search, and permission lifecycle. See [Packages and MCP servers](docs/PACKAGES.md) for examples and supported formats.
 
 ## Skills and repository memory
 

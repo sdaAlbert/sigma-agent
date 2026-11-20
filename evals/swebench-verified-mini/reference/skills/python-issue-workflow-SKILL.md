@@ -67,6 +67,17 @@ the change at the layer shown by the failing behavior.
 - Read the assertion and test setup before changing expected behavior. Verify
   the final candidate through the same public path the test uses, including
   mocks, adapters, and serializers.
+- Treat concrete syntax in the issue and existing test assertions as part of the
+  acceptance contract. If the required serialized form uses subscription,
+  quoting, ordering, or another explicit representation, preserve that exact
+  form even when an alternative is runtime-equivalent.
+- Do not edit an existing expected value merely to make the implementation pass.
+  Change an expectation only when the issue explicitly changes that contract;
+  otherwise add a separate regression test and keep existing assertions intact.
+- Before reporting verification, inspect the test-file diff and run the target
+  tests with the original acceptance assertions unchanged. A locally passing
+  test whose expected value was changed to match the implementation is not
+  evidence that the original contract passes.
 - Keep lifecycle changes at the narrowest owner of the reported contract. Do
   not expand a local setter/parser behavior into constructor, persistence, or
   metadata changes unless a failing test demonstrates that those paths need to

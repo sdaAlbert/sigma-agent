@@ -39,6 +39,30 @@ func TestRecordChangeContractSchemaRequiresExecutionPath(t *testing.T) {
 	t.Fatalf("change-contract schema does not require execution path: %#v", schema.Required)
 }
 
+func TestRequiredChangeContractBlocksWritesUntilRecorded(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nconst value = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws := workspace{root: root, changeGate: newChangeContractGate(), requireChangeContract: true}
+	edit := ws.editFileTool()
+	_, err := edit.Handle(context.Background(), json.RawMessage(`{"path":"main.go","old_text":"const value = 1","new_text":"const value = 2"}`))
+	if err == nil || !strings.Contains(err.Error(), "benchmark write gate") {
+		t.Fatalf("edit before contract error = %v, want benchmark write gate", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "value = 1") {
+		t.Fatalf("write gate changed source before contract: %s", data)
+	}
+	create := ws.createFileTool()
+	if _, err := create.Handle(context.Background(), json.RawMessage(`{"path":"new.go","content":"package main"}`)); err == nil || !strings.Contains(err.Error(), "benchmark write gate") {
+		t.Fatalf("create before contract error = %v, want benchmark write gate", err)
+	}
+}
+
 func (m *scriptedToolModel) ModelID() string { return "scripted-test-model" }
 
 func (m *scriptedToolModel) Stream(_ context.Context, _ string, _ []agent.Message, tools []agent.ToolDefinition, _ func(agent.ModelEvent)) (agent.ModelResponse, error) {

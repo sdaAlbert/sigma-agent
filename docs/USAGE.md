@@ -99,7 +99,7 @@ Run `sigma --tui` to use Sigma in one Bubble Tea interface. Sigma switches to a 
 
 TUI shortcuts: `Enter` submits or accepts the highlighted suggestion, `Shift+Enter` inserts a line break, `Ctrl+L` opens the model selector, `Ctrl+R` opens the saved-session selector during setup, `Tab` completes file paths (`@path` in prompts), `Up`/`Down` navigate command/model suggestions or browse prompt history, `PageUp`/`PageDown` or the mouse wheel scroll the transcript, and `Ctrl+O` toggles expanded tool output.
 
-In Docker mode, interactive sessions reuse one foreground container; one-shot `--task` / `--resume` runs create one container per command. Background `action=start` also requires Docker mode. `/quit` removes the interactive container while keeping Docker images and `.sigma-agent/container-home` caches for the next session. Use `/settings` to change Docker network access. Non-interactive runs can set `allow_container_network` in `config.json` or pass `--allow-container-network`. These settings do not restrict host mode, Sigma's model requests, or Docker image pulls. See [Docker command environments](DOCKER.md) for details.
+In Docker mode, interactive sessions reuse one foreground container; one-shot `--task` / `--resume` runs create one container per command. Background `action=start` also requires Docker mode. `/quit` removes the interactive container while keeping Docker images and `.sigma/container-home` caches for the next session. Use `/settings` to change Docker network access. Non-interactive runs can set `allow_container_network` in `config.json` or pass `--allow-container-network`. These settings do not restrict host mode, Sigma's model requests, or Docker image pulls. See [Docker command environments](DOCKER.md) for details.
 
 ## 4. Setup commands
 
@@ -131,6 +131,7 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | `/session` | Show the current session ID. |
 | `/context` | Show loaded project instructions, the current session checkpoint, and long-term memory source, scope, entry count, capacity, and automatic-write setting. |
 | `/memory` | List long-term project facts with stable content IDs, category, source, date, and revalidation status. |
+| `/memory remember [kind] <fact>` | Save a preference, correction, or durable project fact to `.sigma/MEMORY.md` immediately. The kind defaults to `preference`. |
 | `/memory forget <id-prefix>` | Remove one selected fact from the active Markdown memory source and synchronize configured vector memory. Use at least the first 8 characters of its displayed ID. |
 | `/new` | Save the current session and return to setup to start a fresh one. |
 | `/diff` | Show a summary of changes in the active repository, compared with its starting commit. This includes pre-existing local changes. |
@@ -145,6 +146,10 @@ Once a session starts, enter normal text at `You>` to start a task. While the Ag
 | `/quit` | Stop the active turn if needed, save the session, and exit. |
 
 When a run exits, Sigma prints its session ID, snapshot path, run-artifact path, and active repository path. Use that session ID in `/resume <id>` at the next setup prompt. A session has an OS-backed exclusive lease while Sigma is using it: a second process cannot resume and write the same session until the first process exits. Sessions created by older versions that used a worktree continue to resume from their saved workspace. There is no `/sessions` listing command in the current CLI.
+
+The model-facing `search` tool has separate scopes for `session_history` (the current conversation), `prior_sessions` (older saved transcripts for the same repository), and `memory` (curated durable project facts). Prior-session search scans saved session snapshots with BM25 lexical ranking and returns source session IDs, timestamps, and message indices. It does not search other repositories or use vector embeddings; use distinctive phrases, paths, symbols, or error text for best results. Session snapshots are stored under `.sigma/sessions` relative to the directory where the Sigma process starts, not inside the selected project by default. For example, starting Sigma from `C:\dev\Agent\coding-agent-harness\go-runtime` stores them under that runtime's `.sigma\sessions`; starting it from a project folder stores them under that project's `.sigma\sessions`. Each session is a `<session-id>.json` snapshot plus a `<session-id>\` directory for metadata, logs, artifacts, and checkpoints. `--serve` uses the service's working directory in the same way.
+
+These stores have different purposes: the session snapshot is the complete transcript and recovery state; `prior_sessions` is an on-demand lexical search over saved transcripts; `.sigma/MEMORY.md` is the small, reviewed set of durable project facts. Today, prior-session search scans the saved snapshots each time and matches only sessions whose metadata names the same repository path. It is useful for recovering an old decision or exact detail, but it is not yet a curated, repository-portable long-term memory system.
 
 The `--serve` task service also takes an OS-backed lock for each canonical
 workspace. Tasks targeting the same directory wait in the service queue;
@@ -194,7 +199,10 @@ When the user explicitly asks Sigma to preserve reusable workflow guidance as a 
 
 Sigma does not execute Skill scripts when loading a Skill. A loaded Skill may describe scripts, but reading it does not launch them; commands still have to go through the normal Agent tools and tool-permission controls (and Docker controls when Docker mode is selected). Standalone root Markdown Skills have no isolated companion directory, so `read_skill` cannot load companion resources for them. Skill search, reading, and creation tools are registered whenever `skills_enabled` is true; with an empty catalog, search returns no matches and reads reject unknown names. A newly created Skill becomes discoverable after `/reload` or a session restart. Set `skills_enabled` to `false` to disable project and user Skill discovery.
 
-Sigma can install npm, git, and local packages that contribute Skills and MCP servers. See [packages and MCP servers](PACKAGES.md).
+Sigma can install npm, git, and local packages that contribute Skills, MCP
+servers, JavaScript workflow extensions, and package-declared command tools.
+New package tools are discovered when Sigma starts the next run. See [packages
+and MCP servers](PACKAGES.md).
 
 ## 7. Other ways to run Sigma
 

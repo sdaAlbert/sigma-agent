@@ -14,8 +14,9 @@ import (
 )
 
 type implementChildModel struct {
-	calls     int
-	toolNames []string
+	calls      int
+	toolNames  []string
+	gitActions []string
 }
 
 func (*implementChildModel) ModelID() string { return "implement-child-test" }
@@ -25,6 +26,17 @@ func (m *implementChildModel) Stream(_ context.Context, _ string, _ []agent.Mess
 	if m.calls == 1 {
 		for _, tool := range tools {
 			m.toolNames = append(m.toolNames, tool.Name)
+			if tool.Name == "git" {
+				var schema struct {
+					Properties struct {
+						Action struct {
+							Enum []string `json:"enum"`
+						} `json:"action"`
+					} `json:"properties"`
+				}
+				_ = json.Unmarshal(tool.InputSchema, &schema)
+				m.gitActions = schema.Properties.Action.Enum
+			}
 		}
 		return agent.ModelResponse{Content: []agent.ContentBlock{{
 			Type: "tool_use", ID: "create-file", Name: "create_file",
@@ -87,12 +99,15 @@ func TestImplementChildEditsOnlyItsWorktreeAndReportsDiffAndUsage(t *testing.T) 
 		t.Fatalf("child worktree file = %q, %v", content, err)
 	}
 
-	for _, forbidden := range []string{"run_command", "git", "delegate_investigation"} {
+	for _, forbidden := range []string{"run_command", "delegate_investigation"} {
 		for _, available := range model.toolNames {
 			if available == forbidden {
 				t.Errorf("implement child unexpectedly has tool %q", forbidden)
 			}
 		}
+	}
+	if strings.Join(model.gitActions, ",") != "status,diff,log,show,branches" {
+		t.Errorf("implement child Git actions = %v, want read-only actions", model.gitActions)
 	}
 }
 

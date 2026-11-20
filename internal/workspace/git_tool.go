@@ -66,11 +66,11 @@ func (w workspace) gitTool() agent.Tool {
 			if err != nil {
 				return "", err
 			}
-			if _, err := w.runGit(ctx, "reset", "-q", "--", agentManagedMemoryPath, sigmaContainerHomePath, sigmaCommandEnvironmentPath, sigmaRunArtifactsPath, sigmaSessionArtifactsPath); err != nil {
+			if _, err := w.runGit(ctx, "reset", "-q", "--", ".sigma", ".sigma-agent", legacySigmaRunArtifactsPath, legacySigmaSessionArtifactsPath); err != nil {
 				return "", err
 			}
 			stageArgs := append([]string{"add", "-A", "--"}, paths...)
-			stageArgs = append(stageArgs, ":(exclude)"+agentManagedMemoryPath, ":(exclude)"+sigmaContainerHomePath, ":(exclude)"+sigmaCommandEnvironmentPath, ":(exclude)"+sigmaRunArtifactsPath, ":(exclude)"+sigmaSessionArtifactsPath)
+			stageArgs = append(stageArgs, ":(exclude).sigma", ":(exclude).sigma-agent", ":(exclude)"+legacySigmaRunArtifactsPath, ":(exclude)"+legacySigmaSessionArtifactsPath)
 			return w.runGit(ctx, stageArgs...)
 		case "commit":
 			message := strings.TrimSpace(args.Message)

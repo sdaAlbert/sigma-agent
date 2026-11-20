@@ -20,6 +20,7 @@ type CommandPlugin struct {
 	InputSchema       json.RawMessage
 	Command           string
 	Args              []string
+	PackageRoot       string
 	ModifiesWorkspace bool
 }
 
@@ -75,7 +76,14 @@ func CommandPluginTools(workspace string, plugins []CommandPlugin) []Tool {
 				return nil
 			},
 			Handle: func(ctx context.Context, raw json.RawMessage) (string, error) {
-				command := exec.CommandContext(ctx, plugin.Command, plugin.Args...)
+				commandName := strings.ReplaceAll(plugin.Command, "${workspace}", workspace)
+				commandName = strings.ReplaceAll(commandName, "${package}", plugin.PackageRoot)
+				args := make([]string, len(plugin.Args))
+				for index, arg := range plugin.Args {
+					arg = strings.ReplaceAll(arg, "${workspace}", workspace)
+					args[index] = strings.ReplaceAll(arg, "${package}", plugin.PackageRoot)
+				}
+				command := exec.CommandContext(ctx, commandName, args...)
 				command.Dir = workspace
 				command.Stdin = bytes.NewReader(raw)
 				stdout := &boundedBuffer{limit: pluginOutputLimit}

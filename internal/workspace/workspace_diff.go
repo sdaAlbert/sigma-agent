@@ -13,15 +13,17 @@ import (
 	"strings"
 )
 
-const agentManagedMemoryPath = ".sigma-agent/MEMORY.md"
-const sigmaContainerHomePath = ".sigma-agent/container-home"
-const sigmaCommandEnvironmentPath = ".sigma-agent/command-environment.json"
-const sigmaRunArtifactsPath = "var/runs"
-const sigmaSessionArtifactsPath = "var/sessions"
+const agentManagedMemoryPath = ".sigma/MEMORY.md"
+const sigmaContainerHomePath = ".sigma/container-home"
+const sigmaCommandEnvironmentPath = ".sigma/command-environment.json"
+const sigmaRunArtifactsPath = ".sigma/runs"
+const sigmaSessionArtifactsPath = ".sigma/sessions"
+const legacySigmaRunArtifactsPath = "var/runs"
+const legacySigmaSessionArtifactsPath = "var/sessions"
 
 func isSigmaManagedWorkspacePath(path string) bool {
 	clean := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))), "./")
-	for _, managed := range []string{agentManagedMemoryPath, sigmaContainerHomePath, sigmaCommandEnvironmentPath, sigmaRunArtifactsPath, sigmaSessionArtifactsPath} {
+	for _, managed := range []string{".sigma", ".sigma-agent", agentManagedMemoryPath, sigmaContainerHomePath, sigmaCommandEnvironmentPath, sigmaRunArtifactsPath, sigmaSessionArtifactsPath, legacySigmaRunArtifactsPath, legacySigmaSessionArtifactsPath} {
 		if clean == managed || strings.HasPrefix(clean, managed+"/") {
 			return true
 		}
@@ -39,12 +41,12 @@ func IsSigmaManagedWorkspacePath(path string) bool {
 // memory in the candidate patch. Task worktrees are expected to begin with a
 // clean index, as benchmark sessions do.
 func stageTaskChanges(ctx context.Context, root string) error {
-	reset := exec.CommandContext(ctx, "git", "reset", "-q", "--", agentManagedMemoryPath, sigmaContainerHomePath, sigmaCommandEnvironmentPath, sigmaRunArtifactsPath, sigmaSessionArtifactsPath)
+	reset := exec.CommandContext(ctx, "git", "reset", "-q", "--", ".sigma", ".sigma-agent", legacySigmaRunArtifactsPath, legacySigmaSessionArtifactsPath)
 	reset.Dir = root
 	if output, err := reset.CombinedOutput(); err != nil {
 		return fmt.Errorf("exclude agent-managed memory from index: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	add := exec.CommandContext(ctx, "git", "add", "-A", "--", ".", ":(exclude)"+agentManagedMemoryPath, ":(exclude)"+sigmaContainerHomePath, ":(exclude)"+sigmaCommandEnvironmentPath, ":(exclude)"+sigmaRunArtifactsPath, ":(exclude)"+sigmaSessionArtifactsPath)
+	add := exec.CommandContext(ctx, "git", "add", "-A", "--", ".", ":(exclude).sigma", ":(exclude).sigma-agent", ":(exclude)"+legacySigmaRunArtifactsPath, ":(exclude)"+legacySigmaSessionArtifactsPath)
 	add.Dir = root
 	if output, err := add.CombinedOutput(); err != nil {
 		return fmt.Errorf("stage task changes: %w: %s", err, strings.TrimSpace(string(output)))
@@ -194,7 +196,7 @@ func workspaceFingerprint(root string) (string, error) {
 }
 
 func runWorkspaceDiff(root, gitIndexEnv, base string) (string, error) {
-	diff := exec.Command("git", "diff", "--no-ext-diff", "--binary", "--unified=3", base, "--", ".", ":(exclude)"+agentManagedMemoryPath, ":(exclude)"+sigmaContainerHomePath, ":(exclude)"+sigmaCommandEnvironmentPath, ":(exclude)"+sigmaRunArtifactsPath, ":(exclude)"+sigmaSessionArtifactsPath)
+	diff := exec.Command("git", "diff", "--no-ext-diff", "--binary", "--unified=3", base, "--", ".", ":(exclude).sigma", ":(exclude).sigma-agent", ":(exclude)"+legacySigmaRunArtifactsPath, ":(exclude)"+legacySigmaSessionArtifactsPath)
 	diff.Dir = root
 	if gitIndexEnv != "" {
 		diff.Env = append(os.Environ(), gitIndexEnv)

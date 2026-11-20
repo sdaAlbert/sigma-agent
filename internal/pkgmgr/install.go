@@ -17,7 +17,7 @@ type Package struct {
 	Source Source
 	// Root is the directory that holds the package contents.
 	Root string
-	// Manifest is the "pi" field of the package's package.json.
+	// Manifest contains Pi-compatible resources and Sigma-specific tools.
 	Manifest Manifest
 	// Name is the package name declared in package.json.
 	Name string

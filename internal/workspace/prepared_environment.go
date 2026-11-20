@@ -36,7 +36,7 @@ type commandEnvironmentState struct {
 }
 
 func newCommandEnvironmentState(root string) (*commandEnvironmentState, error) {
-	directory := filepath.Join(root, ".sigma-agent")
+	directory := filepath.Join(root, ".sigma")
 	state := &commandEnvironmentState{path: filepath.Join(directory, "command-environment.json")}
 	directoryInfo, err := os.Lstat(directory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -46,7 +46,7 @@ func newCommandEnvironmentState(root string) (*commandEnvironmentState, error) {
 		return nil, fmt.Errorf("inspect command environment directory: %w", err)
 	}
 	if directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
-		return nil, errors.New(".sigma-agent must be a regular workspace directory to persist command environment settings")
+		return nil, errors.New(".sigma must be a regular workspace directory to persist command environment settings")
 	}
 	info, err := os.Lstat(state.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -97,7 +97,7 @@ func (s *commandEnvironmentState) Set(image string) error {
 	}
 	info, err := os.Lstat(directory)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New(".sigma-agent must be a regular workspace directory to persist command environment settings")
+		return errors.New(".sigma must be a regular workspace directory to persist command environment settings")
 	}
 	if existing, err := os.Lstat(s.path); err == nil && (existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular()) {
 		return errors.New("command environment state path is not a regular file")

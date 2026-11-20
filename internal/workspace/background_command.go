@@ -160,8 +160,8 @@ func (m *BackgroundCommandManager) StartWithImage(ctx context.Context, image, co
 		"--label", "sigma.session-task=true", "--label", "sigma.task-id=" + id,
 		"--network", network, "--memory", "2g", "--cpus", "2", "--pids-limit", "128",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--env", "HOME=/workspace/.sigma-agent/container-home", "--env", "GOPATH=/workspace/.sigma-agent/container-home/go",
-		"--env", "GOMODCACHE=/workspace/.sigma-agent/container-home/go/pkg/mod", "--env", "GOCACHE=/workspace/.sigma-agent/container-home/go/build-cache",
+		"--env", "HOME=/workspace/.sigma/container-home", "--env", "GOPATH=/workspace/.sigma/container-home/go",
+		"--env", "GOMODCACHE=/workspace/.sigma/container-home/go/pkg/mod", "--env", "GOCACHE=/workspace/.sigma/container-home/go/build-cache",
 	}
 	args = append(args, commandContainerFilesystemArgs()...)
 	if uid, gid := os.Getuid(), os.Getgid(); uid >= 0 && gid >= 0 {

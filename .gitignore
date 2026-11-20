@@ -1,5 +1,6 @@
 # Local credentials and per-repository memory
 .secrets/
+.sigma/
 .sigma-agent/
 pat.txt
 

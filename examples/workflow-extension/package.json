@@ -4,5 +4,22 @@
   "description": "Example Sigma workflow extension",
   "pi": {
     "extensions": ["./extensions"]
+  },
+  "sigma": {
+    "tools": [
+      {
+        "name": "issue_summary",
+        "description": "Summarize an issue using the package's command helper",
+        "input_schema": {
+          "type": "object",
+          "properties": {"issue": {"type": "string", "minLength": 1}},
+          "required": ["issue"],
+          "additionalProperties": false
+        },
+        "command": "node",
+        "args": ["${package}/scripts/issue_summary.mjs"],
+        "modifies_workspace": false
+      }
+    ]
   }
 }

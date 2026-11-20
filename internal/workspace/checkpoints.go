@@ -114,7 +114,7 @@ func (c *WorkspaceCheckpoints) createUnlocked(ctx context.Context, label string,
 		return WorkspaceCheckpoint{}, false, fmt.Errorf("initialize temporary checkpoint index: %w", err)
 	}
 	addArgs := []string{"add", "-A", "--", "."}
-	for _, path := range []string{agentManagedMemoryPath, sigmaContainerHomePath, sigmaCommandEnvironmentPath, sigmaRunArtifactsPath, sigmaSessionArtifactsPath} {
+	for _, path := range []string{".sigma", ".sigma-agent", legacySigmaRunArtifactsPath, legacySigmaSessionArtifactsPath} {
 		addArgs = append(addArgs, ":(exclude)"+path)
 	}
 	if _, err := checkpointGitEnv(c.root, gitEnv, addArgs...); err != nil {
